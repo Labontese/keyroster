@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -216,6 +217,48 @@ func TestMachineCommands(t *testing.T) {
 		}
 		if code, stdout, _ := run(t, "machine", "list"); code != 0 || !strings.Contains(stdout, "names no machine") {
 			t.Fatalf("machine list after remove: exit %d, stdout %q", code, stdout)
+		}
+	})
+	// The removal hint (03-11b, OQ-4 of 03-11, D-09): a removal revokes
+	// nothing, so an installed or proposed one names revoke machine.
+	t.Run("machine_remove_prints_revoke_hint", func(t *testing.T) {
+		hint := "The certificates machine ci already holds stay valid until they expire (at most its max TTL, 2h0m0s). " +
+			"If its key may be compromised, end them with keyroster revoke machine ci (it sweeps a name that is no longer in the directory too, " +
+			"and then exits 3 because there is nothing to disable) and block the key with keyroster revoke key FILE.\n"
+		for _, proposed := range []bool{false, true} {
+			roleEnv(t, nil)
+			keyFile, _ := writeEntryKey(t, "ci")
+			if code, _, stderr := run(t, "machine", "add", "ci", "--key", keyFile, "--role", "ops", "--max-ttl", "2h", "--yes"); code != 0 {
+				t.Fatal(stderr)
+			}
+			args := []string{"machine", "remove", "ci", "--yes"}
+			if proposed {
+				args = append(args, "--out", filepath.Join(t.TempDir(), "p"))
+			}
+			code, stdout, stderr := run(t, args...)
+			if code != 0 || !strings.HasSuffix(stdout, hint) || strings.Count(stdout, hint) != 1 {
+				t.Fatalf("proposed %v: exit %d, stderr %q, stdout:\n%s; want it to end with the hint", proposed, code, stderr, stdout)
+			}
+		}
+	})
+	t.Run("machine_remove_refused_edit_prints_no_hint", func(t *testing.T) {
+		roleEnv(t, nil)
+		ciKey, _ := writeEntryKey(t, "ci")
+		for _, args := range [][]string{
+			{"role", "add", "deploy", "--max-ttl", "1h", "--yes"},
+			{"machine", "add", "ci", "--key", ciKey, "--role", "deploy", "--yes"},
+			{"role", "update", "deploy", "--max-ttl", "20h", "--yes"},
+		} {
+			if code, _, stderr := run(t, args...); code != 0 {
+				t.Fatalf("%v: %s", args, stderr)
+			}
+		}
+		code, stdout, stderr := run(t, "machine", "remove", "ci", "--yes")
+		if code == 0 || !strings.Contains(stderr, "leaves role deploy granted to no user, group or machine") {
+			t.Fatalf("exit %d, stderr %q; want the role refusal", code, stderr)
+		}
+		if strings.Contains(stdout+stderr, "revoke machine") || strings.Contains(stdout+stderr, "stay valid until they expire") {
+			t.Fatalf("a refused edit printed the hint:\n%s%s", stdout, stderr)
 		}
 	})
 }

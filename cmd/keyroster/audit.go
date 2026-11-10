@@ -108,6 +108,8 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 
 // printVerifyOK prints the OK line and, when the log holds host
 // certificates (03-09), the line "host certificates: N" after it, then,
+// when it holds machine certificates (03-11b, b-C12), "machine
+// certificates: N", then,
 // when it holds probe certificates (03-10c, owner answer P2), the line
 // "probe certificates: N, negative probes no published KRL lists yet: M".
 // issued counts admin issuances (issue entries) only; login certificates,
@@ -124,6 +126,11 @@ func printVerifyOK(w io.Writer, res verifyResult, rep *audit.Report) error {
 	}
 	if n := rep.Counts[tlog.KindHostIssue]; n > 0 {
 		if _, err := fmt.Fprintf(w, "host certificates: %d\n", n); err != nil {
+			return err
+		}
+	}
+	if n := rep.Counts[tlog.KindMachineIssue]; n > 0 {
+		if _, err := fmt.Fprintf(w, "machine certificates: %d\n", n); err != nil {
 			return err
 		}
 	}

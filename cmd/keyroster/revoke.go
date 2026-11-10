@@ -27,14 +27,14 @@ import (
 func init() {
 	register(command{
 		Name:    "revoke",
-		Summary: "revoke certificates (serial, key-id), a key (key), every certificate of a user (user) or of a host (host); the signer publishes a new KRL. recover: recover the revocations a signer restore lost (offline)",
+		Summary: "revoke certificates (serial, key-id), a key (key), every certificate of a user (user), a host (host) or a machine (machine); the signer publishes a new KRL. recover: recover the revocations a signer restore lost (offline)",
 		Run:     runRevoke,
 	})
 }
 
 func runRevoke(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "revoke: want a subcommand: serial, key-id, key, user, host or recover")
+		_, _ = fmt.Fprintln(stderr, "revoke: want a subcommand: serial, key-id, key, user, host, machine or recover")
 		return errUsage
 	}
 	switch args[0] {
@@ -48,11 +48,13 @@ func runRevoke(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return runRevokeUser(ctx, args[1:], stdout, stderr)
 	case "host":
 		return runRevokeHost(ctx, args[1:], stdout, stderr)
+	case "machine":
+		return runRevokeMachine(ctx, args[1:], stdout, stderr)
 	case "recover":
 		// Offline (03-06b): no server call; see recover.go.
 		return runRevokeRecover(ctx, args[1:], stdout, stderr)
 	default:
-		_, _ = fmt.Fprintf(stderr, "revoke: unknown subcommand %q; want serial, key-id, key, user, host or recover\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "revoke: unknown subcommand %q; want serial, key-id, key, user, host, machine or recover\n", args[0])
 		return errUsage
 	}
 }
@@ -562,36 +564,171 @@ func runRevokeUser(ctx context.Context, args []string, stdout, stderr io.Writer)
 	return nil
 }
 
-// Sentinels of revoke host's directory step, returned by its mutate
-// function before anything is signed.
+// Sentinels of the directory step of revoke host and revoke machine,
+// returned by its mutate function before anything is signed.
 var (
 	errHostAlreadyDisabled = errors.New("already disabled")
 	errHostNotInDirectory  = errors.New("not in the installed directory")
 )
 
-// recoveryKeptNotice ends every revoke host run that sent a request, and
+// recoveryKeptNotice ends every revoke host and revoke machine run that
+// sent a request (03-11b), and
 // every loss revoke (03-09b, owner decision): a signer recovery keeps lost
 // host certificates unless --revoke-lost names them, and those are in
 // neither the issuance table nor audit's subject index.
 const recoveryKeptNotice = "Certificates that a signer recovery kept are not covered by this revoke: revoke each with keyroster revoke key FILE " +
 	"(revoke.md, section 3; the recovery summary prints the key, section 7). --keys covers a key still in the entry."
 
+// revokeKind is what revoke host and revoke machine differ in (03-11b,
+// PD8): runRevokeEntry runs both, so the steps, the exit codes, the base
+// floor and the early refusal are one code path, and every text that
+// differs is the kind's own. The host values are the texts revoke host
+// printed before machines existed, unchanged.
+type revokeKind struct {
+	kind     string // "host" or "machine": the subcommand and the name's label
+	subject  wire.SubjectKind
+	role     wire.CARole
+	keyLabel string // "host key" or "machine key", for revokeHostKey and the omissions
+	// entry finds name in d: the entry's keys, sorted, and its status, which
+	// the directory step sets to disabled.
+	entry func(d *directory.Directory, name string) (keys []string, status *string, ok bool)
+	// precheck refuses a name before anything is sent (nil: none).
+	precheck func(name string, stderr io.Writer) error
+	// formerNames is printed before the recovery notice on every run that
+	// sent a request (nil: none).
+	formerNames func(name string) string
+
+	yesHelp, keysHelp, wantName, refuseNoTerminal, noKeys string
+	keysUnreadable, keysNoEntry, unknown, hold            func(name string) string
+	successTail                                           string
+}
+
+// hostRevokeKind is revoke host (03-09b, D2): every live certificate of the
+// host, the host disabled, its host keys with --keys. The host's agent
+// keeps receiving state until keyroster host forget: nothing here makes the
+// server refuse it.
+var hostRevokeKind = revokeKind{
+	kind: "host", subject: wire.SubjectHost, role: wire.CARoleHost, keyLabel: "host key",
+	entry: func(d *directory.Directory, name string) ([]string, *string, bool) {
+		h, ok := d.HostByName(name)
+		if !ok {
+			return nil, nil, false
+		}
+		return slices.Sorted(slices.Values(h.Keys)), &h.Status, true
+	},
+	yesHelp:          "sign the directory version that disables the host without asking (needed when stdin is not a terminal)",
+	keysHelp:         "also revoke the host keys of the entry as explicit keys (a compromised host key; explicit keys never leave the KRL)",
+	wantName:         "revoke host: want exactly one host name",
+	refuseNoTerminal: "refusing to start: disabling the host signs a directory version, and stdin is not a terminal; re-run with --yes. Nothing was revoked",
+	noKeys:           "No host key was revoked as an explicit key (use --keys for a compromised host key; explicit keys never leave the KRL).",
+	keysUnreadable: func(name string) string {
+		return "--keys: the verified directory could not be read, so no host key of " + name + " is known; revoke a key file with keyroster revoke key FILE"
+	},
+	keysNoEntry: func(name string) string {
+		return "--keys: " + name + " has no entry, so no host keys are known; revoke a key file with keyroster revoke key FILE"
+	},
+	unknown: func(name string) string {
+		return fmt.Sprintf("Its live certificates are revoked as reported above. If %s was removed, its agent may still be enrolled and still receives state: "+
+			"end that with keyroster host forget.\n", name)
+	},
+	hold: func(name string) string {
+		return fmt.Sprintf("Revoked, disable pending. The certificates of %s are revoked, and the signer refuses %s's host keys new certificates (cert_revoked) "+
+			"until a directory version newer than the one it holds is installed. ANY newer version releases that hold: install this proposal "+
+			"(which disables %s) as the next version; if another version is installed first, %s can obtain certificates again while still active. "+
+			"Once it is installed, run keyroster revoke host %s again: its second sweep revokes anything issued in between. "+
+			"A host key with no certificate yet is not held", name, name, name, name, name)
+	},
+	successTail: "The host's agent keeps receiving state, and this KRL, until keyroster host forget.\n",
+}
+
+// machineRevokeKind is revoke machine (03-11b, D-09, D-12): every live
+// certificate of the machine name, the entry disabled, the entry's key
+// with --keys. The signer holds the name and the key's latest certificate
+// once a certificate is revoked (03-11's default 2 and its amendment), so
+// the exit-4 text names both holds and what releases them.
+var machineRevokeKind = revokeKind{
+	kind: "machine", subject: wire.SubjectMachine, role: wire.CARoleMachine, keyLabel: "machine key",
+	entry: func(d *directory.Directory, name string) ([]string, *string, bool) {
+		m, ok := d.MachineByName(name)
+		if !ok {
+			return nil, nil, false
+		}
+		return []string{m.Key}, &m.Status, true
+	},
+	// Probe certificates share the machine CA and are never revoked by
+	// subject (D-06): without this check the first sweep would be refused
+	// (subject_reserved) while the directory step still ran (b-C7).
+	precheck: func(name string, stderr io.Writer) error {
+		if !strings.HasPrefix(name, "probe.") {
+			return nil
+		}
+		_, _ = fmt.Fprintf(stderr, "revoke machine: %q: machine names starting with probe. are reserved for probe certificates, "+
+			"which are never revoked by subject; nothing was revoked\n", name)
+		return errUsage
+	},
+	// The CLI cannot see former names: the admin API serves only the
+	// installed directory (T-03-72, a stated residual; b-C9).
+	formerNames: func(name string) string {
+		return fmt.Sprintf("Certificates that %s's key obtained under a former machine name are not covered: run keyroster revoke machine OLDNAME for each former name, "+
+			"or use --keys while the key is in %s's entry.", name, name)
+	},
+	yesHelp:          "sign the directory version that disables the machine without asking (needed when stdin is not a terminal)",
+	keysHelp:         "also revoke the machine key of the entry as an explicit key (a compromised machine key; explicit keys never leave the KRL)",
+	wantName:         "revoke machine: want exactly one machine name",
+	refuseNoTerminal: "refusing to start: disabling the machine signs a directory version, and stdin is not a terminal; re-run with --yes. Nothing was revoked",
+	noKeys:           "No machine key was revoked as an explicit key (use --keys for a compromised machine key; explicit keys never leave the KRL).",
+	keysUnreadable: func(name string) string {
+		return "--keys: the verified directory could not be read, so no machine key of " + name + " is known; revoke a key file with keyroster revoke key FILE"
+	},
+	keysNoEntry: func(name string) string {
+		return "--keys: " + name + " has no entry, so no machine key is known; revoke a key file with keyroster revoke key FILE"
+	},
+	unknown: func(string) string {
+		return "Its live certificates are revoked as reported above. A machine that is not in the directory obtains no new certificate under this name; " +
+			"if its key is now listed under another name, run keyroster revoke machine OTHERNAME.\n"
+	},
+	hold: func(name string) string {
+		return fmt.Sprintf("Revoked, disable pending. The certificates of %s are revoked, and the signer refuses %s new certificates (cert_revoked) "+
+			"until a directory version newer than the one it holds is installed: by its name, whether or not a certificate was live, and on its key's latest certificate. "+
+			"ANY newer version releases both holds: install this proposal (which disables %s) as the next version; "+
+			"if another version is installed first, %s can obtain certificates again while still active. "+
+			"Once it is installed, run keyroster revoke machine %s again: its second sweep revokes anything issued in between. "+
+			"--keys blocks the key for good (machine_key_revoked). "+
+			"After a signer restore, run this command again once the last lost directory version is back (docs/runbooks/revoke.md, section 4c)",
+			name, name, name, name, name)
+	},
+}
+
 // runRevokeHost is keyroster revoke host NAME [--keys] [--yes] [--out DIR]
 // [--reason TEXT] [--admin-key FP] (03-09b, D2, REVOKE-01's host
-// subject): every live certificate of the host, the host disabled, the
-// host keys as explicit keys when --keys asks, then the certificates
-// issued in between.
+// subject), runRevokeEntry with the host kind.
+func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	return runRevokeEntry(ctx, hostRevokeKind, args, stdout, stderr)
+}
+
+// runRevokeMachine is keyroster revoke machine NAME [--keys] [--yes] [--out
+// DIR] [--reason TEXT] [--admin-key FP] (03-11b, D-09, D-12, REVOKE-01's
+// machine subject), runRevokeEntry with the machine kind.
+func runRevokeMachine(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	return runRevokeEntry(ctx, machineRevokeKind, args, stdout, stderr)
+}
+
+// runRevokeEntry is revoke host and revoke machine (03-11b, PD8): every
+// live certificate of the entry, the entry disabled, its keys as explicit
+// keys when --keys asks, then the certificates issued in between.
 //
-//  1. The first sweep: a subject revocation of NAME under the host CA
-//     (the signer resolves its kr1 and kr3 certificates from its issuance
-//     records), checked in the verified KRL under a host CA key.
+//  1. The first sweep: a subject revocation of NAME under the kind's CA
+//     (the signer resolves its certificates from its issuance records),
+//     checked in the verified KRL under a CA key of that role.
 //  2. The directory step, also after a failed first sweep: NAME disabled
 //     in a signed version (installed at quorum 1, a proposal otherwise),
-//     or already disabled, or not in the directory.
+//     or already disabled, or not in the directory. The served directory
+//     must not be older than the admin's host trust state
+//     (checkHostTrustFloor).
 //  3. With --keys, when the first sweep succeeded and the step found the
-//     entry: one key revocation per host key of the verified entry (never
-//     the server's enrolled keys). A refused key is omitted with its
-//     reason and the next one is still tried.
+//     entry: one key revocation per key of the verified entry (never the
+//     server's enrolled keys). A refused key is omitted with its reason
+//     and the next one is still tried.
 //  4. The second sweep, after an installed disable or an entry already
 //     disabled.
 //
@@ -599,39 +736,44 @@ const recoveryKeptNotice = "Certificates that a signer recovery kept are not cov
 // failed; 3 for a partial result (the directory step failed, the second
 // sweep failed, an unknown name, any key omitted); 4 when only the
 // disable is pending as a proposal. 3 beats 4 (both texts print) and 1
-// beats both. The host's agent keeps receiving state until keyroster host
-// forget: nothing here makes the server refuse it.
-func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	fset := flag.NewFlagSet("revoke host", flag.ContinueOnError)
+// beats both.
+func runRevokeEntry(ctx context.Context, k revokeKind, args []string, stdout, stderr io.Writer) error {
+	cmd := "revoke " + k.kind
+	fset := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fset.SetOutput(stderr)
-	yes := fset.Bool("yes", false, "sign the directory version that disables the host without asking (needed when stdin is not a terminal)")
+	yes := fset.Bool("yes", false, k.yesHelp)
 	out := fset.String("out", "", "write the disable as a proposal directory for co-signing instead of installing it")
-	keys := fset.Bool("keys", false, "also revoke the host keys of the entry as explicit keys (a compromised host key; explicit keys never leave the KRL)")
+	keys := fset.Bool("keys", false, k.keysHelp)
 	f := addRevokeFlags(fset)
 	pos, err := parseInterspersed(fset, args)
 	if err != nil {
 		return errUsage
 	}
 	if len(pos) != 1 {
-		_, _ = fmt.Fprintln(stderr, "revoke host: want exactly one host name")
+		_, _ = fmt.Fprintln(stderr, k.wantName)
 		return errUsage
 	}
 	name := pos[0]
 	if !directory.ValidUserName(name) {
-		return errHostName("host", name)
+		return errHostName(k.kind, name)
+	}
+	if k.precheck != nil {
+		if err := k.precheck(name, stderr); err != nil {
+			return err
+		}
 	}
 	// The directory step signs a version, which needs consent; refuse
 	// before anything is revoked rather than revoke and stop half-way.
 	if !*yes && !stdinIsTerminal() {
-		return errors.New("refusing to start: disabling the host signs a directory version, and stdin is not a terminal; re-run with --yes. Nothing was revoked")
+		return errors.New(k.refuseNoTerminal)
 	}
 	subject := func() (*wire.RevokeRequest, error) {
-		req := &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectHost, Subject: name}
+		req := &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: k.subject, Subject: name}
 		return req, checkRevokeRequest(req, *f.reason)
 	}
 	first, err := subject()
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "revoke host: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
 		return errUsage
 	}
 	r, err := openRevocation(ctx, *f.adminKey, stderr)
@@ -640,20 +782,25 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	defer r.s.close()
 	// Every path from here sent a request, so the output ends with the
-	// recovery notice.
-	defer func() { _, _ = fmt.Fprintln(stdout, recoveryKeptNotice) }()
+	// former-name line of the kind, if any, and the recovery notice.
+	defer func() {
+		if k.formerNames != nil {
+			_, _ = fmt.Fprintln(stdout, k.formerNames(name))
+		}
+		_, _ = fmt.Fprintln(stdout, recoveryKeptNotice)
+	}()
 
 	// 1. The first sweep.
-	_, firstErr := r.sweepSubject(ctx, first, wire.CARoleHost, name, "First revocation", stdout, stderr)
+	_, firstErr := r.sweepSubject(ctx, first, k.role, name, "First revocation", stdout, stderr)
 
 	// 2. The directory step. served is the version the server serves (0:
-	// none), entryKeys the verified entry's host keys.
+	// none), entryKeys the verified entry's keys.
 	var (
-		served     uint64
-		dirRead    bool
-		found      bool
-		entryKeys  []string
-		hostStatus string
+		served      uint64
+		dirRead     bool
+		found       bool
+		entryKeys   []string
+		entryStatus string
 	)
 	var floorNote string
 	floor := func(base *verifiedDirectory) (err error) {
@@ -662,16 +809,16 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	outcome, dirErr := editDirectoryOutcome(ctx, r.s, editOpts{Yes: *yes, Out: *out, CheckBase: floor}, stdout, func(d *directory.Directory, _ *trust.Policy) error {
 		dirRead, served = true, d.Version-1
-		h, ok := d.HostByName(name)
+		ks, status, ok := k.entry(d, name)
 		if !ok {
 			return errHostNotInDirectory
 		}
-		found, hostStatus = true, h.Status
-		entryKeys = slices.Sorted(slices.Values(h.Keys))
-		if h.Status == directory.StatusDisabled {
+		found, entryStatus = true, *status
+		entryKeys = ks
+		if *status == directory.StatusDisabled {
 			return errHostAlreadyDisabled
 		}
-		h.Status = directory.StatusDisabled
+		*status = directory.StatusDisabled
 		return nil
 	})
 	unknown := errors.Is(dirErr, errHostNotInDirectory)
@@ -680,7 +827,7 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 	case already:
 		_, _ = fmt.Fprintf(stdout, "Directory version %d, the admin-signed version the server serves, lists %s as %s: no directory change. "+
 			"That is the server's word: the CLI checks the admins' signatures, not that the signer holds that version, and %s.\n",
-			served, name, hostStatus, floorNote)
+			served, name, entryStatus, floorNote)
 	case unknown && served == 0:
 		_, _ = fmt.Fprintf(stdout, "%s is in no directory: the server serves none, so there is no entry to disable. "+
 			"That is the server's word: nothing admin-signed shows what the signer holds, and %s.\n", name, floorNote)
@@ -691,39 +838,38 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if firstErr != nil {
 		switch {
 		case already || unknown:
-			return fmt.Errorf("nothing is reported revoked: %w. Run keyroster revoke host %s again", firstErr, name)
+			return fmt.Errorf("nothing is reported revoked: %w. Run keyroster %s %s again", firstErr, cmd, name)
 		case dirErr != nil:
-			return fmt.Errorf("nothing is reported revoked: %w. The directory step failed too, so %s is NOT disabled (%w). Run keyroster revoke host %s again",
-				firstErr, name, dirErr, name)
+			return fmt.Errorf("nothing is reported revoked: %w. The directory step failed too, so %s is NOT disabled (%w). Run keyroster %s %s again",
+				firstErr, name, dirErr, cmd, name)
 		case outcome == editProposed:
-			return fmt.Errorf("nothing is reported revoked: %w. The disable is only a proposal; once it is installed, run keyroster revoke host %s again", firstErr, name)
+			return fmt.Errorf("nothing is reported revoked: %w. The disable is only a proposal; once it is installed, run keyroster %s %s again", firstErr, cmd, name)
 		}
-		return fmt.Errorf("nothing is reported revoked: %w. %s is disabled now, so its keys obtain no new certificate; run keyroster revoke host %s again", firstErr, name, name)
+		return fmt.Errorf("nothing is reported revoked: %w. %s is disabled now, so its keys obtain no new certificate; run keyroster %s %s again", firstErr, name, cmd, name)
 	}
 	var partial []string
 	if unknown {
-		_, _ = fmt.Fprintf(stdout, "Its live certificates are revoked as reported above. If %s was removed, its agent may still be enrolled and still receives state: "+
-			"end that with keyroster host forget.\n", name)
+		_, _ = io.WriteString(stdout, k.unknown(name))
 		partial = append(partial, fmt.Sprintf("%s is not in the directory, so nothing was disabled", name))
 	}
 
-	// 3. The host keys, with --keys.
+	// 3. The entry's keys, with --keys.
 	switch {
 	case !*keys:
-		_, _ = fmt.Fprintln(stdout, "No host key was revoked as an explicit key (use --keys for a compromised host key; explicit keys never leave the KRL).")
+		_, _ = fmt.Fprintln(stdout, k.noKeys)
 	case found:
-		for _, k := range entryKeys {
-			if err := r.revokeHostKey(ctx, k, *f.reason, stdout, stderr); err != nil {
-				partial = append(partial, fmt.Sprintf("host key %s was not revoked as an explicit key: %v", hostKeyFingerprint(k), err))
+		for _, key := range entryKeys {
+			if err := r.revokeHostKey(ctx, k.keyLabel, key, *f.reason, stdout, stderr); err != nil {
+				partial = append(partial, fmt.Sprintf("%s %s was not revoked as an explicit key: %v", k.keyLabel, hostKeyFingerprint(key), err))
 			}
 		}
 	case !dirRead:
-		partial = append(partial, "--keys: the verified directory could not be read, so no host key of "+name+" is known; revoke a key file with keyroster revoke key FILE")
+		partial = append(partial, k.keysUnreadable(name))
 	default:
-		partial = append(partial, "--keys: "+name+" has no entry, so no host keys are known; revoke a key file with keyroster revoke key FILE")
+		partial = append(partial, k.keysNoEntry(name))
 	}
 	if dirErr != nil && !already && !unknown {
-		partial = append(partial, fmt.Sprintf("%s is NOT disabled: %v. %s can still obtain certificates; run keyroster revoke host %s again", name, dirErr, name, name))
+		partial = append(partial, fmt.Sprintf("%s is NOT disabled: %v. %s can still obtain certificates; run keyroster %s %s again", name, dirErr, name, cmd, name))
 	}
 
 	// 4. The second sweep, after the install the server reported or the
@@ -735,22 +881,18 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 		}
 		second, err := subject()
 		if err == nil {
-			_, err = r.sweepSubject(ctx, second, wire.CARoleHost, name, label, stdout, stderr)
+			_, err = r.sweepSubject(ctx, second, k.role, name, label, stdout, stderr)
 		}
 		if err != nil {
 			partial = append(partial, fmt.Sprintf("the second revocation failed: %v; certificates issued since the first revocation may still be live; "+
-				"run keyroster revoke host %s again", err, name))
+				"run keyroster %s %s again", err, cmd, name))
 		}
 	}
 
 	pending := dirErr == nil && outcome == editProposed
 	var hold string
 	if pending {
-		hold = fmt.Sprintf("Revoked, disable pending. The certificates of %s are revoked, and the signer refuses %s's host keys new certificates (cert_revoked) "+
-			"until a directory version newer than the one it holds is installed. ANY newer version releases that hold: install this proposal "+
-			"(which disables %s) as the next version; if another version is installed first, %s can obtain certificates again while still active. "+
-			"Once it is installed, run keyroster revoke host %s again: its second sweep revokes anything issued in between. "+
-			"A host key with no certificate yet is not held", name, name, name, name, name)
+		hold = k.hold(name)
 	}
 	switch {
 	case len(partial) > 0:
@@ -766,9 +908,9 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if already {
 		state = fmt.Sprintf("Directory version %d lists %s as disabled (the server's word)", served, name)
 	}
-	_, _ = fmt.Fprintf(stdout, "%s, and the KRL lists every certificate of %s the server reported. %s\n"+
-		"The host's agent keeps receiving state, and this KRL, until keyroster host forget.\n",
-		state, name, revokeEnforcement(wire.CARoleHost))
+	_, _ = fmt.Fprintf(stdout, "%s, and the KRL lists every certificate of %s the server reported. %s\n",
+		state, name, revokeEnforcement(k.role))
+	_, _ = io.WriteString(stdout, k.successTail)
 	return nil
 }
 
@@ -814,10 +956,11 @@ func hostKeyFingerprint(k string) string {
 	return ssh.FingerprintSHA256(pub)
 }
 
-// revokeHostKey revokes one host key of a verified entry as an explicit
-// key (TargetKey: the cap, key_is_ca_of_this_installation and audit's
-// derivation apply unchanged) and confirms it in the verified KRL.
-func (r *revocation) revokeHostKey(ctx context.Context, k, reason string, stdout, stderr io.Writer) error {
+// revokeHostKey revokes one key of a verified entry as an explicit key
+// (TargetKey: the cap, key_is_ca_of_this_installation and audit's
+// derivation apply unchanged) and confirms it in the verified KRL. label
+// names the key in the output: "host key" or "machine key" (03-11b).
+func (r *revocation) revokeHostKey(ctx context.Context, label, k, reason string, stdout, stderr io.Writer) error {
 	pub, err := trust.ParseKey(k)
 	if err != nil {
 		return err
@@ -827,25 +970,26 @@ func (r *revocation) revokeHostKey(ctx context.Context, k, reason string, stdout
 	if err := checkRevokeRequest(req, reason); err != nil {
 		return err
 	}
-	c, err := r.send(ctx, req, "host key "+fp, stderr, func(_ serverclient.RevokeAnswer, m *krl.Manifest, p *krl.Parsed) error {
+	c, err := r.send(ctx, req, label+" "+fp, stderr, func(_ serverclient.RevokeAnswer, m *krl.Manifest, p *krl.Parsed) error {
 		if !p.RevokesKey(key) {
-			return notListed(m, "host key "+fp)
+			return notListed(m, label+" "+fp)
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(stdout, "The server reports host key %s revoked as an explicit key: KRL v%d published (log entries %d, %d).\n",
-		fp, c.ans.KRLVersion, c.ans.RevokeLeaf, c.ans.PublishLeaf)
-	printConfirmed(stdout, c, "host key "+fp+" as an explicit key, so it revokes that key plain and in every certificate for it, permanently")
+	_, _ = fmt.Fprintf(stdout, "The server reports %s %s revoked as an explicit key: KRL v%d published (log entries %d, %d).\n",
+		label, fp, c.ans.KRLVersion, c.ans.RevokeLeaf, c.ans.PublishLeaf)
+	printConfirmed(stdout, c, label+" "+fp+" as an explicit key, so it revokes that key plain and in every certificate for it, permanently")
 	return nil
 }
 
 // sweepSubject sends one subject revocation of name, checks that the
 // verified KRL lists every serial the answer reports under a CA key of
 // role (the user role for revoke user, the host role for revoke host and
-// the loss revokes, 03-09b), and prints the answer's serials and what was
+// the loss revokes, 03-09b, the machine role for revoke machine, 03-11b),
+// and prints the answer's serials and what was
 // checked, headed by label.
 func (r *revocation) sweepSubject(ctx context.Context, req *wire.RevokeRequest, role wire.CARole, name, label string, stdout, stderr io.Writer) (*confirmedRevoke, error) {
 	c, err := r.send(ctx, req, "the certificates of "+name, stderr, func(ans serverclient.RevokeAnswer, m *krl.Manifest, p *krl.Parsed) error {
@@ -965,7 +1109,9 @@ var revokeRefusals = map[string]string{
 		"Revoke the key's certificates by serial or key ID instead and remove the key from authorized_keys by hand; see docs/runbooks/revoke.md",
 	"key_is_ca_of_this_installation": "the key is a key of this installation's trust bundle (a CA, ops, log or root key), which is never revoked as a key; nothing was revoked. " +
 		"A compromised CA key is replaced by the emergency CA rotation (03-13)",
-	"subject_kind_unsupported": "this signer revokes user and host subjects only (subject_kind_unsupported); nothing was revoked",
+	"subject_kind_unsupported": "this signer does not revoke this kind of subject (subject_kind_unsupported): it is older than this CLI; " +
+		"machine subjects need a signer with machine certificates. Upgrade keyroster-signer, then keyroster-server; nothing was revoked by that request",
+	"subject_reserved": "the signer refuses a subject revocation of a probe. name (subject_reserved); nothing was revoked",
 	"revoke_installation_missing": "the signer received the request without an installation ID (revoke_installation_missing), but this CLI always names one, " +
 		"so the request did not reach the signer unchanged; nothing was revoked",
 	"revoke_installation_mismatch": "the signer belongs to another installation than the trust bundle your root pins verify (revoke_installation_mismatch); nothing was revoked. " +
