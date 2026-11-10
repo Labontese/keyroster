@@ -142,6 +142,27 @@ func ProbeIssue(ctx context.Context, socket string, req *wire.ProbeIssueRequest)
 	return Client{Socket: socket}.ProbeIssue(ctx, req)
 }
 
+// MachineIssue sends a machine certificate request (03-11) to the signer
+// and returns the issued certificate. A refusal comes back as a
+// *wire.ErrorResponse error.
+func (c Client) MachineIssue(ctx context.Context, req *wire.MachineIssueRequest) (*wire.IssueResponse, error) {
+	body, err := req.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := c.roundTrip(ctx, wire.TypeMachineIssueRequest, body, wire.TypeIssueResponse)
+	if err != nil {
+		return nil, err
+	}
+	return wire.ParseIssueResponse(respBody)
+}
+
+// MachineIssue is Client{Socket: socket}.MachineIssue: the call returns as
+// soon as the response frame is read.
+func MachineIssue(ctx context.Context, socket string, req *wire.MachineIssueRequest) (*wire.IssueResponse, error) {
+	return Client{Socket: socket}.MachineIssue(ctx, req)
+}
+
 // InstallDirectory sends an admin-signed directory version to the signer
 // and returns what it installed. A refusal comes back as a
 // *wire.ErrorResponse error.

@@ -50,8 +50,10 @@ type Kind uint8
 // certificate issued to a host agent by proof of possession. Kind 12
 // joined format v1 in Phase 3 (03-10): ProbeIssue records a probe
 // certificate issued to a host agent by proof of possession, and for a
-// negative probe the revocation of its own serial. Kinds 13 and 14 stay
-// reserved for 03-11 and 03-12, which add them to the valid set (valid).
+// negative probe the revocation of its own serial. Kind 13 joined format
+// v1 in Phase 3 (03-11): MachineIssue records a machine certificate issued
+// by proof of possession of the machine's key. Kind 14 stays reserved for
+// 03-12, which adds it to the valid set (valid).
 // A reader that has no check for a kind must refuse it, never
 // skip it (audit verify does). docs/format-registry.md allocates the
 // numbers; TestFormatRegistry fails when it and these constants disagree.
@@ -68,13 +70,15 @@ const (
 	KindKRLPublish       Kind = 10
 	// KindHostIssue (03-09) takes its reserved number.
 	KindHostIssue Kind = 11
-	// KindProbeIssue (03-10) takes its reserved number; 13 and 14 belong
-	// to 03-11 and 03-12.
+	// KindProbeIssue (03-10) takes its reserved number.
 	KindProbeIssue Kind = 12
+	// KindMachineIssue (03-11) takes its reserved number; 14 belongs to
+	// 03-12.
+	KindMachineIssue Kind = 13
 	// 15 (03-06b) was the first free number: 11 to 14 belonged to 03-09
 	// to 03-12.
 	KindRevocationRecovery Kind = 15
-	// 16 (03-08c) comes after 15; 13 and 14 stay 03-11 and 03-12's.
+	// 16 (03-08c) comes after 15; 14 stays 03-12's.
 	KindHostForget Kind = 16
 )
 
@@ -105,6 +109,8 @@ func (k Kind) String() string {
 		return "host_issue"
 	case KindProbeIssue:
 		return "probe_issue"
+	case KindMachineIssue:
+		return "machine_issue"
 	case KindRevocationRecovery:
 		return "revocation_recovery"
 	case KindHostForget:
@@ -115,9 +121,9 @@ func (k Kind) String() string {
 }
 
 // valid reports whether k is a kind of format v1. It is an explicit set:
-// 1 to 12, 15 and 16. Kinds 13 and 14 are added by 03-11 and 03-12.
+// 1 to 13, 15 and 16. Kind 14 is added by 03-12.
 func (k Kind) valid() bool {
-	return (k >= KindIssue && k <= KindProbeIssue) || k == KindRevocationRecovery || k == KindHostForget
+	return (k >= KindIssue && k <= KindMachineIssue) || k == KindRevocationRecovery || k == KindHostForget
 }
 
 // Size limits enforced by the encoders and the strict decoders.
@@ -242,6 +248,8 @@ func checkBody(k Kind, body []byte) error {
 		_, err = DecodeHostIssueBody(body)
 	case KindProbeIssue:
 		_, err = DecodeProbeIssueBody(body)
+	case KindMachineIssue:
+		_, err = DecodeMachineIssueBody(body)
 	default:
 		err = fmt.Errorf("%w: unknown kind %d", ErrMalformedLeaf, k)
 	}
@@ -836,6 +844,101 @@ func DecodeHostIssueBody(data []byte) (*HostIssueBody, error) {
 	s := cryptobyte.String(data)
 	var (
 		b        HostIssueBody
+		request  cryptobyte.String
+		evidence cryptobyte.String
+		certB    cryptobyte.String
+		keyID    []byte
+	)
+	if !s.ReadUint64(&b.Serial) || !s.ReadUint64(&b.PolicyVersion) || !s.ReadUint64(&b.DirectoryVersion) ||
+		!s.ReadUint64(&b.CapSeconds) || !s.ReadUint24LengthPrefixed(&request) || !s.ReadUint24LengthPrefixed(&evidence) ||
+		!s.ReadUint24LengthPrefixed(&certB) || !read16(&s, &keyID, MaxKeyID) || !s.Empty() {
+		return nil, ErrMalformedLeaf
+	}
+	for !evidence.Empty() {
+		if len(b.Evidence) == wire.MaxEvidence {
+			return nil, fmt.Errorf("%w: too many evidence items", ErrMalformedLeaf)
+		}
+		var typ, blob []byte
+		if !read16(&evidence, &typ, wire.MaxEvidenceType) || len(typ) == 0 ||
+			!read16(&evidence, &blob, wire.MaxEvidenceBlob) {
+			return nil, ErrMalformedLeaf
+		}
+		b.Evidence = append(b.Evidence, wire.Evidence{Type: string(typ), Blob: blob})
+	}
+	b.Request = append([]byte(nil), request...)
+	b.Cert = append([]byte(nil), certB...)
+	b.KeyID = string(keyID)
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// MachineIssueBody records one machine certificate issued by proof of
+// possession of the machine's key (kind 13, 03-11): the serial, the policy
+// and directory versions the signer issued it under, CapSeconds (the
+// lifetime L the signer chose, min(the entry's max_ttl_seconds, every
+// role's, the machine cap in force), which is also the certificate's
+// lifetime ValidBefore - (ValidAfter + 300), Q-09-6), the request's full
+// signing bytes (at most MaxRequest), the evidence presented (the
+// machine-pop/v1 SSHSIG by the machine key over those bytes), the full
+// certificate and its key ID. It has the layout of HostIssueBody but is
+// its own type, so a confusion of the two kinds does not compile. With it
+// an auditor re-proves the issuance from the log alone.
+type MachineIssueBody struct {
+	Serial           uint64
+	PolicyVersion    uint64
+	DirectoryVersion uint64
+	CapSeconds       uint64
+	Request          []byte
+	Evidence         []wire.Evidence
+	Cert             []byte
+	KeyID            string
+}
+
+func (b *MachineIssueBody) check() error {
+	if len(b.Request) == 0 || len(b.Request) > MaxRequest || len(b.Evidence) > wire.MaxEvidence ||
+		len(b.Cert) == 0 || len(b.Cert) > MaxCert || len(b.KeyID) == 0 || len(b.KeyID) > MaxKeyID {
+		return fmt.Errorf("%w: machine_issue body size", ErrMalformedLeaf)
+	}
+	for _, e := range b.Evidence {
+		if len(e.Type) == 0 || len(e.Type) > wire.MaxEvidenceType || len(e.Blob) > wire.MaxEvidenceBlob {
+			return fmt.Errorf("%w: evidence size", ErrMalformedLeaf)
+		}
+	}
+	return nil
+}
+
+// Encode encodes the body: the serial, the policy and directory versions
+// and CapSeconds (uint64 each), the request, the evidence and the
+// certificate (uint24-length prefixed each) and the key ID (uint16).
+func (b *MachineIssueBody) Encode() ([]byte, error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	var c cryptobyte.Builder
+	c.AddUint64(b.Serial)
+	c.AddUint64(b.PolicyVersion)
+	c.AddUint64(b.DirectoryVersion)
+	c.AddUint64(b.CapSeconds)
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Request) })
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+		for _, e := range b.Evidence {
+			add16(c, []byte(e.Type))
+			add16(c, e.Blob)
+		}
+	})
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Cert) })
+	add16(&c, []byte(b.KeyID))
+	return c.Bytes()
+}
+
+// DecodeMachineIssueBody decodes a machine_issue body strictly. Every
+// error wraps ErrMalformedLeaf.
+func DecodeMachineIssueBody(data []byte) (*MachineIssueBody, error) {
+	s := cryptobyte.String(data)
+	var (
+		b        MachineIssueBody
 		request  cryptobyte.String
 		evidence cryptobyte.String
 		certB    cryptobyte.String

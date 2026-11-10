@@ -426,6 +426,9 @@ type issuance struct {
 	// namespace with the other three; probes is audit's probe index.
 	probeIDs map[string]uint64
 	probes   *probesInForce
+	// machineIDs are the request IDs of machine_issue entries (03-11),
+	// one namespace with the other four.
+	machineIDs map[string]uint64
 }
 
 // next records a verified certificate with serial.
@@ -751,12 +754,13 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		lastTime   uint64
 	)
 	iss := issuance{issueIDs: map[string]uint64{}, loginIDs: map[string]uint64{}, hostIDs: map[string]uint64{},
-		probeIDs: map[string]uint64{}, probes: newProbesInForce()}
+		probeIDs: map[string]uint64{}, probes: newProbesInForce(), machineIDs: map[string]uint64{}}
 	// pendingNegatives counts the negative probe_issue entries after the
 	// last krl_publish entry (Report.PendingNegativeProbes, 03-10).
 	var pendingNegatives int
 	revs := newRevocations()
 	hosts := newHostsInForce()
+	machines := newMachinesInForce()
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), maxLine)
 	for sc.Scan() {
@@ -875,6 +879,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
 			hosts.curDir = body.Version
+			machines.curDir = body.Version
 		case tlog.KindLoginIssue:
 			body, err := tlog.DecodeLoginIssueBody(leaf.Body)
 			if err != nil {
@@ -911,6 +916,23 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			// (03-10); verifyHostIssue checks the other three kinds.
 			if prev, used := iss.probeIDs[kid.Request]; used {
 				return nil, fmt.Errorf("audit: entry %d (%s): request ID %s replayed: probe_issue entry %d already used it", want, leaf.Kind, kid.Request, prev)
+			}
+			revs.addCert(c, kid)
+			rep.collect(opts, want, leaf.Kind, body.Cert)
+		case tlog.KindMachineIssue:
+			// A machine certificate (03-11): verifyMachineIssue re-proves it
+			// with the signer's rules and records it in the machine index.
+			body, err := tlog.DecodeMachineIssueBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			c, err := verifyMachineIssue(want, body, leaf.TimeMicros, &trustState, &dirState, &iss, machines, hosts)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			kid, err := cert.ParseKeyID(c.KeyId)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
 			revs.addCert(c, kid)
 			rep.collect(opts, want, leaf.Kind, body.Cert)
@@ -1242,7 +1264,7 @@ func checkGrepFields(text []byte, leaf tlog.Leaf) error {
 // refuses there every key only a host_forget line renders, after
 // unescaping.
 func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
-	if leaf.Kind != tlog.KindHostForget && leaf.Kind != tlog.KindHostIssue && leaf.Kind != tlog.KindProbeIssue {
+	if leaf.Kind != tlog.KindHostForget && leaf.Kind != tlog.KindHostIssue && leaf.Kind != tlog.KindProbeIssue && leaf.Kind != tlog.KindMachineIssue {
 		s := string(text)
 		if strings.Contains(s, `"approved_once":`) || strings.Contains(s, `"host_gone":`) {
 			return fmt.Errorf("its decoded approved_once or host_gone field is not one of a host_forget leaf (%s)", leaf.Kind)

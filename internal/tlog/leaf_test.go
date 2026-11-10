@@ -639,8 +639,8 @@ func TestRecoveryLeafGoldenVector(t *testing.T) {
 // TestRecoveryBody (03-06b) covers the kind-15 body: it round-trips, and
 // the encoder and decoder refuse a request above wire.MaxRecoveryRequest,
 // more than MaxRecoveryEntries entries, a body above MaxRecoveryBody, an
-// entry carrying fields of another kind and trailing bytes. Kinds 11 to 14
-// are not of format v1 yet; 15 is.
+// entry carrying fields of another kind and trailing bytes. Kind 14 is
+// not of format v1 yet; 15 is.
 func TestRecoveryBody(t *testing.T) {
 	leaf, body := recoveryVector(t)
 	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeRecoveryBody(b) })
@@ -710,7 +710,7 @@ func TestRecoveryBody(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for k := Kind(13); k <= 14; k++ { // 12 is in use since 03-10
+		for k := Kind(14); k <= 14; k++ { // 12 is in use since 03-10, 13 since 03-11
 			if _, err := MarshalLeaf(Leaf{Kind: k, Body: refusal}); !errors.Is(err, ErrMalformedLeaf) {
 				t.Fatalf("MarshalLeaf accepted kind %d", k)
 			}
@@ -790,8 +790,8 @@ func TestHostForgetLeafVector(t *testing.T) {
 // TestHostForgetBody (03-08c) covers the kind-16 body: it round-trips, and
 // the encoder and decoder refuse a request above MaxRequest, no request,
 // more than wire.MaxEvidence evidence items, an evidence item without a
-// type and trailing bytes. Kind 16 is of format v1, host_forget; 11 to 14
-// and 17 are not.
+// type and trailing bytes. Kind 16 is of format v1, host_forget; 14 and
+// 17 are not.
 func TestHostForgetBody(t *testing.T) {
 	leaf, body := hostForgetVector(t)
 	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeHostForgetBody(b) })
@@ -838,7 +838,7 @@ func TestHostForgetBody(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, k := range []Kind{13, 14, 17} { // 12 is in use since 03-10
+		for _, k := range []Kind{14, 17} { // 12 is in use since 03-10, 13 since 03-11
 			if _, err := DecodeLeaf(rawKindLeaf(t, Leaf{Kind: k, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
 				t.Fatalf("DecodeLeaf accepted kind %d", k)
 			}
@@ -1095,6 +1095,153 @@ func TestProbeIssueBody(t *testing.T) {
 			if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
 				t.Errorf("%s encodes: %v", name, err)
 			}
+		}
+	})
+}
+
+// machineIssueVector is the kind-13 leaf of the vector (03-11): the
+// request of machine_issue_request_signing_v1.hex, its evidence, and a
+// 90 s user certificate for its key from a fixed machine CA, CapSeconds 90.
+func machineIssueVector(t testing.TB) (Leaf, *MachineIssueBody) {
+	t.Helper()
+	request, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, "machine_issue_request_signing_v1.hex"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := wire.ParseMachineIssueSigningBytes(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ssh.ParsePublicKey(req.MachineKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := ssh.NewSignerFromKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, ed25519.SeedSize)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const serial = 1_700_000_000_000_011
+	kid := cert.KeyID{V3: true, CA: "machine", Subject: "ci", Request: "000102030405060708090a0b0c0d0e0f", Policy: 2, Directory: 3, Serial: serial}
+	c, err := cert.Build(cert.Request{Profile: cert.Profile{CertType: ssh.UserCert, MaxTTL: 90 * time.Second}, Subject: key,
+		Principals: []string{"deploy"}, Now: time.Unix(1_700_000_000, 0), ValidFor: 90 * time.Second, KeyID: kid, Serial: serial}, ca, zeroReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &MachineIssueBody{
+		Serial: serial, PolicyVersion: 2, DirectoryVersion: 3, CapSeconds: 90,
+		Request:  request,
+		Evidence: []wire.Evidence{{Type: wire.EvidenceMachinePoP, Blob: []byte("machine pop (test vector)")}},
+		Cert:     c.Marshal(),
+		KeyID:    c.KeyId,
+	}
+	enc, err := body.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Leaf{Index: 16, TimeMicros: 1_700_000_000_000_012, Kind: KindMachineIssue, Body: enc}, body
+}
+
+// TestMachineIssueBody covers the kind-13 body (03-11): the round trip,
+// the strict decoder, the golden vector (checked by offsets written from
+// the format, not only by the encoder) and the kind constants.
+func TestMachineIssueBody(t *testing.T) {
+	leaf, body := machineIssueVector(t)
+	t.Run("roundtrip", func(t *testing.T) {
+		got, err := DecodeMachineIssueBody(leaf.Body)
+		if err != nil || !reflect.DeepEqual(got, body) {
+			t.Fatalf("round trip: %+v, %v", got, err)
+		}
+		re, err := got.Encode()
+		if err != nil || !bytes.Equal(re, leaf.Body) {
+			t.Fatalf("re-encoding differs (%v)", err)
+		}
+		enc, err := MarshalLeaf(leaf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l, err := DecodeLeaf(enc); err != nil || l.Kind != KindMachineIssue || !bytes.Equal(EncodeLeaf(l), enc) {
+			t.Fatalf("DecodeLeaf of a machine_issue leaf: %+v, %v", l, err)
+		}
+	})
+	t.Run("strict_decode", func(t *testing.T) {
+		for name, b := range map[string][]byte{"trailing": append(bytes.Clone(leaf.Body), 0), "truncated": leaf.Body[:len(leaf.Body)-1], "empty": nil} {
+			if _, err := DecodeMachineIssueBody(b); !errors.Is(err, ErrMalformedLeaf) {
+				t.Errorf("%s: %v, want ErrMalformedLeaf", name, err)
+			}
+			if _, err := DecodeLeaf(EncodeLeaf(Leaf{Kind: KindMachineIssue, Body: b})); !errors.Is(err, ErrMalformedLeaf) {
+				t.Errorf("DecodeLeaf %s: %v, want ErrMalformedLeaf", name, err)
+			}
+		}
+		for name, edit := range map[string]func(*MachineIssueBody){
+			"cert_too_large":    func(b *MachineIssueBody) { b.Cert = make([]byte, MaxCert+1) },
+			"key_id_too_large":  func(b *MachineIssueBody) { b.KeyID = strings.Repeat("k", MaxKeyID+1) },
+			"request_too_large": func(b *MachineIssueBody) { b.Request = make([]byte, MaxRequest+1) },
+			"no_request":        func(b *MachineIssueBody) { b.Request = nil },
+			"evidence_no_type":  func(b *MachineIssueBody) { b.Evidence = []wire.Evidence{{Blob: []byte("x")}} },
+		} {
+			big := *body
+			edit(&big)
+			if _, err := big.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+				t.Errorf("%s encodes: %v", name, err)
+			}
+		}
+	})
+	t.Run("golden_vector", func(t *testing.T) {
+		checkLeafVector(t, "leaf_machine_issue_v1.hex", leaf, body, func(b []byte) (any, error) { return DecodeMachineIssueBody(b) })
+		file, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, "leaf_machine_issue_v1.hex"))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := DecodeLeaf(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Independent decode of the body by offsets: four uint64, three
+		// uint24-prefixed fields, a uint16-prefixed key ID.
+		p := l.Body
+		take := func(n int) []byte {
+			t.Helper()
+			if len(p) < n {
+				t.Fatal("vector body too short")
+			}
+			out := p[:n]
+			p = p[n:]
+			return out
+		}
+		u64 := func() uint64 { return binary.BigEndian.Uint64(take(8)) }
+		u24 := func() []byte { b := take(3); return take(int(b[0])<<16 | int(b[1])<<8 | int(b[2])) }
+		if s, pv, dv, cs := u64(), u64(), u64(), u64(); s != 1_700_000_000_000_011 || pv != 2 || dv != 3 || cs != 90 {
+			t.Fatalf("fixed fields %d %d %d %d", s, pv, dv, cs)
+		}
+		request, evidence, certB := u24(), u24(), u24()
+		keyID := take(int(binary.BigEndian.Uint16(take(2))))
+		if len(p) != 0 {
+			t.Fatal("trailing bytes in the vector body")
+		}
+		wantReq, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, "machine_issue_request_signing_v1.hex"))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wantEv []byte
+		wantEv = binary.BigEndian.AppendUint16(wantEv, uint16(len("machine-pop/v1")))
+		wantEv = append(wantEv, "machine-pop/v1"...)
+		wantEv = binary.BigEndian.AppendUint16(wantEv, uint16(len("machine pop (test vector)")))
+		wantEv = append(wantEv, "machine pop (test vector)"...)
+		if !bytes.Equal(request, wantReq) || !bytes.Equal(evidence, wantEv) || !bytes.Equal(certB, body.Cert) ||
+			string(keyID) != "kr3/ca=machine/sub=ci/req=000102030405060708090a0b0c0d0e0f/pol=2/dir=3/ser=1700000000000011" {
+			t.Fatalf("the vector's fields differ from the format: key ID %q", keyID)
+		}
+		pub, err := ssh.ParsePublicKey(certB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := pub.(*ssh.Certificate); c.ValidBefore-c.ValidAfter-300 != 90 || c.CertType != ssh.UserCert {
+			t.Fatalf("the vector's certificate lives %d s", c.ValidBefore-c.ValidAfter-300)
+		}
+	})
+	t.Run("kind_constants", func(t *testing.T) {
+		if KindMachineIssue != 13 || KindMachineIssue.String() != "machine_issue" || !KindMachineIssue.valid() || Kind(14).valid() {
+			t.Fatalf("KindMachineIssue = %d %q valid %t; 14 valid %t", KindMachineIssue, KindMachineIssue, KindMachineIssue.valid(), Kind(14).valid())
 		}
 	})
 }

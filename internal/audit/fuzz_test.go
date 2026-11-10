@@ -45,6 +45,11 @@ func FuzzVerifyExport(f *testing.F) {
 	}
 	f.Add([]byte(join(forget)))
 	f.Add([]byte(join([]string{forget[0], forget[1], forget[3], forget[4]})))
+	// A kind 13 entry (03-11): a machine certificate log under its own
+	// root, which the pins refuse, so the seed exercises the decoders.
+	mf := newMachineFixture(f)
+	mf.addMachine(mf.mkey, nil, nil, nil)
+	f.Add([]byte(join(mf.lines())))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		rep, err := Verify(strings.NewReader(string(data)), Options{Pins: pins, Threshold: 1})
 		if err != nil {

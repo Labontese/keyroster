@@ -246,6 +246,24 @@ func (s *Signer) probeIssueOrRefuse(ctx context.Context, peer Peer, req *wire.Pr
 	return nil, s.refuseErr(ctx, s.hostLimiter, peer, digest, err)
 }
 
+// machineIssueOrRefuse runs MachineIssue and records a refusal through
+// refuseErr, with the digest of the exact machine request that was
+// refused, on the machine bucket (s.machineLimiter, 03-11, T-03-398): the
+// route that relays machine requests is anonymous, so their refusals never
+// drain the shared bucket, and a flood of other refusals never drains
+// theirs.
+func (s *Signer) machineIssueOrRefuse(ctx context.Context, peer Peer, req *wire.MachineIssueRequest) (*wire.IssueResponse, *wire.ErrorResponse) {
+	resp, err := s.MachineIssue(ctx, peer, req)
+	if err == nil {
+		return resp, nil
+	}
+	var digest [32]byte
+	if req != nil {
+		digest = req.Digest()
+	}
+	return nil, s.refuseErr(ctx, s.machineLimiter, peer, digest, err)
+}
+
 // forgetOrRefuse runs ForgetAgent and records a refusal through refuseErr,
 // with the digest of the exact forget request that was refused (03-08c).
 func (s *Signer) forgetOrRefuse(ctx context.Context, peer Peer, req *wire.ForgetRequest) (*wire.ForgetResponse, *wire.ErrorResponse) {
@@ -304,7 +322,9 @@ func classify(detail string) uint8 {
 		// (Q-09-6).
 		"host_issue_valid_for_not_zero",
 		// Probe certificates (03-10), the same rule.
-		"probe_issue_valid_for_not_zero":
+		"probe_issue_valid_for_not_zero",
+		// Machine certificates (03-11), the same rule.
+		"machine_issue_valid_for_not_zero":
 		return tlog.ReasonTTLExceeded
 	case "request_time_skew":
 		return tlog.ReasonStaleRequest
@@ -360,7 +380,14 @@ func classify(detail string) uint8 {
 		"host_key_revoked", "cert_revoked",
 		// Probe certificates (03-10): the installation binding (D5) and the
 		// probe key's proof of possession.
-		"probe_issue_no_installation_id", "probe_issue_installation_mismatch", "probe_pop_invalid":
+		"probe_issue_no_installation_id", "probe_issue_installation_mismatch", "probe_pop_invalid",
+		// Machine certificates (03-11): the installation binding (D5),
+		// pop.machines, the directory entry, its key and the proof of
+		// possession; then, only after it, an explicitly revoked key and a
+		// disabled entry; and a name reserved for probe certificates.
+		"machine_issue_no_installation_id", "machine_issue_installation_mismatch", "machine_pop_not_enabled",
+		"unknown_machine", "machine_key_mismatch", "machine_pop_invalid", "machine_key_revoked", "machine_disabled",
+		"machine_name_reserved":
 		return tlog.ReasonUnauthorized
 	default:
 		return tlog.ReasonInternal
