@@ -70,7 +70,7 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 	out := fset.String("out", "", "where to write the certificate (required)")
 	var expect stringList
 	fset.Var(&expect, "expect-principal", "a principal the certificate must carry (repeatable)")
-	ifDue := fset.Bool("if-due", false, "renew only when CERTFILE is missing, for another key, name or CA, or due")
+	ifDue := fset.Bool("if-due", false, "renew only when CERTFILE is missing, does not verify, is for another key, name or CA, lacks an expected principal, or is due")
 	pos, err := parseInterspersed(fset, args)
 	if err != nil {
 		return errUsage
@@ -131,7 +131,23 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 		pub    ssh.PublicKey
 		data   []byte
 		mk     *machineKey
+		wiped  bool
 	)
+	// wipeKey clears the key file's secrets once: right after the signing,
+	// the clear point (03-11b, pre-merge review 1), so they are not live
+	// during the round trip and the write, and by the defer below on an
+	// early return.
+	wipeKey := func() {
+		if wiped {
+			return
+		}
+		wiped = true
+		if mk != nil {
+			mk.wipe(data)
+		} else {
+			clear(data)
+		}
+	}
 	if *agentKey != "" {
 		s, closeAgent, err := machineAgentSigner(*agentKey)
 		if err != nil {
@@ -143,13 +159,7 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 		if data, err = readMachineKeyFile(*keyFile); err != nil {
 			return err
 		}
-		defer func() {
-			if mk != nil {
-				mk.wipe(data)
-			} else {
-				clear(data)
-			}
-		}()
+		defer wipeKey()
 		pub = machineKeyHeaderPub(data)
 	}
 	if *ifDue {
@@ -160,7 +170,7 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 			}
 			pub = mk.signer.PublicKey()
 		}
-		if due, current := machineCertCurrent(*out, pub, name, bundle, maxTTL); current {
+		if due, current := machineCertCurrent(*out, pub, name, bundle, maxTTL, expect); current {
 			_, err := fmt.Fprintf(stdout, "not due: %s renews from %s; nothing was sent\n", *out, time.Unix(int64(min(due, 1<<62)), 0).UTC().Format(time.RFC3339)) //nolint:gosec // G115: bounded
 			return err
 		}
@@ -174,6 +184,7 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 		signer = mk.signer
 	}
 	req, raw, err := machineRenewRequest(bundle.InstallationID, name, signer)
+	wipeKey()
 	if err != nil {
 		return err
 	}
@@ -190,7 +201,7 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 			}
 		}
 		return fmt.Errorf("the server's answer was issued but refused by this CLI's check (%w); nothing was written. "+
-			"The signer logged the issuance (serial %s) and it counts toward the 12 per hour for this key", err, serial)
+			"The signer logged the issuance (serial %s, as the server's answer reports it) and it counts toward the 12 per hour for this key", err, serial)
 	}
 	if err := writeMachineCert(*out, c); err != nil {
 		return err
@@ -443,12 +454,17 @@ func machineCertDue(c *ssh.Certificate) uint64 {
 }
 
 // machineCertCurrent reports whether CERTFILE at path holds a certificate
-// that --if-due keeps: a user certificate signed by an active or next
-// machine CA key of the verified bundle, for pub, with kr3 subject name, a
-// lifetime of 60 s to the cap, and now before its due time. A missing,
-// unreadable, unparsable or expired file, or one for another key, name or
-// CA, is due. It never reads the KRL.
-func machineCertCurrent(path string, pub ssh.PublicKey, name string, b *trust.Bundle, maxTTL uint64) (due uint64, current bool) {
+// that --if-due keeps: a user certificate whose signature key is an active
+// or next machine CA key of the verified bundle and whose signature
+// verifies, with principals, every expected principal and no critical
+// option, for pub, with kr3 subject name, a lifetime of 60 s to the cap,
+// valid now (ValidAfter <= now < ValidBefore) and now before its due time.
+// Any other file is due, so the command renews and the fresh answer goes
+// through the full check (pre-merge review 1, 03-11b): a missing,
+// unreadable, unparsable, tampered, future-dated or expired file, one
+// for another key, name or CA, or one that lacks an expected principal.
+// It never reads the KRL.
+func machineCertCurrent(path string, pub ssh.PublicKey, name string, b *trust.Bundle, maxTTL uint64, expect []string) (due uint64, current bool) {
 	f, err := os.Open(path) //nolint:gosec // G304: the CERTFILE the operator named
 	if err != nil {
 		return 0, false
@@ -468,6 +484,20 @@ func machineCertCurrent(path string, pub ssh.PublicKey, name string, b *trust.Bu
 	}
 	if signed, err := signedByMachineCA(c, b); err != nil || !signed {
 		return 0, false
+	}
+	if len(c.ValidPrincipals) == 0 || len(c.CriticalOptions) != 0 {
+		return 0, false
+	}
+	// The signature and the window, at this run's clock: a CERTFILE whose
+	// bytes were changed, or whose ValidAfter is in the future, is due.
+	checker := ssh.CertChecker{Clock: machineRenewTimeNow}
+	if err := checker.CheckCert(c.ValidPrincipals[0], c); err != nil {
+		return 0, false
+	}
+	for _, p := range expect {
+		if !slices.Contains(c.ValidPrincipals, p) {
+			return 0, false
+		}
 	}
 	kid, err := cert.ParseKeyID(c.KeyId)
 	if err != nil || !kid.V3 || kid.CA != wire.CARoleMachine.String() || kid.Subject != name {

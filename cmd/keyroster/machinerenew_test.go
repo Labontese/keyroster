@@ -418,7 +418,7 @@ func TestMachineRenew(t *testing.T) {
 		key, _ := machineKeyFile(t)
 		code, _, stderr := run(t, "machine", "renew", "ci", "--key", key, "--out", filepath.Join(t.TempDir(), "c.pub"))
 		want := "the server's answer was issued but refused by this CLI's check (it is for another key); nothing was written. " +
-			"The signer logged the issuance (serial 4242) and it counts toward the 12 per hour for this key"
+			"The signer logged the issuance (serial 4242, as the server's answer reports it) and it counts toward the 12 per hour for this key"
 		if code != 1 || !strings.Contains(stderr, want) {
 			t.Fatalf("exit %d: %s\nwant %q", code, stderr, want)
 		}
@@ -544,7 +544,7 @@ func TestMachineRenewChecksAnswer(t *testing.T) {
 				t.Fatalf("exit %d: %s; want 1", code, stderr)
 			}
 			for _, want := range []string{"the server's answer was issued but refused by this CLI's check (" + tc.why + ")",
-				"; nothing was written. The signer logged the issuance (serial 4242) and it counts toward the 12 per hour for this key"} {
+				"; nothing was written. The signer logged the issuance (serial 4242, as the server's answer reports it) and it counts toward the 12 per hour for this key"} {
 				if !strings.Contains(stderr, want) {
 					t.Fatalf("stderr lacks %q:\n%s", want, stderr)
 				}
@@ -786,6 +786,50 @@ func TestMachineRenewIfDue(t *testing.T) {
 		c := buildMachineCert(t, otherEd(t), pub, "ci", now, 24*time.Hour, rand.Reader)
 		if code, out, sent := ifDue(t, e, c, "--key", path); code != 0 || sent != 1 {
 			t.Fatalf("exit %d, %d sent: %s; want a renewal", code, sent, out)
+		}
+	})
+	// Pre-merge review 1 (03-11b): a CERTFILE --if-due keeps must verify,
+	// be valid now and carry every expected principal; any other is due.
+	t.Run("bad_signature_is_due", func(t *testing.T) {
+		e, path, pub := keyed(t)
+		c := buildMachineCert(t, machineCASigner(t, e), pub, "ci", now, 24*time.Hour, rand.Reader)
+		// The bytes change, the signature key stays the bundle's machine CA
+		// key: only a signature check sees it.
+		c.Serial++
+		if code, out, sent := ifDue(t, e, c, "--key", path); code != 0 || sent != 1 || strings.Contains(out, "not due") {
+			t.Fatalf("exit %d, %d sent: %s; want a renewal", code, sent, out)
+		}
+	})
+	t.Run("future_valid_after_is_due", func(t *testing.T) {
+		e, path, pub := keyed(t)
+		c := buildMachineCert(t, machineCASigner(t, e), pub, "ci", now.Add(365*24*time.Hour), 24*time.Hour, rand.Reader)
+		if code, out, sent := ifDue(t, e, c, "--key", path); code != 0 || sent != 1 || strings.Contains(out, "not due") {
+			t.Fatalf("exit %d, %d sent: %s; want a renewal", code, sent, out)
+		}
+	})
+	t.Run("no_principals_is_due", func(t *testing.T) {
+		e, path, pub := keyed(t)
+		c := buildMachineCert(t, machineCASigner(t, e), pub, "ci", now, 24*time.Hour, rand.Reader)
+		c.ValidPrincipals = nil
+		if code, out, sent := ifDue(t, e, c, "--key", path); code != 0 || sent != 1 || strings.Contains(out, "not due") {
+			t.Fatalf("exit %d, %d sent: %s; want a renewal", code, sent, out)
+		}
+	})
+	t.Run("missing_expected_principal_is_due", func(t *testing.T) {
+		e, path, pub := keyed(t)
+		renewAnswer(t, e, renewOpts{principals: []string{"deploy", "release"}})
+		c := buildMachineCert(t, machineCASigner(t, e), pub, "ci", now, 24*time.Hour, rand.Reader)
+		code, out, sent := ifDue(t, e, c, "--key", path, "--expect-principal", "release")
+		if code != 0 || sent != 1 || strings.Contains(out, "not due") {
+			t.Fatalf("exit %d, %d sent: %s; want a renewal that carries release", code, sent, out)
+		}
+	})
+	t.Run("expected_principal_present_not_due", func(t *testing.T) {
+		e, path, pub := keyed(t)
+		c := buildMachineCert(t, machineCASigner(t, e), pub, "ci", now, 24*time.Hour, rand.Reader)
+		code, out, sent := ifDue(t, e, c, "--key", path, "--expect-principal", "deploy")
+		if code != 0 || sent != 0 || !strings.HasPrefix(out, "not due: ") {
+			t.Fatalf("exit %d, %d sent: %s; want not due", code, sent, out)
 		}
 	})
 	t.Run("encrypted_key_not_due_asks_no_passphrase", func(t *testing.T) {

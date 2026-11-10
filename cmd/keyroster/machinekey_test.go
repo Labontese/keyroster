@@ -210,6 +210,11 @@ func TestMachineKeyInput(t *testing.T) {
 		prev := machineKeyBufferHook
 		machineKeyBufferHook = func(file, pass, ed []byte) {
 			calls++
+			// The clear point is right after the signing, before the
+			// request leaves (pre-merge review 1, 03-11b).
+			if n := e.renewCount(); n != 0 {
+				t.Errorf("the buffers were cleared after the stub received %d request(s); want before the request is sent", n)
+			}
 			for name, b := range map[string][]byte{"file buffer": file, "passphrase": pass, "Ed25519 key": ed} {
 				if len(b) == 0 || bytes.Count(b, []byte{0}) != len(b) {
 					t.Errorf("the %s (%d bytes) is not cleared", name, len(b))
