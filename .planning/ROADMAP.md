@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 27/33 plans executed in 32 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 27/33 plans executed in 33 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -243,21 +243,24 @@ Plans:
 - [x] 03-10d-PLAN.md — No rollback widens back to last-good after a landed removal; a recovery revokes every lost probe certificate
 
 **Wave 27** *(blocked on Wave 26 completion)*
-- [ ] 03-11-PLAN.md — Machine identities by PoP (AUTH-06), `revoke machine`
+- [x] 03-11-PLAN.md — Machine certificates by proof of possession, signer half: frame 0x0C and leaf kind 13, the signer's MachineIssue with the cert_revoked hold and the 12-per-hour bound, the machine index, audit re-proof, the install-time reservations and the signer side of revoke machine
 
 **Wave 28** *(blocked on Wave 27 completion)*
-- [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
+- [ ] 03-11b-PLAN.md — The machine renew route, machine renew, revoke machine in the CLI, the e2e test and the runbooks (AUTH-06 and REVOKE-01 complete)
 
 **Wave 29** *(blocked on Wave 28 completion)*
-- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
+- [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
 
 **Wave 30** *(blocked on Wave 29 completion)*
-- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
+- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
 
 **Wave 31** *(blocked on Wave 30 completion)*
-- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
 
 **Wave 32** *(blocked on Wave 31 completion)*
+- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+
+**Wave 33** *(blocked on Wave 32 completion)*
 - [ ] 03-16-PLAN.md — Homelab dogfood: enroll the owner's hosts, take over the 02-14 hosts, drills (revocation, no TOFU, corrupt file, break-glass, machine, rotation if chosen, forget and re-enrollment)
 
 **Phase close (after verification):** the README quickstart (install server, signer and agent, first certificate) on branch `p03/close`, per the documentation convention.
