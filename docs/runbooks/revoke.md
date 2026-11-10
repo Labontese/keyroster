@@ -465,7 +465,7 @@ both. A name that starts with `probe.` is refused before anything is sent
 (exit 2): probe certificates share the machine CA and are never revoked by
 subject.
 
-**The two holds.** Once the first sweep has revoked a certificate, the
+**The two holds.** After the first sweep (a subject revocation of NAME), the
 signer refuses NAME new certificates (`cert_revoked`) until a directory
 version newer than the one it holds is installed, in two ways: by its
 name, whether or not a certificate was live (a machine with no live

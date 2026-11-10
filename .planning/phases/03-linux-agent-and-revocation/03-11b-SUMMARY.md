@@ -48,6 +48,10 @@ T2: a359def
 T3: 84fd115
 T4: b8d5c69
 
+PR: #97 (opened by keyroster-bot, no auto-merge). Checks on d5b7efa, all 29 green: CI 42837937495 (build-test, lint, cli-windows, cli-macos, govulncheck, dependency-firewall, capslock, fuzz), e2e 42837937596 (both main lanes and both probe lanes), e2e-distro 42837939089 (the seven distros), systemd-sandbox 42837937474, e2e-pkcs11 42837937515, e2e-tpm 42837937543, build-piv 42837937950, CodeQL 42837938009, pinned-actions 42837937777, pr-title 42837937722.
+PR e2e lanes (42837937596, on d5b7efa): probe 9.5p1 281.943 s, probe 10.5p1 279.191 s, main 9.5p1 791.274 s, main 10.5p1 777.357 s; the main lanes ran no machine and no probe test. The restore e2e tests, which read signer-install.md and ran there for the first time after its edit, passed in both main lanes.
+PR fuzz job: 32 m 52 s (03-11: 32 m 21 s).
+The final commit (this SUMMARY, the 4c lead-in of revoke.md and one comment of revoke.go) reruns the checks; their result is in the hand-off, not here.
 - T5: the plan copy (a558b9d, byte-identical to the checked plan, LF), the runbooks, the registry sentence, the runbook test's want and the tracking edits (466937b), then this SUMMARY. ROADMAP was edited by hand and its diff read line by line: exactly the 03-11b tick and the two count tokens (28/33 to 29/33); no neighbouring row moved. STATE.md: stopped_at, last_updated and completed_plans only. The docs-reading tests (`TestHostTrustRunbooks`, `TestRunbookGoToolchain`, `TestFormatRegistry`, `TestRestoreRunbookChecks`) pass after the edit, before the push.
 - T4: the rest of `TestMachineIdentityEndToEnd` (collapse_is_generic, if_due_sends_nothing, revoke_machine_refuses_login_and_renewal, keys_revokes_key_for_good, sk_through_agent, sk_key_file_named_error, audit_verify_counts_machine_certificates), in b8d5c69. The e2e test proves behaviour the unit tests of Tasks 1 to 3 prove, so there was no CI RED run; the evidence is the green run below. Verify 1 (the three vets, gofmt, the e2e lint on new lines: 0 issues) and verify 2 (no main lane ran the machine test) pass on b8d5c69. Task 1's variable `krl` (the KRL layout) is renamed `krlDir` so the package krl can be imported.
 - T3: `revoke machine` through the kind-driven `runRevokeEntry`, the `machine remove` hint and the `machine certificates: N` line, in 84fd115. Verify gates 1 (94 PASS lines, every named one present, TestRevokeHost and TestRevokeUser whole) and 2 (revoke_test.go loses only the one `subject_kind_unsupported` row; the three packages under -race; frozen paths; capslock) pass on it. M108's killer `TestRevokeHost/proposal_exit_4_text_names_hold` exists on origin/main fdee078 under that name (revoke_test.go:1101) and asserts the host exit-4 text.
@@ -182,16 +186,17 @@ The executors':
 - Task 2, test seams: `machineRenewTimeNow` (the clock of `--if-due` and CreatedAt) and `machineKeyParseHook` (counts parses for `over_max_refused_before_parse`), besides the plan's `machineKeyBufferHook`.
 - Task 5, STATE.md and ROADMAP.md were edited by hand instead of through the GSD tracking update, so that no neighbouring row could be ticked by prefix match (PD14); the result is the three-line ROADMAP diff the gate accepts.
 - Task 5, the `subject_kind_unsupported` row of revoke.md section 5 now reads "Run the command again after you upgrade the signer", keeping the lower-case words "upgrade the signer" that `TestHostTrustRunbooks` wants.
+- Task 5, revoke.md section 4c says the two holds arm after the first sweep (a subject revocation), whether or not a certificate was live, matching the exit-4 text; the `machineRevokeKind` comment says the same.
 - Task 5, revoke.md section 4c and the `subject_reserved` row give no advice on revoking a probe certificate by serial, which nothing here tests.
 - Task 3, the probe. refusal: the text names the name and says nothing was revoked; it adds no advice on revoking a probe certificate by serial, which this plan does not test.
-- Task 3, the hint's max TTL is printed as a Go duration (`2h0m0s`), the form `--max-ttl` accepts.
+- Task 3, the hint's max TTL is printed as a Go duration (`2h0m0s`); `--max-ttl` is a `flag.Duration`, which parses that form.
 - Task 3, M94 as run: `CheckBase` is nil for the machine kind only (the host keeps the floor); M98 as run: the first sweep checks under the host CA role.
 - Task 2, M83 as run: the mutant reads stdin (`ceremonyInput`) inside the non-terminal branch before refusing; the test's check that stdin was not read kills it.
 
 ## Handover
 
 - Executor run 1 did Tasks 1 and 2 and stopped under the half-context rule; executor run 2 did Tasks 3 to 5. The fuzz job that was still running at the first handover passed (see Readings).
-- State at the end of run 2: the PR is open without auto-merge and waits for the orchestrator's pre-merge review and the owner's merge gate. No fix round has run yet.
+- State at the end of run 2: PR #97 is open without auto-merge and waits for the orchestrator's pre-merge review and the owner's merge gate. No fix round has run yet.
 - `TestAgentEnrollEndToEnd` flaked once on main 10.5p1 in run 1 (sshd PerSourcePenalties closed the login before authentication); a rerun passed. It is outside files_modified.
 
 ## UNVERIFIED

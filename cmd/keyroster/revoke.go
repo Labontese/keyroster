@@ -644,7 +644,7 @@ var hostRevokeKind = revokeKind{
 // machineRevokeKind is revoke machine (03-11b, D-09, D-12): every live
 // certificate of the machine name, the entry disabled, the entry's key
 // with --keys. The signer holds the name and the key's latest certificate
-// once a certificate is revoked (03-11's default 2 and its amendment), so
+// after a subject revocation (03-11's default 2 and its amendment), so
 // the exit-4 text names both holds and what releases them.
 var machineRevokeKind = revokeKind{
 	kind: "machine", subject: wire.SubjectMachine, role: wire.CARoleMachine, keyLabel: "machine key",
