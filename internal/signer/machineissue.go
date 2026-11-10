@@ -46,10 +46,14 @@ var errMachinePoP = errors.New("signer: machine proof of possession does not ver
 //     by the listed key over the signing bytes under the machine
 //     namespace;
 //   - state, after the proof of possession: the key not explicitly
-//     revoked; the entry active; valid_for 0 (the signer chooses the
-//     lifetime, Q-09-6); the machine CA and profile; the grant
-//     (directory.MachineGrant); the bundle still in force; a request ID
-//     not used before.
+//     revoked; the key not held (its latest certificate revoked and no
+//     newer directory version installed: cert_revoked, default 2); the
+//     entry active; the key not one of the bundle in force; valid_for 0
+//     (the signer chooses the lifetime, Q-09-6); the machine CA and
+//     profile; the grant (directory.MachineGrant); the bundle still in
+//     force; a request ID not used before; fewer than twelve issuances of
+//     the key in the last hour (machine_renew_too_often, keyed by the key,
+//     so a rename does not reset it), decided before a serial is drawn.
 //
 // Then a serial, a kr3 key ID and cert.Build with exactly the grant's
 // principals, the profile defaults plus the grant's extensions and the
@@ -110,8 +114,15 @@ func (s *Signer) MachineIssue(ctx context.Context, peer Peer, req *wire.MachineI
 	if s.loaded.hosts.revokedKeys[key] {
 		return nil, refusalErr(wire.CodeRefused, "machine_key_revoked", nil)
 	}
+	if d := cert.MachineCertHeld(s.loaded.machines.latest[key].prev(), s.directoryVersion); d != "" {
+		return nil, refusalErr(wire.CodeRefused, d, nil)
+	}
 	if entry.Status != directory.StatusActive {
 		return nil, refusalErr(wire.CodeRefused, "machine_disabled", nil)
+	}
+	// Keyed by the wire bytes, as krl.InstallationKeys builds them (C11).
+	if s.installationKeys[string(reqKey.Marshal())] {
+		return nil, refusalErr(wire.CodeRefused, "machine_key_unusable", nil)
 	}
 	if req.ValidForSeconds != 0 {
 		return nil, refusalErr(wire.CodeRefused, "machine_issue_valid_for_not_zero", nil)
@@ -136,6 +147,9 @@ func (s *Signer) MachineIssue(ctx context.Context, peer Peer, req *wire.MachineI
 		return nil, refusalErr(wire.CodeUnavailable, "state_unavailable", err)
 	case used:
 		return nil, refusalErr(wire.CodeRefused, "duplicate_request", signerdb.ErrDuplicateRequest)
+	}
+	if d := cert.MachineRenewTooOften(s.loaded.machines.recent[key], uint64(max(now.Unix(), 0))); d != "" { //nolint:gosec // G115: >= 0
+		return nil, refusalErr(wire.CodeRefused, d, nil)
 	}
 	return s.issueMachineLocked(ctx, peer, req, entry, reqKey, caKey, profile, grant)
 }

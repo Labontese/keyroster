@@ -397,6 +397,148 @@ func TestVerifyMachineIssue(t *testing.T) {
 			mf.wantFail(t, "probe_issue entry")
 		})
 	})
+	machineHoldBoundAuditCases(t)
+}
+
+// revokeSerial logs a serial revoke of m's certificate under the machine
+// CA and the krl_publish the signer writes with it.
+func (mf *machineFixture) revokeSerial(m *machineIssue) {
+	mf.t.Helper()
+	mf.rev.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleMachine, Serial: m.serial}, []tlog.RevokedEntry{serialEntry(m.cert)}, nil)
+	mf.rev.publish(nil)
+}
+
+// lostMachine is a kr3 machine certificate of key for ci with the next
+// serial, as a lost log would have issued it, not logged.
+func (mf *machineFixture) lostMachine(key ssh.Signer) *ssh.Certificate {
+	mf.t.Helper()
+	mf.serial++
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		mf.t.Fatal(err)
+	}
+	kid := cert.KeyID{V3: true, CA: "machine", Subject: "ci", Request: hex.EncodeToString(id[:]), Policy: mf.pol.Version, Directory: mf.dirVersion, Serial: mf.serial}
+	prof := cert.Profile{CertType: ssh.UserCert, MaxTTL: 30 * 24 * time.Hour, DefaultExtensions: map[string]string{"permit-pty": ""}}
+	c, err := cert.Build(cert.Request{Profile: prof, Subject: key.PublicKey(), Principals: mf.grantOf("ci"), Now: issuedAt(mf.serial),
+		ValidFor: time.Hour, KeyID: kid, Serial: mf.serial}, mf.machineCA, rand.Reader)
+	if err != nil {
+		mf.t.Fatal(err)
+	}
+	return c
+}
+
+// carry logs a recovery that carries c, revoked or not, and its
+// krl_publish.
+func (mf *machineFixture) carry(c *ssh.Certificate, revoke bool) {
+	mf.t.Helper()
+	mf.rev.recover(nil, []wire.RecoveredCertificate{{Cert: c.Marshal(), Revoke: revoke}}, nil)
+	mf.rev.publish(nil)
+}
+
+// machineHoldBoundAuditCases are TestVerifyMachineIssue's hold, bound,
+// unusable key and request-ID parity cases (03-11 Task 2).
+func machineHoldBoundAuditCases(t *testing.T) {
+	const keyHold = "its latest certificate, serial"
+	t.Run("hold_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.revokeSerial(mf.addMachine(mf.mkey, nil, nil, nil))
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantFail(t, keyHold)
+	})
+	t.Run("hold_released_by_newer_directory_passes", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.revokeSerial(mf.addMachine(mf.mkey, nil, nil, nil))
+		mf.publish()
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantPass(t)
+	})
+	t.Run("bound_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		for range 13 {
+			mf.addMachine(mf.mkey, nil, nil, nil)
+		}
+		mf.wantFail(t, "machine_renew_too_often")
+	})
+	t.Run("bound_window_passes", func(t *testing.T) {
+		// One at S, eleven at S + 10, then one at S + 3601: the first is out
+		// of the window, so eleven count.
+		mf := newMachineFixture(t)
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.advance(10 * time.Second)
+		for range 11 {
+			mf.addMachine(mf.mkey, nil, nil, nil)
+		}
+		mf.advance(3591 * time.Second)
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantPass(t)
+	})
+	t.Run("installation_key_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.machines = append(mf.machines, directory.Machine{Name: "opsm", Key: trust.FormatKey(mf.ops.PublicKey()), Roles: []string{"deploy"},
+			MaxTTLSeconds: 3600, Status: directory.StatusActive})
+		mf.publish()
+		mf.addMachine(mf.ops, nil, nil, nil)
+		mf.wantFail(t, "machine_key_unusable")
+	})
+	t.Run("recovery_carried_hold_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.carry(mf.lostMachine(mf.mkey), true)
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantFail(t, keyHold)
+	})
+	t.Run("recovery_carried_not_counted_toward_bound_passes", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.carry(mf.lostMachine(mf.mkey), false)
+		for range 12 {
+			mf.addMachine(mf.mkey, nil, nil, nil)
+		}
+		mf.wantPass(t)
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantFail(t, "machine_renew_too_often")
+	})
+	t.Run("relisting_keeps_first_passes", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		m := mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.revokeSerial(m)
+		mf.publish()
+		mf.revokeSerial(m)
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantPass(t)
+	})
+	const reused = "machine_issue entry"
+	t.Run("host_reuses_machine_request_id_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		m := mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.addHost(mf.key, func(h *hostIssue) { h.req.RequestID = m.req.RequestID }, nil, nil)
+		mf.wantFail(t, reused)
+	})
+	t.Run("login_reuses_machine_request_id_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.installPolicy(func(p *trust.Policy) { p.WebAuthn = &trust.WebAuthnRP{RPID: auditRPID, Origins: []string{auditOrigin}} })
+		mf.publish()
+		m := mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.addLogin(func(l *login) { l.req.RequestID = m.req.RequestID }, nil)
+		mf.wantFail(t, reused)
+	})
+	t.Run("issue_reuses_machine_request_id_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		m := mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.addIssueWithRequest(hex.EncodeToString(m.req.RequestID[:]))
+		mf.wantFail(t, reused)
+	})
+	t.Run("probe_reuses_machine_request_id_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		m := mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.addProbe(mf.key, false, func(p *probeIssue) { p.req.RequestID = m.req.RequestID }, nil, nil)
+		mf.wantFail(t, reused)
+	})
+	t.Run("machine_reuses_machine_request_id_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		m := mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.addMachine(mf.mec, func(n *machineIssue) { n.req.RequestID = m.req.RequestID }, nil, nil)
+		mf.wantFail(t, reused)
+	})
 }
 
 // TestExportMachineIssue: the machine_issue line carries the decoded

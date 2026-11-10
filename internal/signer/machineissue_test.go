@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -240,7 +241,7 @@ func sameMachineIndex(a, b machineIndex) bool {
 		y, ok := b.latest[k]
 		if !ok || x.serial != y.serial || x.leaf != y.leaf || x.capSeconds != y.capSeconds || x.issuedUnderDir != y.issuedUnderDir ||
 			!bytes.Equal(x.certBytes, y.certBytes) ||
-			!slices.Equal(x.principals, y.principals) || x.issued != y.issued {
+			!slices.Equal(x.principals, y.principals) || x.issued != y.issued || x.revoked != y.revoked || x.revokedAtDir != y.revokedAtDir {
 			return false
 		}
 	}
@@ -589,6 +590,214 @@ func TestMachineIssue(t *testing.T) {
 			t.Fatalf("after the refusal: %d leaves, %d rows, serial %d; want %d, %d, %d", n, i, sr, leaves+1, issued, last)
 		}
 	})
+	machineHoldBoundCases(t)
+}
+
+// addCI3 adds the active machine ci3 (a new key, role deploy) to e's
+// directory, installs it and returns the key.
+func (e *machineEnv) addCI3(t *testing.T) ssh.Signer {
+	t.Helper()
+	k3 := newEd25519(t)
+	e.machines = append(e.machines, directory.Machine{Name: "ci3", Key: trust.FormatKey(k3.PublicKey()), Roles: []string{"deploy"},
+		MaxTTLSeconds: 3600, Status: directory.StatusActive})
+	e.publishMachines(t)
+	return k3
+}
+
+// issueN issues n certificates for key under name and returns their
+// requests.
+func (e *machineEnv) issueN(t *testing.T, key ssh.Signer, name string, n int) []*wire.MachineIssueRequest {
+	t.Helper()
+	var out []*wire.MachineIssueRequest
+	for range n {
+		req := e.machineReq(key, name)
+		e.mustMachine(t, req)
+		out = append(out, req)
+	}
+	return out
+}
+
+// revokeMachineSerial revokes serial under the machine CA (a TargetSerial
+// revoke by the first admin).
+func (e *machineEnv) revokeMachineSerial(t *testing.T, serial uint64) {
+	t.Helper()
+	e.revokeHost(t, &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleMachine, Serial: serial})
+}
+
+// opsMachine stores, as an earlier signer would have, a directory whose
+// machine opsm lists the bundle's ops key, restarts the signer on it and
+// returns the ops key's signer.
+func (e *machineEnv) opsMachine(t *testing.T) ssh.Signer {
+	t.Helper()
+	ops := e.fx.Roles[keystore.RoleOps]
+	doc, sigs := e.machineDirectory(t, func(d *directory.Directory) {
+		d.Machines = append(d.Machines, directory.Machine{Name: "opsm", Key: trust.FormatKey(ops.PublicKey()), Roles: []string{"deploy"},
+			MaxTTLSeconds: 3600, Status: directory.StatusActive})
+	})
+	e.seedDirectory(t, doc, sigs)
+	e.docs = append(e.docs, doc)
+	e.restart(t)
+	return ops
+}
+
+// restoredMachines is e restored from snapshot (restoredFrom) as a
+// machineEnv on e's clock, keys and directory documents.
+func (e *machineEnv) restoredMachines(t *testing.T, snapshot string) *machineEnv {
+	t.Helper()
+	h := &hostEnv{revokeEnv: e.restored(t, snapshot), ed: e.ed, ec: e.ec, off: e.off, other: e.other, hosts: e.hosts, docs: slices.Clone(e.docs)}
+	return &machineEnv{hostEnv: h, k1: e.k1, k2: e.k2, roles: e.roles, machines: e.machines}
+}
+
+// machineHoldBoundCases are TestMachineIssue's hold, bound and unusable
+// key cases (03-11 Task 2). Each env that holds state of its own is the
+// subtest's own; the shared ones are built on first use, so every subtest
+// passes alone.
+func machineHoldBoundCases(t *testing.T) {
+	// held: ci issued once and that certificate revoked by serial; ci3
+	// active and never issued.
+	var held *machineEnv
+	var heldK3 ssh.Signer
+	heldEnv := func(_ *testing.T) *machineEnv {
+		if held == nil {
+			held = newMachineEnv(t)
+			heldK3 = held.addCI3(t)
+			c, _ := held.mustMachine(t, held.machineReq(held.k1, "ci"))
+			held.revokeMachineSerial(t, c.Serial)
+		}
+		return held
+	}
+	// bound: ci issued twelve times inside the hour; ci3 active.
+	var bound *machineEnv
+	var boundReqs []*wire.MachineIssueRequest
+	var boundK3 ssh.Signer
+	boundEnv := func(_ *testing.T) *machineEnv {
+		if bound == nil {
+			bound = newMachineEnv(t)
+			boundK3 = bound.addCI3(t)
+			boundReqs = bound.issueN(t, bound.k1, "ci", 12)
+		}
+		return bound
+	}
+	// unusable: a stored directory lists the ops key as machine opsm.
+	var unusable *machineEnv
+	var opsKey ssh.Signer
+	unusableEnv := func(_ *testing.T) *machineEnv {
+		if unusable == nil {
+			unusable = newMachineEnv(t)
+			opsKey = unusable.opsMachine(t)
+		}
+		return unusable
+	}
+	t.Run("hold_after_revoke_same_dir", func(t *testing.T) {
+		e := heldEnv(t)
+		e.refusedMachine(t, e.machineReq(e.k1, "ci"), "cert_revoked", wire.CodeRefused)
+	})
+	t.Run("hold_after_key_id_revoke", func(t *testing.T) {
+		e := newMachineEnv(t)
+		c, _ := e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		e.revokeHost(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleMachine, KeyID: c.KeyId})
+		e.refusedMachine(t, e.machineReq(e.k1, "ci"), "cert_revoked", wire.CodeRefused)
+	})
+	t.Run("hold_released_by_newer_dir", func(t *testing.T) {
+		e := newMachineEnv(t)
+		c, _ := e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		e.revokeMachineSerial(t, c.Serial)
+		e.refusedMachine(t, e.machineReq(e.k1, "ci"), "cert_revoked", wire.CodeRefused)
+		e.publishMachines(t)
+		e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		e.verifyExport()
+	})
+	t.Run("hold_equal_dir_version_still_holds", func(t *testing.T) {
+		// Time does not release the hold: with the revoked certificate
+		// expired and the same directory version in force, it still holds.
+		e := newMachineEnv(t)
+		c, _ := e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		e.revokeMachineSerial(t, c.Serial)
+		e.tickTo(c.ValidBefore + 3600)
+		e.restart(t)
+		e.refusedMachine(t, e.machineReq(e.k1, "ci"), "cert_revoked", wire.CodeRefused)
+	})
+	t.Run("hold_is_latest_only", func(t *testing.T) {
+		e := newMachineEnv(t)
+		c1, _ := e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		e.revokeMachineSerial(t, c1.Serial)
+		e.mustMachine(t, e.machineReq(e.k1, "ci"))
+	})
+	t.Run("hold_not_for_other_key", func(t *testing.T) {
+		e := heldEnv(t)
+		e.mustMachine(t, e.machineReq(heldK3, "ci3"))
+	})
+	t.Run("hold_bad_pop_is_pop_invalid", func(t *testing.T) {
+		e := heldEnv(t)
+		e.refusedMachine(t, e.badPoP(e.machineReq(e.k1, "ci"), e.k1), "machine_pop_invalid", wire.CodeRefused)
+	})
+	t.Run("installation_key_unusable", func(t *testing.T) {
+		e := unusableEnv(t)
+		e.refusedMachine(t, e.machineReq(opsKey, "opsm"), "machine_key_unusable", wire.CodeRefused)
+	})
+	t.Run("machine_key_unusable_bad_pop_is_pop_invalid", func(t *testing.T) {
+		e := unusableEnv(t)
+		e.refusedMachine(t, e.badPoP(e.machineReq(opsKey, "opsm"), opsKey), "machine_pop_invalid", wire.CodeRefused)
+	})
+	t.Run("renew_bound_12_then_refused", func(t *testing.T) {
+		e := boundEnv(t)
+		e.refusedMachine(t, e.machineReq(e.k1, "ci"), "machine_renew_too_often", wire.CodeRefused)
+	})
+	t.Run("renew_bound_window_edge", func(t *testing.T) {
+		e := newMachineEnv(t)
+		c1, _ := e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		first := issuedSecs(c1)
+		e.tickTo(first + 10)
+		e.issueN(t, e.k1, "ci", 11)
+		e.tickTo(first + 3599)
+		e.refusedMachine(t, e.machineReq(e.k1, "ci"), "machine_renew_too_often", wire.CodeRefused)
+		e.tickTo(first + 3601)
+		e.mustMachine(t, e.machineReq(e.k1, "ci"))
+	})
+	t.Run("rename_keeps_window", func(t *testing.T) {
+		// T-03-401, Q-09-2: the window is keyed by the key, so a rename
+		// does not reset it.
+		e := newMachineEnv(t)
+		e.issueN(t, e.k1, "ci", 12)
+		e.machines[0].Name = "ci-new"
+		e.publishMachines(t)
+		e.refusedMachine(t, e.machineReq(e.k1, "ci-new"), "machine_renew_too_often", wire.CodeRefused)
+		e.verifyExport()
+	})
+	t.Run("bound_is_per_key", func(t *testing.T) {
+		e := boundEnv(t)
+		e.mustMachine(t, e.machineReq(boundK3, "ci3"))
+	})
+	t.Run("bad_pop_attempts_do_not_consume_the_bound", func(t *testing.T) {
+		e := newMachineEnv(t)
+		e.issueN(t, e.k1, "ci", 11)
+		for range 20 {
+			e.refusedMachine(t, e.badPoP(e.machineReq(e.k1, "ci"), e.k1), "machine_pop_invalid", wire.CodeRefused)
+		}
+		e.mustMachine(t, e.machineReq(e.k1, "ci"))
+	})
+	t.Run("bound_reached_bad_pop_is_pop_invalid", func(t *testing.T) {
+		e := boundEnv(t)
+		e.refusedMachine(t, e.badPoP(e.machineReq(e.k1, "ci"), e.k1), "machine_pop_invalid", wire.CodeRefused)
+	})
+	t.Run("request_id_reuse_before_bound", func(t *testing.T) {
+		e := boundEnv(t)
+		again := e.machineReq(e.k1, "ci")
+		again.RequestID = boundReqs[0].RequestID
+		e.refusedMachine(t, e.machineSign(again, e.k1, wire.MachinePoPNamespace), "duplicate_request", wire.CodeRefused)
+	})
+	t.Run("relist_then_issue_after_newer_dir_audits", func(t *testing.T) {
+		// Keep-first: the second listing of the serial, at V+1, does not
+		// move the version the key is held at, so V+1 released it.
+		e := newMachineEnv(t)
+		c, _ := e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		e.revokeMachineSerial(t, c.Serial)
+		e.publishMachines(t)
+		e.revokeMachineSerial(t, c.Serial)
+		e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		e.verifyExport()
+	})
 }
 
 // skEd25519Signer is a test-local copy of internal/sshsig's software
@@ -727,6 +936,189 @@ func TestMachineIssueRestart(t *testing.T) {
 		}
 		if !sameMachineIndex(live, rebuiltMachines(t, e)) {
 			t.Fatal("the live machine index differs from a fresh rebuild")
+		}
+	})
+	t.Run("hold_and_bound_survive_restart", func(t *testing.T) {
+		e := newMachineEnv(t)
+		k3 := e.addCI3(t)
+		c, _ := e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		e.revokeMachineSerial(t, c.Serial)
+		e.issueN(t, k3, "ci3", 12)
+		e.restart(t)
+		e.refusedMachine(t, e.machineReq(e.k1, "ci"), "cert_revoked", wire.CodeRefused)
+		e.refusedMachine(t, e.machineReq(k3, "ci3"), "machine_renew_too_often", wire.CodeRefused)
+		e.verifyExport()
+	})
+	t.Run("recovery_carried_revoked_holds_the_key", func(t *testing.T) {
+		// PD3: a recovery carries a lost kr3 machine certificate of ci,
+		// above the indexed one, and revokes it: it is the key's latest, so
+		// the key is held until a newer directory version.
+		e := newMachineEnv(t)
+		c1, _ := e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		snapshot := e.snapshotDB(t)
+		e.clock.set(e.clock.Now().Add(time.Second))
+		lost, _ := e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		if lost.Serial <= c1.Serial {
+			t.Fatal("the lost certificate was not issued")
+		}
+		r := e.restoredMachines(t, snapshot)
+		r.tick(2 * time.Second)
+		r.recover(t, r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: true}}, nil))
+		r.refusedMachine(t, r.machineReq(r.k1, "ci"), "cert_revoked", wire.CodeRefused)
+		r.publishMachines(t)
+		r.mustMachine(t, r.machineReq(r.k1, "ci"))
+		r.verifyExport()
+	})
+	t.Run("recovery_carried_unrevoked_not_counted_toward_bound", func(t *testing.T) {
+		// PD3: a carried certificate's issuance belongs to the lost log, so
+		// it does not count toward the twelve an hour.
+		e := newMachineEnv(t)
+		snapshot := e.snapshotDB(t)
+		lost, _ := e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		r := e.restoredMachines(t, snapshot)
+		r.tick(2 * time.Second)
+		r.recover(t, r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: false}}, nil))
+		if live := liveMachines(r); live.latest[trust.FormatKey(r.k1.PublicKey())].serial != lost.Serial {
+			t.Fatal("the carried certificate is not the key's latest")
+		}
+		r.issueN(t, r.k1, "ci", 12)
+		r.refusedMachine(t, r.machineReq(r.k1, "ci"), "machine_renew_too_often", wire.CodeRefused)
+		r.verifyExport()
+	})
+}
+
+// TestMachineRefusalClasses: every detail the machine path returns has its
+// class and wire code, and none is internal (03-11).
+func TestMachineRefusalClasses(t *testing.T) {
+	t.Run("class_table", func(t *testing.T) {
+		for d, want := range map[string]struct {
+			class uint8
+			code  wire.ErrorCode
+		}{
+			"machine_issue_no_installation_id":    {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"machine_issue_installation_mismatch": {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"machine_pop_not_enabled":             {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"unknown_machine":                     {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"machine_key_mismatch":                {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"machine_pop_invalid":                 {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"machine_key_revoked":                 {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"machine_disabled":                    {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"machine_name_reserved":               {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"machine_key_unusable":                {tlog.ReasonBadSubjectKey, wire.CodeRefused},
+			"machine_issue_valid_for_not_zero":    {tlog.ReasonTTLExceeded, wire.CodeRefused},
+			"machine_renew_too_often":             {tlog.ReasonDuplicateRequest, wire.CodeRefused},
+			"cert_revoked":                        {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"duplicate_request":                   {tlog.ReasonDuplicateRequest, wire.CodeRefused},
+			"malformed_request":                   {tlog.ReasonMalformed, wire.CodeMalformed},
+			"request_time_skew":                   {tlog.ReasonStaleRequest, wire.CodeRefused},
+			"directory_changed":                   {tlog.ReasonUnavailable, wire.CodeUnavailable},
+		} {
+			if got := classify(d); got != want.class || codeFor(got) != want.code {
+				t.Errorf("classify(%q) = %d (%s), want %d (%s)", d, got, codeFor(got), want.class, want.code)
+			}
+		}
+	})
+}
+
+// TestMachineIssueBucket: machine refusals and 0x0C frames that do not
+// parse log on the machine bucket, so an anonymous flood never drains the
+// shared one (03-11, T-03-398).
+func TestMachineIssueBucket(t *testing.T) {
+	ctx := context.Background()
+	// flood refuses machine requests until the machine bucket logs no more.
+	flood := func(e *machineEnv) {
+		for range 1000 {
+			before := e.leafCount(tlog.KindRefusal)
+			_, _ = e.s.machineIssueOrRefuse(ctx, Peer{UID: 1000}, e.machineReq(e.k1, "nope"))
+			if e.leafCount(tlog.KindRefusal) == before {
+				return
+			}
+		}
+		e.t.Fatal("the machine bucket never ran dry")
+	}
+	t.Run("flood_does_not_drain_shared_bucket", func(t *testing.T) {
+		e := newMachineEnv(t)
+		flood(e)
+		req := &wire.RevokeRequest{Target: wire.TargetKey, Key: newEd25519(t).PublicKey().Marshal(), InstallationID: testInstallationID,
+			CreatedAt: uint64(e.clock.Now().Unix()), Reason: "test"} //nolint:gosec // G115: after 1970
+		if _, err := rand.Read(req.RequestID[:]); err != nil {
+			t.Fatal(err)
+		}
+		sig, err := sshsig.Sign(rand.Reader, newEd25519(t), wire.RevokeSSHSIGNamespace, req.SigningBytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+		before := e.leafCount(tlog.KindRefusal)
+		if _, er := e.s.revokeOrRefuse(ctx, Peer{UID: 1000}, req); er == nil {
+			t.Fatal("a revoke signed by no admin was accepted")
+		}
+		if e.leafCount(tlog.KindRefusal) != before+1 {
+			t.Fatal("after a machine flood a refused revoke was not logged as its own refusal leaf")
+		}
+	})
+	t.Run("malformed_frames_use_machine_bucket", func(t *testing.T) {
+		e := newMachineEnv(t)
+		sock, stop := serveMachineSigner(t, e)
+		send := func(typ byte, body []byte) {
+			conn, err := net.Dial("unix", sock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := wire.WriteMessage(conn, typ, body); err != nil {
+				t.Fatal(err)
+			}
+			if rt, _, err := wire.ReadMessage(conn, wire.ResponseCaps(typ)); err != nil || rt != wire.TypeError {
+				t.Fatalf("response type %#x, %v; want an error response", rt, err)
+			}
+		}
+		for range 3 * DefaultRefusalLogBurst {
+			send(wire.TypeMachineIssueRequest, []byte{1, 2, 3})
+		}
+		send(0xEE, []byte{1})
+		stop()
+		if err := e.open(); err != nil {
+			t.Fatal(err)
+		}
+		var malformed, shared int
+		for _, l := range e.leavesOf() {
+			if l.Kind != tlog.KindRefusal {
+				continue
+			}
+			b, err := tlog.DecodeRefusalBody(l.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch b.Detail {
+			case "malformed_request":
+				malformed++
+			case "unknown_message_type":
+				shared++
+			}
+		}
+		if malformed != DefaultRefusalLogBurst || shared != 1 {
+			t.Fatalf("%d malformed_request and %d unknown_message_type refusal leaves; want the machine burst %d and 1", malformed, shared, DefaultRefusalLogBurst)
+		}
+	})
+	t.Run("admin_refusals_still_logged", func(t *testing.T) {
+		e := newMachineEnv(t)
+		flood(e)
+		req := &wire.IssueRequest{CARole: wire.CARoleUser, SubjectKey: newEd25519(t).PublicKey().Marshal(), Subject: "u:alice", Principals: []string{"alice"},
+			ValidForSeconds: 600, CreatedAt: uint64(e.clock.Now().Unix())} //nolint:gosec // G115: after 1970
+		if _, err := rand.Read(req.RequestID[:]); err != nil {
+			t.Fatal(err)
+		}
+		req.Evidence = SignRequest(t, req, newEd25519(t))
+		before := e.leafCount(tlog.KindRefusal)
+		if _, er := e.s.issueOrRefuse(ctx, Peer{UID: 1000}, req); er == nil {
+			t.Fatal("an issue signed by no admin was accepted")
+		}
+		if e.leafCount(tlog.KindRefusal) != before+1 {
+			t.Fatal("after a machine flood a refused admin issue was not logged as its own refusal leaf")
 		}
 	})
 }

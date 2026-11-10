@@ -39,3 +39,46 @@ func MachineRecentAdd(recent []uint64, issued uint64) []uint64 {
 	}
 	return slices.Clip(out)
 }
+
+// MachineRenewTooOften is the one 12-per-hour rule of machine issuance
+// (03-11, PD4, T-03-401), shared by the signer and audit verify. recent is
+// the key's list (MachineRecentAdd) and now the second of the new request:
+// the signer passes its clock before a serial is drawn, audit the new
+// certificate's issuance second (ValidAfter + 300), never earlier. A
+// second s counts while s + 3600 > now, so a second after now (a clock
+// stepped back) counts too. It returns "machine_renew_too_often" when
+// twelve or more count, else "".
+func MachineRenewTooOften(recent []uint64, now uint64) string {
+	n := 0
+	for _, s := range recent {
+		if s+machineWindow > now {
+			n++
+		}
+	}
+	if n >= machineRecentMax {
+		return "machine_renew_too_often"
+	}
+	return ""
+}
+
+// MachinePrev is what the cert_revoked hold reads of a machine key's
+// latest certificate (03-11), as the signer's machine index and audit's
+// mirror keep it: whether there is one, whether it was revoked, and the
+// directory version in force when it first was (keep-first).
+type MachinePrev struct {
+	Have         bool
+	Revoked      bool
+	RevokedAtDir uint64
+}
+
+// MachineCertHeld is the one machine cert_revoked hold rule (03-11,
+// Q-09-5, default 2), shared by the signer and audit verify: it returns
+// "cert_revoked" while prev is revoked and the directory version in force
+// curDir is not above the one it was revoked at (an equal version holds),
+// else "". Any newer directory version releases it.
+func MachineCertHeld(prev MachinePrev, curDir uint64) string {
+	if prev.Have && prev.Revoked && curDir <= prev.RevokedAtDir {
+		return "cert_revoked"
+	}
+	return ""
+}

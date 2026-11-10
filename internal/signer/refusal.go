@@ -314,7 +314,9 @@ func classify(detail string) uint8 {
 	case "bad_subject_key",
 		// Probe certificates (03-10): a probe key that is the host key, a
 		// key of the bundle in force or a key the directory lists.
-		"probe_key_unusable":
+		"probe_key_unusable",
+		// A machine entry that lists a key of the bundle in force (03-11).
+		"machine_key_unusable":
 		return tlog.ReasonBadSubjectKey
 	case "bad_validity", "ttl_exceeds_role",
 		// Host certificates (03-09): the signer chooses the lifetime, so a
@@ -334,7 +336,9 @@ func classify(detail string) uint8 {
 		"host_cert_recent",
 		// Probe certificates (03-10): one per host name and polarity per
 		// window.
-		"probe_cert_recent":
+		"probe_cert_recent",
+		// Machine certificates (03-11): twelve per machine key per hour.
+		"machine_renew_too_often":
 		return tlog.ReasonDuplicateRequest
 	case "clock_regression":
 		return tlog.ReasonClockRegression

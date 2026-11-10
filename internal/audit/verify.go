@@ -589,6 +589,9 @@ func verifyLoginIssue(index uint64, body *tlog.LoginIssueBody, leafMicros uint64
 	if prev, used := iss.probeIDs[reqID]; used {
 		return fmt.Errorf("request ID %s replayed: probe_issue entry %d already used it", reqID, prev)
 	}
+	if prev, used := iss.machineIDs[reqID]; used {
+		return fmt.Errorf("request ID %s replayed: machine_issue entry %d already used it", reqID, prev)
+	}
 	// The signer refuses a CreatedAt more than 300 s from its clock when the
 	// request arrives, then reads the serial from that clock (serial.Next,
 	// microseconds) and the issuance time right after it. Both must lie
@@ -862,6 +865,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if prev, used := iss.probeIDs[kid.Request]; used {
 				return nil, fmt.Errorf("audit: entry %d: request ID %s replayed: probe_issue entry %d already used it", want, kid.Request, prev)
 			}
+			if prev, used := iss.machineIDs[kid.Request]; used {
+				return nil, fmt.Errorf("audit: entry %d: request ID %s replayed: machine_issue entry %d already used it", want, kid.Request, prev)
+			}
 			if _, used := iss.issueIDs[kid.Request]; !used {
 				iss.issueIDs[kid.Request] = want
 			}
@@ -912,10 +918,14 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err != nil {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
-			// The host request ID must be new to the probe entries too
-			// (03-10); verifyHostIssue checks the other three kinds.
+			// The host request ID must be new to the probe entries (03-10)
+			// and the machine entries (03-11, PD8) too; verifyHostIssue
+			// checks the other three kinds.
 			if prev, used := iss.probeIDs[kid.Request]; used {
 				return nil, fmt.Errorf("audit: entry %d (%s): request ID %s replayed: probe_issue entry %d already used it", want, leaf.Kind, kid.Request, prev)
+			}
+			if prev, used := iss.machineIDs[kid.Request]; used {
+				return nil, fmt.Errorf("audit: entry %d (%s): request ID %s replayed: machine_issue entry %d already used it", want, leaf.Kind, kid.Request, prev)
 			}
 			revs.addCert(c, kid)
 			rep.collect(opts, want, leaf.Kind, body.Cert)
@@ -948,6 +958,13 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if _, err := verifyProbeIssue(want, body, leaf.TimeMicros, &trustState, &dirState, &iss, hosts, revs); err != nil {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
+			// The probe request ID must be new to the machine entries too
+			// (03-11, PD8); verifyProbeIssue checks the other kinds.
+			if preq, err := wire.ParseProbeIssueSigningBytes(body.Request); err == nil {
+				if prev, used := iss.machineIDs[hex.EncodeToString(preq.RequestID[:])]; used {
+					return nil, fmt.Errorf("audit: entry %d (%s): request ID %x replayed: machine_issue entry %d already used it", want, leaf.Kind, preq.RequestID, prev)
+				}
+			}
 			if body.Negative {
 				pendingNegatives++
 			}
@@ -961,6 +978,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
 			hosts.revokeEntries(body.Entries)
+			machines.applyRevoke(body)
 		case tlog.KindKRLPublish:
 			body, err := tlog.DecodeKRLPublishBody(leaf.Body)
 			if err != nil {
@@ -988,18 +1006,21 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			for _, c := range carried {
 				rep.collect(opts, want, leaf.Kind, c)
 			}
-			// The host index, by the signer's rule and order (03-09): the
-			// carried kr3 host certificates first, paired with their Revoke
-			// flag (verifyRecovery carried every certificate in order), then
-			// the entries.
+			// The host and machine indexes, by the signer's rules and order
+			// (03-09, 03-11 PD3): the carried kr3 host and machine
+			// certificates first, paired with their Revoke flag
+			// (verifyRecovery carried every certificate in order), then the
+			// entries.
 			if req, err := wire.ParseRecoverySigningBytes(body.Request); err == nil {
 				for _, rc := range req.Certificates {
 					if c, err := parseCert(rc.Cert); err == nil {
 						hosts.carry(c, rc.Revoke)
+						machines.carry(c, rc.Revoke)
 					}
 				}
 			}
 			hosts.revokeEntries(body.Entries)
+			machines.revokeEntries(body.Entries)
 		case tlog.KindHostForget:
 			body, err := tlog.DecodeHostForgetBody(leaf.Body)
 			if err != nil {

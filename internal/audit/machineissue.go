@@ -15,6 +15,7 @@ import (
 	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/directory"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -40,7 +41,11 @@ const machineReservedPrefix = "probe."
 //  7. the entry of the request's name exists and lists the request's key;
 //  8. exactly one machine-pop/v1 evidence by that key verifies over the
 //     request's signing bytes under the machine namespace;
-//  9. no earlier explicit-key entry revokes the key; the entry is active;
+//  9. no earlier explicit-key entry revokes the key; the key is not held
+//     (cert.MachineCertHeld over the mirror: its latest certificate
+//     revoked and no newer directory version installed); the entry is
+//     active; the key is not a key of the bundle in force
+//     (machine_key_unusable);
 //  10. valid_for is 0;
 //  11. directory.MachineGrant and cert.MachineLifetime give L: CapSeconds
 //     is L, the certificate lives exactly L, its principals are the
@@ -50,7 +55,10 @@ const machineReservedPrefix = "probe."
 //     the request's key, and a kr3 key ID naming the machine CA, the
 //     entry, the request and the directory;
 //  13. the request ID is new across the issue, login, host, probe and
-//     machine entries.
+//     machine entries;
+//  14. fewer than twelve issuances of the key in the hour before the
+//     certificate's issuance second (cert.MachineRenewTooOften over the
+//     mirror's recent list).
 //
 // It records the certificate in machines.
 func verifyMachineIssue(index uint64, body *tlog.MachineIssueBody, leafMicros uint64, a *anchor, ds *directoryInForce, iss *issuance,
@@ -113,8 +121,19 @@ func verifyMachineIssue(index uint64, body *tlog.MachineIssueBody, leafMicros ui
 	if hosts.revokedKeys[k] {
 		return nil, fmt.Errorf("machine key %s is explicitly revoked by an earlier entry (machine_key_revoked)", ssh.FingerprintSHA256(key))
 	}
+	if l, ok := machines.latest[k]; ok && cert.MachineCertHeld(l.prev(), ds.version) != "" {
+		return nil, fmt.Errorf("machine key %s: its latest certificate, serial %d, was revoked at directory version %d and no newer directory version is installed (cert_revoked)",
+			ssh.FingerprintSHA256(key), l.cert.Serial, l.revokedAtDir)
+	}
 	if entry.Status != directory.StatusActive {
 		return nil, fmt.Errorf("directory v%d machine %q is %s, not active", ds.version, entry.Name, entry.Status)
+	}
+	instKeys, err := krl.InstallationKeys(a.bundle)
+	if err != nil {
+		return nil, fmt.Errorf("trust bundle v%d: %w", a.bundle.Version, err)
+	}
+	if instKeys[string(key.Marshal())] {
+		return nil, fmt.Errorf("machine key %s is a key of trust bundle v%d (machine_key_unusable)", ssh.FingerprintSHA256(key), a.bundle.Version)
 	}
 	if req.ValidForSeconds != 0 {
 		return nil, fmt.Errorf("request asks for valid_for %d s; the signer chooses the lifetime and refuses any value but 0", req.ValidForSeconds)
@@ -196,6 +215,9 @@ func verifyMachineIssue(index uint64, body *tlog.MachineIssueBody, leafMicros ui
 	if prev, used := iss.machineIDs[reqID]; used {
 		return nil, fmt.Errorf("request ID %s replayed: machine_issue entry %d already used it", reqID, prev)
 	}
+	if d := cert.MachineRenewTooOften(machines.recent[k], issuedSecs); d != "" {
+		return nil, fmt.Errorf("machine key %s already has %d issuances in the hour before %d (%s)", ssh.FingerprintSHA256(key), len(machines.recent[k]), issuedSecs, d)
+	}
 	iss.machineIDs[reqID] = index
 	iss.next(body.Serial)
 	machines.record(c, body.CapSeconds, body.DirectoryVersion)
@@ -226,11 +248,19 @@ func verifyMachinePoPEvidence(ev []wire.Evidence, signed []byte, key ssh.PublicK
 }
 
 // machineLatest is the latest machine certificate audit verify knows for
-// one machine key (03-11), as the signer's machine index keeps it.
+// one machine key (03-11), as the signer's machine index keeps it, with
+// whether it was revoked, at which directory version (keep-first).
 type machineLatest struct {
 	cert           *ssh.Certificate
 	capSeconds     uint64
 	issuedUnderDir uint64
+	revoked        bool
+	revokedAtDir   uint64
+}
+
+// prev is l as cert.MachineCertHeld takes it.
+func (l machineLatest) prev() cert.MachinePrev {
+	return cert.MachinePrev{Have: l.cert != nil, Revoked: l.revoked, RevokedAtDir: l.revokedAtDir}
 }
 
 // machinesInForce is audit verify's derivation of the signer's machine
@@ -272,4 +302,66 @@ func (m *machinesInForce) setLatest(c *ssh.Certificate, capSeconds, dir uint64) 
 func (m *machinesInForce) record(c *ssh.Certificate, capSeconds, dir uint64) {
 	k := m.setLatest(c, capSeconds, dir)
 	m.recent[k] = cert.MachineRecentAdd(m.recent[k], c.ValidAfter+backdateSeconds)
+}
+
+// carry records a recovery's carried kr3 ca=machine certificate that is
+// not a probe certificate as the latest of its key when its serial is
+// above the recorded one, marks it revoked when the recovery revokes it,
+// and never adds it to the recent list (PD3): the signer's rule.
+func (m *machinesInForce) carry(c *ssh.Certificate, revoke bool) {
+	if c.CertType != ssh.UserCert {
+		return
+	}
+	kid, err := cert.ParseKeyID(c.KeyId)
+	if err != nil || !kid.V3 || kid.CA != wire.CARoleMachine.String() || krl.IsProbeKeyID(kid) {
+		return
+	}
+	k := trust.FormatKey(c.Key)
+	if cur, ok := m.latest[k]; ok && cur.cert.Serial >= c.Serial {
+		return
+	}
+	life := uint64(0)
+	if c.ValidBefore > c.ValidAfter+backdateSeconds {
+		life = c.ValidBefore - c.ValidAfter - backdateSeconds
+	}
+	m.setLatest(c, life, kid.Directory)
+	if revoke {
+		m.markRevoked(k)
+	}
+}
+
+// applyRevoke applies a verified revoke entry to the mirror: its entries
+// (revokeEntries).
+func (m *machinesInForce) applyRevoke(body *tlog.RevokeBody) {
+	m.revokeEntries(body.Entries)
+}
+
+// revokeEntries applies a revoke or recovery entry list: a serial or key
+// ID that names a latest machine certificate under its CA key marks it
+// revoked at the directory version in force (explicit keys are the host
+// mirror's revokedKeys).
+func (m *machinesInForce) revokeEntries(entries []tlog.RevokedEntry) {
+	for _, e := range entries {
+		switch e.Kind {
+		case tlog.RevokedSerial:
+			if k, ok := m.bySerial[e.Serial]; ok && bytes.Equal(m.latest[k].cert.SignatureKey.Marshal(), e.CAKey) {
+				m.markRevoked(k)
+			}
+		case tlog.RevokedKeyID:
+			if k, ok := m.byKeyID[e.KeyID]; ok && bytes.Equal(m.latest[k].cert.SignatureKey.Marshal(), e.CAKey) {
+				m.markRevoked(k)
+			}
+		}
+	}
+}
+
+// markRevoked marks key k's latest certificate revoked at the directory
+// version in force; one already revoked keeps its version (keep-first).
+func (m *machinesInForce) markRevoked(k string) {
+	l, ok := m.latest[k]
+	if !ok || l.revoked {
+		return
+	}
+	l.revoked, l.revokedAtDir = true, m.curDir
+	m.latest[k] = l
 }

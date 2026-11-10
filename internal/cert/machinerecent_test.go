@@ -70,3 +70,69 @@ func TestMachineRecentAdd(t *testing.T) {
 		}
 	})
 }
+
+// TestMachineRenewTooOften: twelve issuance seconds in the hour before now
+// refuse the next request (03-11, PD4, T-03-401).
+func TestMachineRenewTooOften(t *testing.T) {
+	const now = 100000
+	in := func(n int, s uint64) []uint64 {
+		out := make([]uint64, n)
+		for i := range out {
+			out[i] = s + uint64(i) //nolint:gosec // G115: small test counts
+		}
+		return out
+	}
+	t.Run("eleven_allowed_twelve_refused", func(t *testing.T) {
+		if got := MachineRenewTooOften(in(11, now-100), now); got != "" {
+			t.Fatalf("eleven in the hour: %q, want allowed", got)
+		}
+		if got := MachineRenewTooOften(in(12, now-100), now); got != "machine_renew_too_often" {
+			t.Fatalf("twelve in the hour: %q, want machine_renew_too_often", got)
+		}
+	})
+	t.Run("window_edge", func(t *testing.T) {
+		// Eleven in-window seconds plus one exactly an hour before now: the
+		// edge is not counted, so the request is allowed.
+		edge := append(in(11, now-100), now-3600)
+		if got := MachineRenewTooOften(edge, now); got != "" {
+			t.Fatalf("a second exactly 3600 s old was counted: %q", got)
+		}
+		inside := append(in(11, now-100), now-3599)
+		if got := MachineRenewTooOften(inside, now); got != "machine_renew_too_often" {
+			t.Fatalf("a second 3599 s old was not counted: %q", got)
+		}
+	})
+	t.Run("future_seconds_counted", func(t *testing.T) {
+		if got := MachineRenewTooOften(in(12, now+500), now); got != "machine_renew_too_often" {
+			t.Fatalf("seconds after now (a clock stepped back): %q, want counted", got)
+		}
+	})
+	t.Run("empty_is_allowed", func(t *testing.T) {
+		if got := MachineRenewTooOften(nil, now); got != "" {
+			t.Fatalf("no issuance: %q", got)
+		}
+	})
+}
+
+// TestMachineCertHeld: the key's latest certificate, once revoked, holds
+// the key until a newer directory version is in force (03-11, Q-09-5,
+// default 2).
+func TestMachineCertHeld(t *testing.T) {
+	for name, tc := range map[string]struct {
+		prev   MachinePrev
+		curDir uint64
+		want   string
+	}{
+		"no_previous_certificate":          {MachinePrev{}, 5, ""},
+		"not_revoked":                      {MachinePrev{Have: true}, 5, ""},
+		"revoked_same_directory_held":      {MachinePrev{Have: true, Revoked: true, RevokedAtDir: 5}, 5, "cert_revoked"},
+		"revoked_older_directory_released": {MachinePrev{Have: true, Revoked: true, RevokedAtDir: 4}, 5, ""},
+		"equal_version_held":               {MachinePrev{Have: true, Revoked: true, RevokedAtDir: 7}, 7, "cert_revoked"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := MachineCertHeld(tc.prev, tc.curDir); got != tc.want {
+				t.Fatalf("MachineCertHeld(%+v, %d) = %q, want %q", tc.prev, tc.curDir, got, tc.want)
+			}
+		})
+	}
+}
