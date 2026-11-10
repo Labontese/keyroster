@@ -90,6 +90,64 @@ mutant killed: M66 MachineRecentAdd keeps the twelve smallest instead of the twe
 - MachineIssue refuses `bad_principal` only for a principal union above `cert.MaxPrincipals`, as the plan says. An empty union cannot pass `directory.Validate` (every role has a principal, directory.go:309; every machine a role, hosts.go:291).
 - The FuzzVerifyExport machine seed is built under the pinned fixture root. The test fails if the seed does not verify, as the login and forget seeds do.
 
+## Task 2
+
+T2: a037604
+
+### RED evidence
+
+- cert: `undefined: MachineRenewTooOften` (and MachineCertHeld, MachinePrev).
+- signer: `x.revoked undefined (type machineLatest has no field or method revoked)` (sameMachineIndex compares the new fields).
+- audit, against Task 1's verifier: the nine fail-direction subtests failed through `wantFail` with `verify = <nil>`. Task 1's verifier already refused a machine request ID that an earlier machine entry used, so for `machine_reuses_machine_request_id_fails` that check was removed for the stub run (not committed) and the subtest failed the same way.
+
+audit stub RED: 9 of 9 fail-direction subtests failed
+
+### Mutants
+
+Run as in Task 1: the named subtest alone and unmutated first (`--- PASS`), then the mutant on it with `-timeout 5m`, killed by its `--- FAIL` line, restored with `git checkout` and proven by `git diff --quiet HEAD`. None survived and none was equivalent.
+
+mutant killed: M25 the hold removed (TestMachineIssue/hold_after_revoke_same_dir)
+mutant killed: M26 the hold released at an equal directory version, < for <= in MachineCertHeld (TestMachineIssue/hold_equal_dir_version_still_holds and TestMachineCertHeld/equal_version_held, each killed it alone)
+mutant killed: M27 the bound 12 changed to 13 (TestMachineIssue/renew_bound_12_then_refused)
+mutant killed: M28 the bound keyed by machine name (TestMachineIssue/rename_keeps_window)
+mutant killed: M29 machine_key_unusable removed (TestMachineIssue/installation_key_unusable)
+mutant killed: M30 the index ignoring key-ID entries (TestMachineIssue/hold_after_key_id_revoke)
+mutant killed: M31 the window edge moved, a second exactly 3600 old counted (TestMachineRenewTooOften/window_edge)
+mutant killed: M32 a recovery-carried certificate counted toward the bound (TestMachineIssueRestart/recovery_carried_unrevoked_not_counted_toward_bound)
+mutant killed: M33 the classify row of machine_renew_too_often removed (TestMachineRefusalClasses/class_table)
+mutant killed: M34 machine refusals logged on s.limiter (TestMachineIssueBucket/flood_does_not_drain_shared_bucket)
+mutant killed: M35 the malformed 0x0C frame refused with s.refuse (TestMachineIssueBucket/malformed_frames_use_machine_bucket)
+mutant killed: M36 audit skips the hold (TestVerifyMachineIssue/hold_fails)
+mutant killed: M37 audit skips the bound (TestVerifyMachineIssue/bound_fails)
+mutant killed: M38 audit's mirror ignoring a recovery's carried certificates (TestVerifyMachineIssue/recovery_carried_hold_fails)
+mutant killed: M39 the host case not consulting machineIDs (TestVerifyMachineIssue/host_reuses_machine_request_id_fails)
+mutant killed: M51 the key hold moved before the PoP (TestMachineIssue/hold_bad_pop_is_pop_invalid)
+mutant killed: M52 the bound moved before the identity block (TestMachineIssue/bound_reached_bad_pop_is_pop_invalid)
+mutant killed: M53 machine_key_unusable moved before the PoP (TestMachineIssue/machine_key_unusable_bad_pop_is_pop_invalid)
+mutant killed: M54 the request-ID check removed (TestMachineIssue/request_id_reuse_before_bound)
+mutant killed: M55 the index revoke arm ignoring serial entries (TestMachineIssue/hold_after_revoke_same_dir)
+mutant killed: M56 audit's mirror counting a carried certificate toward the bound (TestVerifyMachineIssue/recovery_carried_not_counted_toward_bound_passes)
+mutant killed: M57 audit's mirror moving revokedAtDir on a re-listing (TestVerifyMachineIssue/relisting_keeps_first_passes)
+
+### Gates on a037604
+
+- Gate 1: every subtest of Task 2's behaviour list printed `--- PASS` under `-race`; no FAIL, panic or DATA RACE.
+- Gate 2: the six packages pass under `-race` (signer 391.990 s, audit 92.697 s, tlog 4.016 s, wire 9.312 s, cert 8.554 s, directory 20.402 s; a pass or fail run, not a delta reading); the frozen paths and the capslock baseline are unchanged (23 pairs); audit/hostissue.go and audit/probeissue.go are unchanged (PD8).
+- Gate 3: golangci-lint for linux, windows and darwin, gofmt.
+
+### Threat rows (Task 2)
+
+T-03-397 (the order: the key hold, the bound and machine_key_unusable each have a bad-signature subtest and an order mutant), T-03-398, T-03-400 (the key hold; the name hold is Task 3's), T-03-401 and T-03-402 are mitigated.
+
+### Deviations (Task 2)
+
+- `hold_equal_dir_version_still_holds` lets the revoked certificate expire and restarts the signer at the same directory version, so it shows that neither time nor a restart releases the hold; `hold_after_revoke_same_dir` covers the plain equal case.
+- `bad_pop_attempts_do_not_consume_the_bound` issues eleven certificates before the twenty refused attempts, so a counted attempt would refuse the twelfth issuance.
+- The hold, bound and unusable-key subtests share three environments built on first use with the parent test (PD9); each passes alone.
+- M28 changes two files: the index keys the recent list by the key ID's subject and MachineIssue reads it by the entry's name.
+- `TestMachineIssueBucket/admin_refusals_still_logged` uses a refused admin issue; `flood_does_not_drain_shared_bucket` uses a refused revoke.
+- audit's `installation_key_fails` logs a directory that lists the fixture's ops key as machine `opsm` (the fixture logs directories without the signer's install rules); the signer's `installation_key_unusable` stores one through `seedDirectory`.
+
 ## Open at T1
 
 The hold, the bound, `machine_key_unusable` and the index's revoke handling are Task 2's. The reservations and the machine subject revoke are Task 3's.
