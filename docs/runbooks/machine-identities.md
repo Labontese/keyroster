@@ -103,12 +103,14 @@ the text it prints.
 ### Unattended renewal and passphrases
 
 Keep an unencrypted key file readable only by the automation's user, or
-use an encrypted one with `--passphrase-fd N`, fed from a file the unit
-opens (for example systemd `LoadCredential=`), never from an argument or
-the environment. A stdin that is not a terminal never prompts: the CLI
-refuses at once. After signing, the CLI clears the key file buffer, the
-passphrase and an Ed25519 key; the big integers of an ECDSA private key
-cannot be cleared reliably in Go.
+use an encrypted one with `--passphrase-fd N`, where descriptor N is a
+file the job opens for the command, for example with the shell redirect
+`3< /path/to/passphrase` and `--passphrase-fd 3`; never pass the
+passphrase as an argument or in the environment. (UNVERIFIED: no test
+runs such a job; the tests pass the descriptor directly.) A stdin that is
+not a terminal never prompts: the CLI refuses at once. After signing, the
+CLI clears the key file buffer, the passphrase and an Ed25519 key; the big
+integers of an ECDSA private key cannot be cleared reliably in Go.
 
 ### Security keys
 
@@ -119,10 +121,12 @@ PIV through the agent. `--key` refuses an sk key file with a named error
 that points to `ssh-add` and `--agent-key`. CI runs this with OpenSSH's
 sk-dummy provider; a real hardware token is UNVERIFIED.
 
-### An example timer and cron line
+### An example cron line
 
-UNVERIFIED: no test runs a timer. An hourly line that renews only when the
-certificate is missing, for another key, name or CA, or due (from two
+UNVERIFIED: no test runs a cron job. An hourly line that renews only when
+the certificate is missing, does not verify under an active or next
+machine CA key, is not valid yet or any more, is for another key, name or
+CA, lacks a principal named with `--expect-principal`, or is due (from two
 thirds of its lifetime, earlier by a fixed amount per certificate of at
 most an hour and at most a tenth of the lifetime):
 
@@ -154,7 +158,13 @@ with `cert_revoked` while the disable is still a pending proposal, and with
 
 `keyroster machine remove` revokes nothing: the certificates the machine
 already holds stay valid until they expire, and the command says so and
-names `keyroster revoke machine`.
+names `keyroster revoke machine`. When the removal is only a proposal (an
+admin quorum above 1, or `--out`), the machine stays in the installed
+directory until the proposal is installed, and an active one keeps
+obtaining certificates; the command says so too. A `keyroster revoke
+machine` run before that install disables the machine in a competing
+directory version, and the removal must then be proposed again, so revoke
+first and remove after the disable is installed.
 
 Removing the last machine that names a machine-only role leaves the role
 granted to nobody, so it falls back to the user CA profile. While the role
