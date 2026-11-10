@@ -234,7 +234,7 @@ func rebuiltMachines(t *testing.T, e *machineEnv) machineIndex {
 // reads.
 func sameMachineIndex(a, b machineIndex) bool {
 	if a.curDir != b.curDir || !reflect.DeepEqual(a.bySerial, b.bySerial) || !reflect.DeepEqual(a.byKeyID, b.byKeyID) ||
-		!reflect.DeepEqual(a.recent, b.recent) || len(a.latest) != len(b.latest) {
+		!reflect.DeepEqual(a.recent, b.recent) || !maps.Equal(a.nameHeld, b.nameHeld) || len(a.latest) != len(b.latest) {
 		return false
 	}
 	for k, x := range a.latest {
@@ -985,6 +985,99 @@ func TestMachineIssueRestart(t *testing.T) {
 		r.refusedMachine(t, r.machineReq(r.k1, "ci"), "machine_renew_too_often", wire.CodeRefused)
 		r.verifyExport()
 	})
+	t.Run("name_hold_index_matches_rebuild", func(t *testing.T) {
+		e := idleMachine(t)
+		e.revokeMachineSubject(t, "ci")
+		live := liveMachines(e)
+		if live.nameHeld["ci"] == 0 {
+			t.Fatalf("the sweep armed no name hold: %+v", live.nameHeld)
+		}
+		if !sameMachineIndex(live, rebuiltMachines(t, e)) {
+			t.Fatal("the live machine index differs from a fresh rebuild")
+		}
+	})
+}
+
+// TestInstallDirectoryMachineReservations (03-11, default 5, PD5): a new
+// directory may not name a machine probe.* or give a machine a principal
+// union above cert.MaxPrincipals; a directory already stored with either
+// still loads and verifies.
+func TestInstallDirectoryMachineReservations(t *testing.T) {
+	// wide gives ci the roles r1 and r2 whose principals p00.. overlap so
+	// that their union has n principals.
+	wide := func(n int) func(*directory.Directory) {
+		return func(d *directory.Directory) {
+			var p1, p2 []string
+			for i := range n {
+				p := "p" + string(rune('a'+i/26)) + string(rune('a'+i%26))
+				if i < 20 {
+					p1 = append(p1, p)
+				}
+				if i >= n-20 {
+					p2 = append(p2, p)
+				}
+			}
+			d.Roles = append(d.Roles, directory.Role{Name: "r1", Principals: p1, MaxTTLSeconds: 3600},
+				directory.Role{Name: "r2", Principals: p2, MaxTTLSeconds: 3600})
+			for i := range d.Machines {
+				if d.Machines[i].Name == "ci" {
+					d.Machines[i].Roles = []string{"r1", "r2"}
+				}
+			}
+		}
+	}
+	probeMachine := func(name string) func(*directory.Directory) {
+		return func(d *directory.Directory) {
+			d.Machines = append(d.Machines, directory.Machine{Name: name, Key: trust.FormatKey(newEd25519(t).PublicKey()), Roles: []string{"deploy"},
+				MaxTTLSeconds: 3600, Status: directory.StatusActive})
+		}
+	}
+	t.Run("machine_name_reserved", func(t *testing.T) {
+		e := newMachineEnv(t)
+		doc, sigs := e.machineDirectory(t, probeMachine("probe.x"))
+		e.refuseInstall(t, &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}, "machine_name_reserved")
+	})
+	t.Run("names_near_the_prefix_fine", func(t *testing.T) {
+		e := newMachineEnv(t)
+		doc, sigs := e.machineDirectory(t, func(d *directory.Directory) {
+			for _, n := range []string{"probe", "probe-x", "xprobe.x"} {
+				probeMachine(n)(d)
+			}
+		})
+		e.installDirectory(t, doc, sigs)
+	})
+	t.Run("machine_principals_exceed", func(t *testing.T) {
+		e := newMachineEnv(t)
+		doc, sigs := e.machineDirectory(t, wide(33))
+		e.refuseInstall(t, &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}, "machine_principals_exceed")
+	})
+	t.Run("machine_principals_32_allowed", func(t *testing.T) {
+		// Two roles of twenty principals that share eight: the union is 32.
+		e := newMachineEnv(t)
+		doc, sigs := e.machineDirectory(t, wide(32))
+		e.installDirectory(t, doc, sigs)
+	})
+	t.Run("stored_directory_still_loads", func(t *testing.T) {
+		e := newMachineEnv(t)
+		doc, sigs := e.machineDirectory(t, func(d *directory.Directory) {
+			probeMachine("probe.x")(d)
+			wide(33)(d)
+		})
+		e.seedDirectory(t, doc, sigs)
+		e.docs = append(e.docs, doc)
+		e.restart(t)
+		if got := e.s.GetDirectory(); got.Version != uint64(len(e.docs)) || !got.Authorized {
+			t.Fatalf("the stored directory: version %d, authorized %t; want %d, true", got.Version, got.Authorized, len(e.docs))
+		}
+		e.verifyExport()
+	})
+	t.Run("refusal_classes", func(t *testing.T) {
+		for _, d := range []string{"machine_name_reserved", "machine_principals_exceed"} {
+			if c := classify(d); c != tlog.ReasonUnauthorized || codeFor(c) != wire.CodeRefused {
+				t.Errorf("%s: class %d, code %s", d, c, codeFor(c))
+			}
+		}
+	})
 }
 
 // TestMachineRefusalClasses: every detail the machine path returns has its
@@ -1012,6 +1105,8 @@ func TestMachineRefusalClasses(t *testing.T) {
 			"malformed_request":                   {tlog.ReasonMalformed, wire.CodeMalformed},
 			"request_time_skew":                   {tlog.ReasonStaleRequest, wire.CodeRefused},
 			"directory_changed":                   {tlog.ReasonUnavailable, wire.CodeUnavailable},
+			"machine_principals_exceed":           {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"subject_reserved":                    {tlog.ReasonMalformed, wire.CodeMalformed},
 		} {
 			if got := classify(d); got != want.class || codeFor(got) != want.code {
 				t.Errorf("classify(%q) = %d (%s), want %d (%s)", d, got, codeFor(got), want.class, want.code)

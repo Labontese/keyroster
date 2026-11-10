@@ -48,7 +48,9 @@ var errMachinePoP = errors.New("signer: machine proof of possession does not ver
 //   - state, after the proof of possession: the key not explicitly
 //     revoked; the key not held (its latest certificate revoked and no
 //     newer directory version installed: cert_revoked, default 2); the
-//     entry active; the key not one of the bundle in force; valid_for 0
+//     entry active; the name not held (a logged machine subject revoke of
+//     it and no newer directory version since: cert_revoked, PD11); the
+//     key not one of the bundle in force; valid_for 0
 //     (the signer chooses the lifetime, Q-09-6); the machine CA and
 //     profile; the grant (directory.MachineGrant); the bundle still in
 //     force; a request ID not used before; fewer than twelve issuances of
@@ -119,6 +121,13 @@ func (s *Signer) MachineIssue(ctx context.Context, peer Peer, req *wire.MachineI
 	}
 	if entry.Status != directory.StatusActive {
 		return nil, refusalErr(wire.CodeRefused, "machine_disabled", nil)
+	}
+	// The name hold (PD11): after the disabled check, so a disabled entry
+	// reports the stronger and lasting fact.
+	if v, held := s.loaded.machines.nameHeld[entry.Name]; held {
+		if d := cert.MachineCertHeld(cert.MachinePrev{Have: true, Revoked: true, RevokedAtDir: v}, s.directoryVersion); d != "" {
+			return nil, refusalErr(wire.CodeRefused, d, nil)
+		}
 	}
 	// Keyed by the wire bytes, as krl.InstallationKeys builds them (C11).
 	if s.installationKeys[string(reqKey.Marshal())] {

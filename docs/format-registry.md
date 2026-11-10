@@ -217,7 +217,7 @@ Names reserved for probe certificates (03-10). They are refused everywhere else:
 |---|---|---|
 | `keyroster-probe:` | principal prefix of a probe certificate (`keyroster-probe:<host>`) | `cert.Build` and `cert.CheckIssued` refuse it unless the profile is `certprofile.ProbeProfile` (`cert.ReservedPrincipalPrefix`, `ErrReservedPrincipal`). The signer refuses a new directory with a role principal that has it (`principal_reserved`) |
 | `keyroster-probe` | the probe account on a host | the signer refuses a new directory that maps it as a host-group account (`account_reserved`; `cert.ReservedAccountName`) |
-| `probe.` | key ID subject prefix of a probe certificate under `ca=machine` (`sub=probe.<host>`) | 03-11 refuses it as a machine name |
+| `probe.` | key ID subject prefix of a probe certificate under `ca=machine` (`sub=probe.<host>`) | the signer refuses a new directory with a machine of that name and a machine request for one (`machine_name_reserved`, install and issuance); the signer and audit refuse a machine subject revoke of such a name (`subject_reserved`) (03-11) |
 
 A directory already stored with such a name still loads and verifies. A login that would carry the prefix is refused at issuance.
 

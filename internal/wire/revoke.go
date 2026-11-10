@@ -58,8 +58,8 @@ const (
 )
 
 // SubjectKind names the kind of subject a TargetSubject request revokes.
-// It decodes user, host and machine; the signer refuses a kind it does not
-// resolve yet (subject_kind_unsupported).
+// It decodes user, host and machine, and the signer resolves all three
+// (machine since 03-11).
 type SubjectKind uint8
 
 // Subject kinds, one per CA role.
@@ -100,7 +100,9 @@ const MaxRevokeAnswerSerials = 4096
 // (internal/cert KeyID), and of a kr3 one up to 64 bytes. A subject never
 // contains "/", so it names exactly the key IDs whose sub field it
 // equals. A kr3 subject above 64 bytes is only a ca=machine `probe.`
-// subject (03-09, Q-09-8), and probes are never revoked by subject.
+// subject (03-09, Q-09-8), and probes are never revoked by subject: the
+// signer and audit refuse a machine subject with that prefix
+// (subject_reserved, 03-11).
 var subjectRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._@:+-]{0,63}$`)
 
 // MaxRequestSkewSeconds is the signer's freshness window: it refuses an

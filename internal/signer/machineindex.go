@@ -57,13 +57,18 @@ type machineIndex struct {
 	bySerial map[uint64]string
 	byKeyID  map[string]string
 	curDir   uint64
+	// nameHeld maps a machine name to the directory version in force at
+	// the latest logged machine subject revoke of it (the name hold,
+	// PD11): MachineIssue refuses that name cert_revoked until a newer
+	// directory version is installed.
+	nameHeld map[string]uint64
 }
 
 // clone is a deep copy of m (the certificates themselves are never
 // modified, and the recent slices are cloned, not aliased).
 func (m *machineIndex) clone() machineIndex {
 	c := machineIndex{latest: maps.Clone(m.latest), recent: maps.Clone(m.recent), bySerial: maps.Clone(m.bySerial),
-		byKeyID: maps.Clone(m.byKeyID), curDir: m.curDir}
+		byKeyID: maps.Clone(m.byKeyID), curDir: m.curDir, nameHeld: maps.Clone(m.nameHeld)}
 	c.init()
 	for k, v := range c.latest {
 		v.principals = slices.Clone(v.principals)
@@ -89,6 +94,9 @@ func (m *machineIndex) init() {
 	if m.byKeyID == nil {
 		m.byKeyID = map[string]string{}
 	}
+	if m.nameHeld == nil {
+		m.nameHeld = map[string]uint64{}
+	}
 }
 
 // machineRelevant reports whether apply changes the index for a leaf of
@@ -112,9 +120,12 @@ func machineRelevant(k tlog.Kind) bool {
 // latest for their key when their serial is above the indexed one, marked
 // revoked when the recovery's Revoke flag is set, and never entered in the
 // recent list, because their issuance belongs to a log that was lost
-// (PD3); its entries are applied after, as hostIndex.apply does. Audit
-// verify applies the same rules in the same order. Other kinds change
-// nothing.
+// (PD3); its entries are applied after, as hostIndex.apply does. A revoke
+// whose logged request is a machine subject revoke of S also holds the
+// name S at the directory version in force, whether or not it listed any
+// certificate (the name hold, PD11); a later one moves it, and a request
+// that does not parse is left to the revoke rules. Audit verify applies
+// the same rules in the same order. Other kinds change nothing.
 func (m *machineIndex) apply(l tlog.Leaf) error {
 	m.init()
 	switch l.Kind {
@@ -141,6 +152,9 @@ func (m *machineIndex) apply(l tlog.Leaf) error {
 			return fmt.Errorf("%w: leaf %d: revoke body does not decode", errLogMismatch, l.Index)
 		}
 		m.revokeEntries(b.Entries)
+		if req, err := wire.ParseRevokeSigningBytes(b.Request); err == nil && req.Target == wire.TargetSubject && req.SubjectKind == wire.SubjectMachine {
+			m.nameHeld[req.Subject] = m.curDir
+		}
 	case tlog.KindRevocationRecovery:
 		b, err := tlog.DecodeRecoveryBody(l.Body)
 		if err != nil {

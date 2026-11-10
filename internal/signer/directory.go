@@ -170,8 +170,10 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 		return nil, refusalErr(wire.CodeRefused, "directory_installation_unknown", err)
 	}
 	// The names reserved for probe certificates (03-10, Q4): a new
-	// directory may not grant the probe principal prefix to a role or map
-	// the probe account. Not in directory.Validate, so a directory already
+	// directory may not grant the probe principal prefix to a role, map the
+	// probe account or name a machine probe.* (03-11, PD5); nor give a
+	// machine more principals than a certificate holds (03-11, default 5).
+	// Not in directory.Validate or CheckPolicy, so a directory already
 	// stored still loads and verifies.
 	if detail := reservedNames(d); detail != "" {
 		return nil, refusalErr(wire.CodeRefused, detail, nil)
@@ -273,8 +275,12 @@ func (s *Signer) GetDirectory() *wire.GetDirectoryResponse {
 
 // reservedNames returns principal_reserved for a directory with a role
 // principal that has cert.ReservedPrincipalPrefix, account_reserved for
-// one with a host-group account named cert.ReservedAccountName, and ""
-// otherwise (03-10, Q4).
+// one with a host-group account named cert.ReservedAccountName (03-10,
+// Q4), machine_name_reserved for one with a machine named with the probe
+// key ID prefix, machine_principals_exceed for one with a machine whose
+// roles' principals together exceed cert.MaxPrincipals, so that it could
+// never renew (03-11, default 5), and "" otherwise. InstallDirectory alone
+// calls it.
 func reservedNames(d *directory.Directory) string {
 	for _, r := range d.Roles {
 		for _, p := range r.Principals {
@@ -288,6 +294,17 @@ func reservedNames(d *directory.Directory) string {
 			if a.Account == cert.ReservedAccountName {
 				return "account_reserved"
 			}
+		}
+	}
+	for i := range d.Machines {
+		m := &d.Machines[i]
+		if strings.HasPrefix(m.Name, reservedMachinePrefix) {
+			return "machine_name_reserved"
+		}
+		// A MachineGrant error cannot occur after Parse validated the
+		// roles; such a machine is left to Parse.
+		if g, err := d.MachineGrant(m); err == nil && len(g.Principals) > cert.MaxPrincipals {
+			return "machine_principals_exceed"
 		}
 	}
 	return ""

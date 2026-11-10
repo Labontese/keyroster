@@ -586,3 +586,111 @@ func TestExportMachineIssue(t *testing.T) {
 		}
 	})
 }
+
+// subjectMachine is a subject revocation of machine name (03-11).
+func subjectMachine(name string) *wire.RevokeRequest {
+	return &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectMachine, Subject: name}
+}
+
+// issueMachineKR1 logs one kr1 machine certificate with subject (keyroster
+// ca issue --ca machine --subject S, an hour) and returns it.
+func (mf *machineFixture) issueMachineKR1(subject string) *ssh.Certificate {
+	mf.t.Helper()
+	mf.serial++
+	mf.request++
+	keyID := cert.KeyID{CA: wire.CARoleMachine.String(), Subject: subject, Request: strings.Repeat(hex.EncodeToString([]byte{mf.request}), 16),
+		Policy: mf.pol.Version, Serial: mf.serial}
+	c, err := cert.Build(cert.Request{
+		Profile: roleProfile(ssh.UserCert), Subject: newSigner(mf.t, "ed25519").PublicKey(), Principals: []string{"deploy"},
+		Now: issuedAt(mf.serial), ValidFor: time.Hour, KeyID: keyID, Serial: mf.serial,
+	}, mf.machineCA, rand.Reader)
+	if err != nil {
+		mf.t.Fatal(err)
+	}
+	b, err := (&tlog.IssueBody{CARole: uint8(wire.CARoleMachine), Serial: mf.serial, PolicyVersion: mf.pol.Version, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
+	if err != nil {
+		mf.t.Fatal(err)
+	}
+	mf.add(tlog.KindIssue, b)
+	return c
+}
+
+// sweep logs a machine subject revoke of name listing entries (in serial
+// order) and the krl_publish the signer writes with it.
+func (mf *machineFixture) sweep(name string, entries ...tlog.RevokedEntry) {
+	mf.t.Helper()
+	mf.rev.revoke(subjectMachine(name), entries, nil)
+	mf.rev.publish(nil)
+}
+
+// TestVerifyRevokeMachine (03-11, REVOKE-01): audit verify re-derives a
+// machine subject revocation as the signer resolves it, refuses a probe.
+// subject, and holds the machine's name from the logged request until a
+// newer directory version (default 2 amended, PD11).
+func TestVerifyRevokeMachine(t *testing.T) {
+	const nameHold = "machine name ci held by the subject revoke at directory version"
+	t.Run("revoke_machine_rederived", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		m := mf.addMachine(mf.mkey, nil, nil, nil)
+		k := mf.issueMachineKR1("ci")
+		mf.sweep("ci", serialEntry(m.cert), serialEntry(k))
+		if rep := mf.wantPass(t); rep.Revocations != 1 || rep.RevokedEntries != 2 {
+			t.Fatalf("report: %d revocations, %d entries; want 1 and 2", rep.Revocations, rep.RevokedEntries)
+		}
+	})
+	t.Run("revoke_machine_subject_reserved_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.sweep("probe.web1")
+		mf.wantFail(t, "subject_reserved")
+	})
+	t.Run("revoke_machine_missing_serial_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		m := mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.issueMachineKR1("ci")
+		mf.sweep("ci", serialEntry(m.cert))
+		mf.wantFail(t, "for the admin-signed request")
+	})
+	t.Run("revoke_machine_extra_entry_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		m := mf.addMachine(mf.mkey, nil, nil, nil)
+		h := mf.addHost(mf.key, nil, nil, nil)
+		mf.sweep("ci", serialEntry(m.cert), serialEntry(h.cert))
+		mf.wantFail(t, "for the admin-signed request")
+	})
+	t.Run("name_hold_fails", func(t *testing.T) {
+		// Only a kr1 certificate of ci is live and no kr3 certificate of
+		// the key is logged, so only the name hold can fail the entry.
+		mf := newMachineFixture(t)
+		mf.sweep("ci", serialEntry(mf.issueMachineKR1("ci")))
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantFail(t, nameHold)
+	})
+	t.Run("idle_machine_name_hold_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.sweep("ci")
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantFail(t, nameHold)
+	})
+	t.Run("name_hold_released_by_newer_directory_passes", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.sweep("ci")
+		mf.publish()
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantPass(t)
+	})
+	t.Run("host_subject_revoke_no_name_hold_passes", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.rev.revoke(subjectHost("ci"), nil, nil)
+		mf.rev.publish(nil)
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantPass(t)
+	})
+	t.Run("name_hold_rearmed_fails", func(t *testing.T) {
+		mf := newMachineFixture(t)
+		mf.sweep("ci")
+		mf.publish()
+		mf.sweep("ci")
+		mf.addMachine(mf.mkey, nil, nil, nil)
+		mf.wantFail(t, nameHold)
+	})
+}

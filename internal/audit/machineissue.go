@@ -44,8 +44,9 @@ const machineReservedPrefix = "probe."
 //  9. no earlier explicit-key entry revokes the key; the key is not held
 //     (cert.MachineCertHeld over the mirror: its latest certificate
 //     revoked and no newer directory version installed); the entry is
-//     active; the key is not a key of the bundle in force
-//     (machine_key_unusable);
+//     active; its name is not held (a machine subject revoke of it and no
+//     newer directory version since, PD11); the key is not a key of the
+//     bundle in force (machine_key_unusable);
 //  10. valid_for is 0;
 //  11. directory.MachineGrant and cert.MachineLifetime give L: CapSeconds
 //     is L, the certificate lives exactly L, its principals are the
@@ -127,6 +128,9 @@ func verifyMachineIssue(index uint64, body *tlog.MachineIssueBody, leafMicros ui
 	}
 	if entry.Status != directory.StatusActive {
 		return nil, fmt.Errorf("directory v%d machine %q is %s, not active", ds.version, entry.Name, entry.Status)
+	}
+	if v, held := machines.nameHeld[entry.Name]; held && cert.MachineCertHeld(cert.MachinePrev{Have: true, Revoked: true, RevokedAtDir: v}, ds.version) != "" {
+		return nil, fmt.Errorf("machine name %s held by the subject revoke at directory version %d (cert_revoked)", entry.Name, v)
 	}
 	instKeys, err := krl.InstallationKeys(a.bundle)
 	if err != nil {
@@ -276,10 +280,14 @@ type machinesInForce struct {
 	bySerial map[uint64]string
 	byKeyID  map[string]string
 	curDir   uint64
+	// nameHeld is the signer's name hold (PD11): a machine name to the
+	// directory version in force at its latest logged subject revoke.
+	nameHeld map[string]uint64
 }
 
 func newMachinesInForce() *machinesInForce {
-	return &machinesInForce{latest: map[string]machineLatest{}, recent: map[string][]uint64{}, bySerial: map[uint64]string{}, byKeyID: map[string]string{}}
+	return &machinesInForce{latest: map[string]machineLatest{}, recent: map[string][]uint64{}, bySerial: map[uint64]string{}, byKeyID: map[string]string{},
+		nameHeld: map[string]uint64{}}
 }
 
 // setLatest makes c the latest certificate of its key and returns the key.
@@ -331,9 +339,15 @@ func (m *machinesInForce) carry(c *ssh.Certificate, revoke bool) {
 }
 
 // applyRevoke applies a verified revoke entry to the mirror: its entries
-// (revokeEntries).
+// (revokeEntries), then, for a machine subject revoke of S, the name hold
+// of S at the directory version in force, derived from the logged request
+// whether or not it listed a certificate (PD11), as the signer's index
+// does.
 func (m *machinesInForce) applyRevoke(body *tlog.RevokeBody) {
 	m.revokeEntries(body.Entries)
+	if req, err := wire.ParseRevokeSigningBytes(body.Request); err == nil && req.Target == wire.TargetSubject && req.SubjectKind == wire.SubjectMachine {
+		m.nameHeld[req.Subject] = m.curDir
+	}
 }
 
 // revokeEntries applies a revoke or recovery entry list: a serial or key

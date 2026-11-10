@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -299,6 +300,9 @@ func verifyRevoke(index uint64, body *tlog.RevokeBody, leafMicros uint64, a *anc
 		if !ok {
 			return fmt.Errorf("revokes a %s subject, which this version does not resolve", req.SubjectKind)
 		}
+		if req.SubjectKind == wire.SubjectMachine && strings.HasPrefix(req.Subject, machineReservedPrefix) {
+			return fmt.Errorf("revokes machine subject %q, a probe certificate's subject, which the signer refuses (subject_reserved)", req.Subject)
+		}
 		for _, serial := range rs.bySubject[role+"/"+req.Subject] {
 			if c := rs.certs[serial]; c.role == role && krl.EntryLive(c.validBefore, body.ResolvedAtSeconds) {
 				want = append(want, tlog.RevokedEntry{Kind: tlog.RevokedSerial, CAKey: c.caKey, Serial: serial, ValidBeforeSeconds: c.validBefore})
@@ -325,15 +329,17 @@ func verifyRevoke(index uint64, body *tlog.RevokeBody, leafMicros uint64, a *anc
 }
 
 // subjectRole maps a subject kind to the CA role whose certificates a
-// subject revocation resolves, as the signer maps it (03-09b): SubjectUser
-// to the user role, SubjectHost to the host role; SubjectMachine does not
-// resolve (03-11).
+// subject revocation resolves, as the signer maps it: SubjectUser to the
+// user role, SubjectHost to the host role (03-09b), SubjectMachine to the
+// machine role (03-11).
 func subjectRole(k wire.SubjectKind) (string, bool) {
 	switch k {
 	case wire.SubjectUser:
 		return trust.RoleUser, true
 	case wire.SubjectHost:
 		return trust.RoleHost, true
+	case wire.SubjectMachine:
+		return trust.RoleMachine, true
 	}
 	return "", false
 }

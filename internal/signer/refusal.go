@@ -305,7 +305,9 @@ func classify(detail string) uint8 {
 	case "malformed_frame", "unknown_message_type", "malformed_request", "directory_invalid",
 		// Revocation details (Phase 3).
 		"unknown_serial", "ca_role_mismatch", "subject_kind_unsupported", "key_is_ca_of_this_installation",
-		"key_id_not_issued", "explicit_key_cap_reached":
+		"key_id_not_issued", "explicit_key_cap_reached",
+		// A machine subject revoke of a probe. name (03-11).
+		"subject_reserved":
 		return tlog.ReasonMalformed
 	case "ca_not_configured":
 		return tlog.ReasonCANotConfigured
@@ -391,7 +393,10 @@ func classify(detail string) uint8 {
 		// disabled entry; and a name reserved for probe certificates.
 		"machine_issue_no_installation_id", "machine_issue_installation_mismatch", "machine_pop_not_enabled",
 		"unknown_machine", "machine_key_mismatch", "machine_pop_invalid", "machine_key_revoked", "machine_disabled",
-		"machine_name_reserved":
+		"machine_name_reserved",
+		// A new directory with a machine whose principal union a
+		// certificate cannot hold (03-11, default 5).
+		"machine_principals_exceed":
 		return tlog.ReasonUnauthorized
 	default:
 		return tlog.ReasonInternal
