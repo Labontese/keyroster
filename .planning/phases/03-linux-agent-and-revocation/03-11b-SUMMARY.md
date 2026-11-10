@@ -18,7 +18,7 @@ Owner answers: OQ-b1 OQ-b2 b-C1-to-b-C12
 AUTH-06: complete
 REVOKE-01: complete
 T-03-405: accepted (OQ-3); the runbook sentence is in machine-identities.md
-T-03-406: accepted (OQ-2); the named error, the runbook and the sk-dummy e2e step are in
+T-03-406: accepted (OQ-2); the named error, the runbook sentence and the sk-dummy e2e step are in place; a real token stays UNVERIFIED
 
 test-time base: server=115.228 serverclient=4.082 cmd=226.644 at=1794320369
 
@@ -162,7 +162,7 @@ The executors':
 
 - Task 1, e2e tracer: the role `deploy` is added at 12 h, the machine `ci` at 24 h, then the role is raised to 24 h with `role update`. A role that no user or group grants is checked against the user CA cap (12 h) until a machine carries it, so `role add deploy --max-ttl 24h` is refused before the machine exists. The certificate's lifetime is then 24 h, as the plan asks.
 - Task 1, RED order: the tests and the production code of Task 1 were written in the same pass, not tests first. The RED evidence above is the new tests run against origin/main's unchanged code (a compile failure, which the plan counts); no test was seen failing against a partial implementation.
-- Task 1, `TestMachineRenewNeverWritesKey`: the plan names "the base64 body lines of the key file" as needles. Go's pem writes 64-character lines (48 bytes each), and one of them holds only the public-key blob and the zero bytes after it; that line also appears, aligned, inside the request's base64, which carries the public key on purpose, so the literal rule fails on a correct implementation. The test keeps the raw 32-byte seed, the full 64-byte private key and every body line that carries a seed byte (found by decoding the body and locating the seed), all from the test's own source. Open item for Daniel.
+- Task 1, `TestMachineRenewNeverWritesKey`: the plan names "the base64 body lines of the key file" as needles. Go's pem writes 64-character lines (48 bytes each), and one of them holds only the public-key blob and the zero bytes after it; that line also appears, aligned, inside the request's base64, which carries the public key on purpose, so the literal rule fails on a correct implementation. The test keeps the raw 32-byte seed, the full 64-byte private key and every body line that carries a seed byte (found by decoding the body and locating the seed), all from the test's own source. Accepted by Daniel as it is (2026-11-10, Pre-merge review 1).
 
 ## Threats
 
@@ -172,16 +172,16 @@ The executors':
 - T-03-74 and T-03-244: mitigated. The key file is bounded to 64 KiB before any parse, a passphrase is read only from `--passphrase-fd` or a terminal (never from a stdin that is not one), the file buffer, the passphrase and the Ed25519 key are cleared after signing, and no error carries key or passphrase bytes (`TestMachineKeyInput/*`, `FuzzMachineKeyFile`). ECDSA big integers cannot be cleared reliably in Go; the runbook says so in Task 5.
 - T-03-72 (CLI half): mitigated. `revoke machine` sweeps every live certificate of the name, disables the entry and sweeps again, `--keys` blocks the entry's key, the exit-4 text names both holds, and every run that sent a request prints the former-name line (`default_no_keys_exit0`, `keys_revokes_entry_key`, `pending_proposal_exit4_names_both_holds`, `rename_line_every_run`, M94 to M98). Residual: certificates the same key obtained under a former name stay live until expiry, `revoke machine OLDNAME` or `--keys`; the CLI cannot see former names.
 - T-03-409: mitigated. `checkHostTrustFloor` is the CheckBase of both kinds (M94); with no host trust state of this installation no floor is checked, and the output says so, as for hosts.
-- T-03-411: accepted (OQ-4 of 03-11). `machine remove` revokes nothing; an installed or proposed removal ends with the hint that names `keyroster revoke machine` and `keyroster revoke key` (M99); a refused edit prints none.
+- T-03-411: accepted (OQ-4 of 03-11). `machine remove` revokes nothing; an installed or proposed removal ends with a hint that names `keyroster revoke machine` (M99), worded by outcome since Pre-merge review 1; a refused edit prints none.
 - T-03-404: accepted. Every `revoke machine` run that sent a request ends with `recoveryKeptNotice` (M100).
-- T-03-406: mitigated (CLI half). An sk key file is refused by its clear header before any prompt with the named error that points to `ssh-add` and `--agent-key` (`TestMachineKeyInput/sk_key_file_named_error/*`); a real security key stays UNVERIFIED (OQ-2).
+- T-03-406: accepted (OQ-2), with the CLI half in place. An sk key file is refused by its clear header before any prompt with the named error that points to `ssh-add` and `--agent-key` (`TestMachineKeyInput/sk_key_file_named_error/*`); a real security key stays UNVERIFIED (OQ-2).
 
 ## x/crypto v0.58.0 (Task 2 Step 0, re-read in the module cache)
 
 - An encrypted openssh-key-v1 file gives `*ssh.PassphraseMissingError` with `PublicKey` set from the clear header (`parseOpenSSHPrivateKey` fills it from `w.PubKey`); an encrypted legacy PEM block gives it with `PublicKey` nil.
 - An unencrypted sk file gives the bare text `ssh: unhandled key type` (the default arm of the key-type switch).
 - A wrong passphrase gives `x509.IncorrectPasswordError`.
-- Task 2, the refused-answer text: the plan's words, with the serial added inside the second sentence ("The signer logged the issuance (serial N) and it counts toward the 12 per hour for this key"), so an admin can find the issuance in the log.
+- Task 2, the refused-answer text: the plan's words, with the serial added inside the second sentence ("The signer logged the issuance (serial N) and it counts toward the 12 per hour for this key"), so an admin can find the issuance in the log. Pre-merge review 1 rewords it to "(serial N, as the server's answer reports it)" (owner decision, 2026-11-10).
 - Task 2, sk detection: only by the clear header of an openssh-key-v1 file (PD6). The second check on `PassphraseMissingError.PublicKey` that the plan's Step 2 allows was left out: x/crypto sets that field only for openssh-key-v1 files, which the header check already covers, so it could never refuse anything the first did not.
 - Task 2, test seams: `machineRenewTimeNow` (the clock of `--if-due` and CreatedAt) and `machineKeyParseHook` (counts parses for `over_max_refused_before_parse`), besides the plan's `machineKeyBufferHook`.
 - Task 5, STATE.md and ROADMAP.md were edited by hand instead of through the GSD tracking update, so that no neighbouring row could be ticked by prefix match (PD14); the result is the three-line ROADMAP diff the gate accepts.
@@ -196,15 +196,61 @@ The executors':
 ## Handover
 
 - Executor run 1 did Tasks 1 and 2 and stopped under the half-context rule; executor run 2 did Tasks 3 to 5. The fuzz job that was still running at the first handover passed (see Readings).
-- State at the end of run 2: PR #97 is open without auto-merge and waits for the orchestrator's pre-merge review and the owner's merge gate. No fix round has run yet.
+- State at the end of run 2: PR #97 is open without auto-merge and waits for the orchestrator's pre-merge review and the owner's merge gate. Pre-merge review 1 and its fix round followed (below).
 - `TestAgentEnrollEndToEnd` flaked once on main 10.5p1 in run 1 (sshd PerSourcePenalties closed the login before authentication); a rerun passed. It is outside files_modified.
+
+## Pre-merge review 1
+
+The orchestrator's pre-merge review of PR #97 confirmed four items and split on two more, which were cheap to fix. It also brought two owner decisions. Each code fix has a test that fails when the fix is reverted. Each revert was applied alone in the working tree, run, and restored from the index; `git diff --exit-code` was clean before the next one.
+
+- **F1 (medium): `--if-due` trusted the cached certificate.** `machineCertCurrent` only compared the signature key with an active or next machine CA key, so a CERTFILE with changed bytes or a future ValidAfter counted as current. It now also requires principals and no critical option. It verifies the signature and the window with `ssh.CertChecker` at the injected clock (`machineRenewTimeNow`), so ValidAfter <= now < ValidBefore. Any failure is due, and the command renews (cmd/keyroster/machinerenew.go, `machineCertCurrent`).
+  - `TestMachineRenewIfDue/bad_signature_is_due` changes Serial after signing and keeps the bundle's signature key. `future_valid_after_is_due` uses a future ValidAfter. Reverting the `CheckCert` call fails both.
+  - `no_principals_is_due`: dropping the principal guard panics (index out of range), which fails it.
+- **F2 (medium): `--if-due` ignored `--expect-principal`.** The expected principals now go into `machineCertCurrent`. A cached certificate that lacks one is due, and the fresh answer goes through the full check.
+  - `TestMachineRenewIfDue/missing_expected_principal_is_due` wants a renewal that carries the principal, exit 0 and one request. It fails on revert.
+  - `expected_principal_present_not_due` keeps a certificate that has the principal, which kills an always-due mutant.
+- **F3 (low): the `machine remove` hint was wrong after a proposal.** `runMachineRemove` now branches on `editDirectoryOutcome` and on the removed entry's status (cmd/keyroster/machine.go).
+  - The installed case keeps its text byte for byte.
+  - A proposed removal of an active machine says that it stays in the installed directory, active, and keeps obtaining certificates until the install. It also says that a `keyroster revoke machine NAME` run before the install disables it in a competing directory version, so the removal must be made again. It then gives the rotate recipe's order: `revoke machine NAME --keys` first and, once its disable is installed, `machine remove NAME`.
+  - A proposed removal of an entry that is already disabled (the recipe's order) says that the machine obtains no new certificate and that `revoke machine` then changes no directory version.
+  - Test: `TestMachineCommands/machine_remove_prints_revoke_hint/{installed,installed_disabled,proposed_active,proposed_disabled}`. Each subtest wants its own hint and none of the others. Forcing the installed hint fails `proposed_active` and `proposed_disabled`, and dropping the disabled branch fails `proposed_disabled`.
+  - machine-identities.md "Remove a machine or rotate its key" says the same in prose.
+- **F4 (medium): the restore runbook batched the pending-disable re-runs.** With two or more pending disables, every re-run built on the same version. After the first install the others were refused, and their holds were released before the firewall rule came down. The part "Pending disables" of docs/runbooks/signer-install.md now goes one name at a time:
+  - re-run the name, co-sign and install exactly one of its two proposals, and only then go to the next name;
+  - before the export, confirm every name (new step 4): run `keyroster revoke machine NAME` (or `revoke host NAME`) once more, without `--out`. It must exit 0 and print the line that starts `Directory version V lists NAME as disabled (the server's word), and the KRL lists every certificate of NAME`. That is the already-disabled path in cmd/keyroster/revoke.go, which `TestRevokeMachine` in cmd/keyroster/revoke_test.go pins for a machine;
+  - the export and the lift are now step 5.
+  - The sweep reference names revoke.md section 4c for a machine and section 4b for a host. The lens was right: 4b is `revoke host`.
+  - The firewall paragraph and step 3 each gained a sentence: a pending disable counts as revoked again only once it is installed and confirmed.
+  - **No gated sentence changed.** The following are byte-identical and in the gated order: step 2b's "whose disable is still pending" sentence, "Keep it until the pending disables at the end of step 3 have been revoked again.", "Keep users away until the pending disables below have been revoked again", the heading sentence, `revoke.md, section 4c`, the re-run command and "lift the firewall rule only after that". The plan copy is unchanged.
+  - The Task 5 docs gate exits 0, and `TestHostTrustRunbooks` and the runbook tests of cmd/keyroster pass.
+  - The part stays UNVERIFIED: no test runs a restore with a pending disable.
+- **F5 (low): the key material was cleared only at return.** `runMachineRenew` now clears the key file buffer, the passphrase and the Ed25519 key right after `machineRenewRequest` returns, before the request is sent. A `wiped` flag makes the clear run only once, and the defer still covers early returns.
+  - Test: `TestMachineKeyInput/parse_clears_buffers` now also wants the stub to have received no request when `machineKeyBufferHook` fires.
+  - Removing the explicit clear fails it, because the hook then fires after the request. Removing the flag fails it too (two hook calls).
+- **F6 (low): the docs claimed examples that do not exist.**
+  - machine-identities.md: the heading is now "An example cron line". The `LoadCredential=` wording is gone, because that directive opens no descriptor.
+  - `--passphrase-fd N` is now described as a descriptor the job opens for the command, for example `3< /path/to/passphrase` with `--passphrase-fd 3`, and is labelled UNVERIFIED.
+  - The "renews only when" sentence names the new due cases of F1 and F2.
+  - In this SUMMARY, the UNVERIFIED item names the cron line and the redirect, not a timer or `LoadCredential=`.
+  - The T-03-406 front-matter line is complete again. It keeps "accepted", which is the plan's disposition (threat register: accept, OQ-2) and what the SUMMARY gate greps. The Threats line that said "mitigated (CLI half)" now says accepted, with the CLI half in place.
+- **Owner decision 1 (Daniel, 2026-11-10): the refused-answer text keeps the serial, as the server reported it.** The text is now "The signer logged the issuance (serial N, as the server's answer reports it) and it counts toward the 12 per hour for this key" (machinerenew.go). `TestMachineRenew/answer_refused_text` and every `TestMachineRenewChecksAnswer` case assert it, and the old wording fails them.
+- **Owner decision 2 (Daniel, 2026-11-10): the narrowed needle rule of `TestMachineRenewNeverWritesKey` is accepted as it is.**
+
+Not fixed:
+- The x/crypto PEM copies of the key, and the hourly cron line combined with a short max TTL: both refuted in the review.
+- The Codex lens's variant of F1: F1's fix covers it.
+- A FIFO or other non-regular file at CERTFILE that blocks `--if-due`, a side note of one F1 lens: outside this round. It is in the same class as the key-path FIFO residual under UNVERIFIED, and is left for a later plan.
+
+Readings of this round:
+- `go test -race -count=1 -timeout 15m ./cmd/keyroster/` through scripts/linux.sh passed in 265.414 s. The base above is 226.644 s; this round adds nine subtests.
+- `TestMachineIdentityEndToEnd` could not run locally: the WSL resolver does not resolve `keyroster.localhost`, so `keyroster init` fails before any machine step. The e2e-probe job on the new head is the evidence.
 
 ## UNVERIFIED
 
 **UNVERIFIED in this repository** (nothing named above exercises it; the SUMMARY repeats the list):
 - A real hardware security key as a machine key: the signer and the CLI are tested with a software sk signer (03-11) and with sk-dummy through a real ssh-agent (`sk_through_agent`); a real token's touch, and an hourly timer failing on it, stay UNVERIFIED until the homelab drill (T-03-406).
 - `--agent-key` over a real Windows named pipe: the CLI tests replace `dialAgent` with an in-memory keyring on every OS, and the windows and macOS lanes run the CLI tests only; the Windows pipe path is UNVERIFIED.
-- The systemd timer, the `LoadCredential=` line and the cron line of the runbook: UNVERIFIED until a real unit runs them.
+- The cron line of the runbook, and a job that feeds `--passphrase-fd` through a shell redirect: UNVERIFIED until a real job runs them (the runbook has no systemd unit or timer; the tests pass the descriptor directly).
 - A signer restore with a pending disable, end to end (T-03-410): no test runs it; the runbook part is labelled UNVERIFIED. The re-run order is 03-11's pre-merge decision, and the mechanism (a recovery's carried certificate and the name hold) is unit-tested in 03-11.
 - The timing of the generic answer (T-03-407): no timing test; the residual is accepted and the limiter and network noise blunt it.
 - Principals are not checked against the directory by `machine renew` except through `--expect-principal`, because the CLI holds no signed directory (T-03-408 residual).
@@ -226,8 +272,10 @@ The executors':
 
 ## Open questions for Daniel
 
-- The narrowed needle rule of `TestMachineRenewNeverWritesKey` (the seed, the full private key and every body line that carries a seed byte, instead of every base64 body line of the key file; see Deviations, Task 1). Open.
-- Whether "(serial N)" stays in the refused-answer text of `machine renew` (see the x/crypto section, Task 2). Open.
+- The narrowed needle rule of `TestMachineRenewNeverWritesKey` (the seed, the full private key and every body line that carries a seed byte, instead of every base64 body line of the key file; see Deviations, Task 1). Decided by Daniel, 2026-11-10: accepted as it is (Pre-merge review 1).
+- Whether "(serial N)" stays in the refused-answer text of `machine renew` (see the x/crypto section, Task 2). Decided by Daniel, 2026-11-10: it stays, worded "(serial N, as the server's answer reports it)" (Pre-merge review 1).
+
+No question is open.
 
 ## For later plans
 
@@ -248,7 +296,7 @@ Not done here (from the plan):
 | A `--sweep-only` flag: the restore re-run accepts a second proposal (install exactly one) | not planned |
 | A `--config` flag for `machine renew`: the automation uses its OS user's config directory | not planned |
 | A change to `ca issue --ca machine` (kr1), to pop.machines semantics, or to CA rotation; whether `machine renew` accepts a draining CA key (b-C3) | 03-12 |
-| The real sk token, Windows `--agent-key` over a real named pipe, the timer and cron examples and a restore with a pending disable | the homelab drill, 03-16 |
+| The real sk token, Windows `--agent-key` over a real named pipe, the cron example and a restore with a pending disable | the homelab drill, 03-16 |
 | A job of its own for the machine e2e test, or running it in the main lanes (needs a ruleset change or eats the headroom of 03-12 to 03-16) | the owner, only if the probe lane exceeds 420 s |
 | A later plan that edits docs/runbooks/machine-identities.md and depends on this one: its line references are stale after this PR | its re-plan, flagged to the orchestrator |
 | Later plans that depend on this one and are not yet in the repository: when re-planned they must correct the REVOKE-01 owner and their wave numbers; this plan's tracking edits do not change | their re-plans, flagged to the orchestrator |
