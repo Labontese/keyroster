@@ -11,7 +11,9 @@ requirements-completed: []
 
 Draft kept current at each task boundary.
 
-test-time base: server=185.572 serverclient=5.060 cmd=300.578 at=1794313017
+test-time base: server=115.228 serverclient=4.082 cmd=226.644 at=1794320369
+
+The base was re-measured in place during Task 4 (detached worktree outside the repository at origin/main fdee078, nothing else running locally; the CI e2e run was remote). The first base (server=185.572 serverclient=5.060 cmd=300.578 at=1794313017) was slow: every later reading was below it. The T1 to T3 deltas below were taken against that first base.
 
 ## Reconcile (Task 1 Step 0)
 
@@ -35,7 +37,9 @@ T1 RED: `go vet -tags "e2e e2emachine" ./test/e2e/` on origin/main's harness: `t
 T1: fbec252
 T2: a359def
 T3: 84fd115
+T4: b8d5c69
 
+- T4: the rest of `TestMachineIdentityEndToEnd` (collapse_is_generic, if_due_sends_nothing, revoke_machine_refuses_login_and_renewal, keys_revokes_key_for_good, sk_through_agent, sk_key_file_named_error, audit_verify_counts_machine_certificates), in b8d5c69. The e2e test proves behaviour the unit tests of Tasks 1 to 3 prove, so there was no CI RED run; the evidence is the green run below. Verify 1 (the three vets, gofmt, the e2e lint on new lines: 0 issues) and verify 2 (no main lane ran the machine test) pass on b8d5c69. Task 1's variable `krl` (the KRL layout) is renamed `krlDir` so the package krl can be imported.
 - T3: `revoke machine` through the kind-driven `runRevokeEntry`, the `machine remove` hint and the `machine certificates: N` line, in 84fd115. Verify gates 1 (94 PASS lines, every named one present, TestRevokeHost and TestRevokeUser whole) and 2 (revoke_test.go loses only the one `subject_kind_unsupported` row; the three packages under -race; frozen paths; capslock) pass on it. M108's killer `TestRevokeHost/proposal_exit_4_text_names_hold` exists on origin/main fdee078 under that name (revoke_test.go:1101) and asserts the host exit-4 text.
 - T3, host byte identity: every string literal of origin/main's `runRevokeHost` is in the new revoke.go verbatim except eight, each an exact template of the old text: the five `run keyroster revoke host %s again` texts now read `keyroster %s %s again` with `revoke host`, `host key %s was not revoked` reads `%s %s` with the label `host key`, and the flag-set name is `"revoke " + kind`. The host's flag help, refusals, hold text, unknown-name line and success tail are whole literals of `hostRevokeKind`. TestRevokeHost (unchanged) passes whole.
 - T2: key input, `--agent-key`, the full answer check, `--expect-principal`, `--if-due`, one text per refusal and the two fuzz targets, in a359def. Verify gates 1 to 4 passed on 976a1a4, whose code is the same except one fuzz seed, rewritten so that no private-key armor line sits in the source (the pre-push scan refused it); on a359def itself, verify 1 (85 PASS lines, no FAIL and no SKIP) and verify 2 (both fuzz targets at 20 s, no corpus file) were re-run and pass, as were vet and lint.
@@ -97,6 +101,13 @@ e2e GREEN run: 42821481669 (workflow_dispatch on fbec252): main lanes 788.457 s 
 - CI 42825986252 (on 4668ecc, Task 2's code): every job green, the fuzz job included (success in 33 m 36 s against 03-11's 32 m 21 s, with the two new targets).
 - T3 reading (same command, gate 2 on 84fd115): server=125.493 serverclient=4.106 cmd=252.057 (deltas -60.1, -1.0, -48.5 s against the base of epoch 1794313017).
 - Fuzz (20 s each on 976a1a4; FuzzMachineKeyFile again for 10 s on a359def): FuzzMachineKeyFile and FuzzMachineRenewAnswer found nothing; no corpus file was written.
+e2e GREEN run: 42832901949 (workflow_dispatch on b8d5c69): every named PASS line on both probe lanes, both main lanes green with no machine and no probe test line.
+e2e probe lane 9.5p1: 282.143 s
+e2e probe lane 10.5p1: 277.041 s
+e2e main lane 9.5p1: 760.192 s
+e2e main lane 10.5p1: 799.599 s
+- Lane times against 03-11 (PR #95): main 787.355 s (9.5p1) and 770.902 s (10.5p1), probe 292 s. The probe lanes stay under 420 s with the whole machine test; the main lanes do not compile it (tag `e2emachine`), so their change is runner noise.
+- Local e2e of all of `TestMachineIdentityEndToEnd` (10.5p1, the namespace wrapper of 03-10b): every subtest passed before the push.
 - Local e2e (10.5p1, namespace wrapper of 03-10b): `TestMachineIdentityEndToEnd/renew_and_login` passed (5.23 s) before the push.
 
 ## Deviations
