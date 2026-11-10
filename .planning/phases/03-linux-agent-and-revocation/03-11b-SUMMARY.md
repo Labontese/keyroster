@@ -26,12 +26,15 @@ collapsed details: empty_principals, bad_subject_key, bad_subject, bad_validity,
 ## RED evidence
 
 T1 RED: the Task 1 tests copied onto origin/main (fdee078) in a detached worktree fail to compile: `internal/server/capacity_test.go: sg.MachineIssue undefined (type signerAPI has no field or method MachineIssue)`, `internal/serverclient/machine_test.go: undefined: MachineRenewRequest`, `cmd/keyroster/dirpipe_test.go: undefined: serverclient.MachineRenewPath`.
+T2 RED: the Task 2 tests copied onto fbec252 (Task 1's code) in the detached worktree fail to compile: `cmd/keyroster/machinekey_test.go: undefined: machineKey`.
 T1 RED: `go vet -tags "e2e e2emachine" ./test/e2e/` on origin/main's harness: `test/e2e/machine_test.go: unknown field PoPMachines in struct literal of type serverOpts`.
 
 ## Tasks
 
 T1: fbec252
+T2: a359def
 
+- T2: key input, `--agent-key`, the full answer check, `--expect-principal`, `--if-due`, one text per refusal and the two fuzz targets, in a359def. Verify gates 1 to 4 passed on 976a1a4, whose code is the same except one fuzz seed, rewritten so that no private-key armor line sits in the source (the pre-push scan refused it); vet, lint and the fuzz target were re-run on a359def.
 - T1 (tracer): the route, the budget share, the client, the first slice of `machine renew` and the e2e tracer, in fbec252. Verify gates 1 to 6 pass on it.
 
 ## Mutants
@@ -63,12 +66,23 @@ mutant killed: M110 an unlisted CodeMalformed detail passed through with its own
 mutant killed: M103 the certificate type not checked, a host certificate accepted (TestMachineRenewChecksAnswer/host_cert_type_refused)
 mutant killed: M104 the CertChecker.CheckCert call removed (TestMachineRenewChecksAnswer/bad_signature)
 mutant killed: M105 the same-file check removed, path comparison only (TestMachineRenew/out_is_key_file_refused/hard_link)
+mutant killed: M82 a file of 64 KiB + 1 parsed (TestMachineKeyInput/over_max_refused_before_parse)
+mutant killed: M83 a passphrase read from a non-terminal stdin (TestMachineKeyInput/encrypted_no_terminal_refused_immediately)
+mutant killed: M84 sk detection removed, an encrypted sk file prompts (TestMachineKeyInput/sk_key_file_named_error/encrypted)
+mutant killed: M89 --expect-principal ignored (TestMachineRenewChecksAnswer/missing_expected_principal)
+mutant killed: M93 the buffers not cleared (TestMachineKeyInput/parse_clears_buffers)
+mutant killed: M91 --if-due sends when not due (TestMachineRenewIfDue/not_due_sends_nothing)
+mutant killed: M92 --if-due trusts a certificate for another key (TestMachineRenewIfDue/other_key_is_due)
+mutant killed: M106 a lifetime above the machine cap accepted (TestMachineRenewChecksAnswer/lifetime_above_cap)
+mutant killed: M107 the explicit critical-option check removed (TestMachineRenewChecksAnswer/critical_option_refused)
 
 ## Readings
 
 - T1 reading (`go test -race -count=1 -timeout 15m` of the three packages, on fbec252): server=155.905 serverclient=4.382 cmd=253.606 (deltas -29.7, -0.7, -47.0 s against the base; the base run was slower than this one, so the deltas are noise in the base, not a speed-up).
 e2e GREEN run: 42821481669 (workflow_dispatch on fbec252): main lanes 788.457 s (9.5p1) and 789.537 s (10.5p1), neither ran `TestMachineIdentityEndToEnd`; probe lanes 286.118 s (9.5p1) and 292.194 s (10.5p1), each with `--- PASS: TestMachineIdentityEndToEnd` and its subtest `renew_and_login`.
 - e2e run 42819221877 (the first dispatch, same commit): both probe lanes green (294.899 s and 287.177 s, the machine test passed) and main 9.5p1 green (790.192 s), but main 10.5p1 failed `TestAgentEnrollEndToEnd` at agent_enroll_test.go:369: sshd 10.5p1 logged `srclimit_penalise ... connections without attempting authentication` and closed the login before authentication, so the "revoked by file" line never came. That test and its files are untouched here; the rerun 42821481669 passed it on both lanes. Recorded as a flake of the main lane, not fixed (outside files_modified).
+- T2 reading (same command, on 976a1a4, the same code): server=128.722 serverclient=4.182 cmd=251.653 (deltas -56.9, -0.9, -48.9 s against the base; the cmd package stays below the base although it gained about 70 subtests, so the base run was slow).
+- Fuzz (20 s each on 976a1a4; FuzzMachineKeyFile again for 10 s on a359def): FuzzMachineKeyFile and FuzzMachineRenewAnswer found nothing; no corpus file was written.
 - Local e2e (10.5p1, namespace wrapper of 03-10b): `TestMachineIdentityEndToEnd/renew_and_login` passed (5.23 s) before the push.
 
 ## Deviations
@@ -81,10 +95,24 @@ e2e GREEN run: 42821481669 (workflow_dispatch on fbec252): main lanes 788.457 s 
 
 - T-03-73 (route half): mitigated. The route has its own per-client limiter (30 per minute, burst 10, global backstop 300 and 100), a 16 KiB body cap and strict JSON (`TestMachineRenewRoute/limiter_429_after_burst`, `oversize_413`, `unknown_field_400`, `malformed_body_400`).
 - T-03-397 (server half): mitigated. Only the 16 allowlisted details pass through; every other refused detail answers `machine_not_authenticated`, every unlisted malformed detail `malformed_request`, and the log keeps the specific detail (`identity_details_collapsed/*`, `unlisted_detail_collapsed`, `unlisted_malformed_collapsed`).
-- T-03-408: mitigated (Task 1 half). `machine renew` checks the answer against the root-verified bundle: an active or next machine CA key, a user certificate, principals present, signature and window by `CheckCert`, the request's key, kr3 with ca=machine, the name and this request's `req=` (`TestMachineRenewChecksAnswer/*`). Task 2 adds the lifetime, extension, critical-option and `--expect-principal` checks.
+- T-03-408: mitigated (Task 1 half). `machine renew` checks the answer against the root-verified bundle: an active or next machine CA key, a user certificate, principals present, signature and window by `CheckCert`, the request's key, kr3 with ca=machine, the name and this request's `req=` (`TestMachineRenewChecksAnswer/*`). Task 2 adds `pol=`, the issuance window, the lifetime of 60 s to the cap, no critical option, the machine profile's extensions and `--expect-principal` (`TestMachineRenewChecksAnswer/*`, `FuzzMachineRenewAnswer`). Residual: principals are not checked against the directory, which the CLI does not hold, except by `--expect-principal`; the summary line says so.
+- T-03-74 and T-03-244: mitigated. The key file is bounded to 64 KiB before any parse, a passphrase is read only from `--passphrase-fd` or a terminal (never from a stdin that is not one), the file buffer, the passphrase and the Ed25519 key are cleared after signing, and no error carries key or passphrase bytes (`TestMachineKeyInput/*`, `FuzzMachineKeyFile`). ECDSA big integers cannot be cleared reliably in Go; the runbook says so in Task 5.
+- T-03-406: mitigated (CLI half). An sk key file is refused by its clear header before any prompt with the named error that points to `ssh-add` and `--agent-key` (`TestMachineKeyInput/sk_key_file_named_error/*`); a real security key stays UNVERIFIED (OQ-2).
 
 ## x/crypto v0.58.0 (Task 2 Step 0, re-read in the module cache)
 
 - An encrypted openssh-key-v1 file gives `*ssh.PassphraseMissingError` with `PublicKey` set from the clear header (`parseOpenSSHPrivateKey` fills it from `w.PubKey`); an encrypted legacy PEM block gives it with `PublicKey` nil.
 - An unencrypted sk file gives the bare text `ssh: unhandled key type` (the default arm of the key-type switch).
 - A wrong passphrase gives `x509.IncorrectPasswordError`.
+- Task 2, the refused-answer text: the plan's words, with the serial added inside the second sentence ("The signer logged the issuance (serial N) and it counts toward the 12 per hour for this key"), so an admin can find the issuance in the log.
+- Task 2, sk detection: only by the clear header of an openssh-key-v1 file (PD6). The second check on `PassphraseMissingError.PublicKey` that the plan's Step 2 allows was left out: x/crypto sets that field only for openssh-key-v1 files, which the header check already covers, so it could never refuse anything the first did not.
+- Task 2, test seams: `machineRenewTimeNow` (the clock of `--if-due` and CreatedAt) and `machineKeyParseHook` (counts parses for `over_max_refused_before_parse`), besides the plan's `machineKeyBufferHook`.
+- Task 2, M83 as run: the mutant reads stdin (`ceremonyInput`) inside the non-terminal branch before refusing; the test's check that stdin was not read kills it.
+
+## Handover (executor run 1 stopped after Task 2, half-context rule)
+
+- Done: Task 1 (fbec252, SUMMARY 64167d7) and Task 2 (a359def); 34 mutants killed, none equivalent. The branch is pushed; no PR is open yet (Task 5 opens it).
+- Next: Task 3 (`revoke machine`, the `machine remove` hint, the audit line; 8 mutants, cumulative floor 42), then Task 4 (the rest of the e2e test and its lane timing) and Task 5 (runbooks, tracking edits, gates, PR, final SUMMARY).
+- The test-time base was measured at epoch 1794313017; Task 5's delta gate wants it under 24 h old, so a later continuation re-measures it in place (the detached base worktree outside the repository, kr-base-11b next to the repository, is still there; check it out at origin/main first).
+- Local e2e works with the namespace wrapper of 03-10b (unshare with a bind-mounted /etc/hosts that maps keyroster.localhost to loopback) on the WSL OpenSSH 10.5p1 build.
+- `TestAgentEnrollEndToEnd` flaked once on main 10.5p1 (sshd PerSourcePenalties closed the login before authentication); a rerun passed. If it recurs on the PR, it is outside files_modified.
