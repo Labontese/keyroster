@@ -128,7 +128,7 @@ func TestHostTrustRunbooks(t *testing.T) {
 			"3 beats 4", "1 beats both", "ANY newer version releases that hold", "cert_revoked", "keyroster revoke host OLDNAME", "serial or key ID",
 			"keyroster host forget", "Certificates that a signer recovery kept are not covered by this revoke", "keyroster known-hosts sync")
 		htrbWant(t, "revoke.md section 7", htrbSection(doc, "## 7. The audit log after a revocation"), "Certificates that a signer recovery kept are not covered by this revoke")
-		htrbWant(t, "revoke.md refusals", htrbSection(doc, "## 5. Refusals"), "this signer revokes user and host subjects only", "upgrade the signer")
+		htrbWant(t, "revoke.md refusals", htrbSection(doc, "## 5. Refusals"), "this signer does not revoke this kind of subject", "upgrade the signer")
 	})
 	t.Run("revoke_placeholders_gone", func(t *testing.T) {
 		docs := htrbDoc(t, "revoke.md") + "\n" + htrbDoc(t, "host-setup.md")

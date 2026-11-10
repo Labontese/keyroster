@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 28/33 plans executed in 33 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 29/33 plans executed in 33 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -246,7 +246,7 @@ Plans:
 - [x] 03-11-PLAN.md — Machine certificates by proof of possession, signer half: frame 0x0C and leaf kind 13, the signer's MachineIssue with the cert_revoked hold and the 12-per-hour bound, the machine index, audit re-proof, the install-time reservations and the signer side of revoke machine
 
 **Wave 28** *(blocked on Wave 27 completion)*
-- [ ] 03-11b-PLAN.md — The machine renew route, machine renew, revoke machine in the CLI, the e2e test and the runbooks (AUTH-06 and REVOKE-01 complete)
+- [x] 03-11b-PLAN.md — The machine renew route, machine renew, revoke machine in the CLI, the e2e test and the runbooks (AUTH-06 and REVOKE-01 complete)
 
 **Wave 29** *(blocked on Wave 28 completion)*
 - [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
@@ -331,7 +331,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 28/33 | In Progress | - |
+| 3. Linux Agent and Revocation | 29/33 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |

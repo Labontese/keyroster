@@ -315,8 +315,8 @@ What it does not cover:
   close in Phase 4 (a signer-side issuance barrier and signed install
   receipts). Until then, confirm the install on the signer host and run
   the command again after it.
-- Machine subjects arrive with 03-11. Host subjects are section 4b's
-  `keyroster revoke host`.
+- Machine subjects are section 4c's `keyroster revoke machine`. Host
+  subjects are section 4b's.
 
 ## 4b. Revoking a host: `keyroster revoke host`
 
@@ -430,6 +430,91 @@ re-derives a host subject). Run in CI e2e (03-09b):
 agent still served) and the three `refused_*` subtests. **UNVERIFIED until
 03-16**: every step on a real host and client.
 
+## 4c. Revoking a machine: `keyroster revoke machine`
+
+```
+keyroster revoke machine ci --yes
+keyroster revoke machine ci --keys --yes
+```
+
+`keyroster revoke machine NAME [--keys] [--yes] [--out DIR] [--reason
+TEXT] [--admin-key FP]` is `keyroster revoke host` for a machine entry
+(03-11b): the same four steps, exit codes and base floor as section 4b.
+
+1. **The first sweep.** A subject revocation of NAME under the machine CA.
+   The signer resolves it from its issuance records: every live machine
+   certificate (`kr3`, `ca=machine`, `sub=NAME`). Each serial the answer
+   reports is checked in the verified KRL under a machine CA key of your
+   trust bundle.
+2. **The directory step**, also after a failed first sweep: NAME disabled
+   in a signed directory version (installed at admin quorum 1, a proposal
+   otherwise), already disabled, or not in the directory, with the host
+   trust floor of section 4b.
+3. **`--keys`**, only when the first sweep succeeded and the entry was
+   found: one explicit-key revocation of the entry's key. The signer then
+   refuses that key for good (`machine_key_revoked`). A key the signer
+   refuses (`explicit_key_cap_reached`, `key_is_ca_of_this_installation`)
+   is listed as omitted with its reason (exit 3). Without `--keys` the
+   command says that no machine key was revoked as an explicit key.
+4. **The second sweep**, after an installed disable or an entry already
+   disabled: it revokes anything issued in between.
+
+The exit table is section 4b's: 0 done, 1 the first sweep or the setup
+failed, 3 partial, 4 the disable is only a proposal; 3 beats 4 and 1 beats
+both. A name that starts with `probe.` is refused before anything is sent
+(exit 2): probe certificates share the machine CA and are never revoked by
+subject.
+
+**The two holds.** Once the first sweep has revoked a certificate, the
+signer refuses NAME new certificates (`cert_revoked`) until a directory
+version newer than the one it holds is installed, in two ways: by its
+name, whether or not a certificate was live (a machine with no live
+certificate is held by name too), and on its key's latest certificate.
+ANY newer directory version releases both. With exit 4, install the
+proposal (which disables NAME) as the next version: if another version is
+installed first, NAME can obtain certificates again while it is still
+active. Once the disable is installed, run `keyroster revoke machine NAME`
+again; its second sweep revokes anything issued in between.
+
+**Unknown names and renames.** A name that is not in the directory is
+still swept (exit 3): a machine that is not in the directory obtains no
+new certificate under that name. The sweep matches the exact subject, so
+certificates the same key obtained under a former machine name are not
+covered, and the CLI cannot see former names (the admin API serves only the
+installed directory). Every run that sent a request says so: run
+`keyroster revoke machine OLDNAME` for each former name, or use `--keys`
+while the key is still in the entry.
+
+**Re-adding a name with a new key: sweep first.** Run `keyroster revoke
+machine NAME` before you remove the entry and add the name again with a
+new key: a subject revoke logged after the re-add holds the new key until
+the next directory version.
+
+**After a signer restore.** A restore can lose the version that disabled a
+machine. Run `keyroster revoke machine NAME` again for every pending
+disable once the last lost directory version is back:
+[signer-install.md, step 3, "Pending disables"](signer-install.md).
+
+**`--keys` and the explicit-key cap.** An explicit key never leaves the
+KRL and counts toward the cap of section 5
+([`explicit_key_cap_reached`](#explicit_key_cap_reached)): use `--keys` for
+a compromised machine key only.
+
+> **Warning.** Certificates that a signer recovery kept are not covered
+> by this revoke: revoke each with `keyroster revoke key FILE` (section 3;
+> the recovery summary prints the key, section 7). Every `revoke machine`
+> run that sent a request ends with that notice.
+
+Run in CI (03-11b): `TestRevokeMachine` (the CLI against a stub server:
+the order, the exit codes, the base floor, `--keys`, the `probe.` refusal,
+the texts) and, on OpenSSH 9.5p1 and 10.5p1 in the e2e-probe job,
+`TestMachineIdentityEndToEnd/revoke_machine_refuses_login_and_renewal`
+(the login refused at a real sshd, then `machine_disabled`) and
+`TestMachineIdentityEndToEnd/keys_revokes_key_for_good`
+(`machine_key_revoked`). **UNVERIFIED until 03-16**: every step on a real
+host. The re-run after a signer restore is UNVERIFIED: no test runs a
+restore with a pending disable.
+
 ## 5. Refusals
 
 | What you see | Why | What to do |
@@ -438,7 +523,8 @@ agent still served) and the three `refused_*` subtests. **UNVERIFIED until
 | `the signer has issued no certificate with this key ID under that CA` (`key_id_not_issued`) | The key ID is mistyped, `--ca` names another role, or this signer did not issue it. | Check the key ID and `--ca`; revoke a certificate this signer did not issue by its key (section 3). |
 | `the key is a key of this installation's trust bundle` (`key_is_ca_of_this_installation`) | The key is a CA, ops, log or root key of the bundle in force. An explicit-key entry on a CA key would refuse every certificate it signed. | A compromised CA key is replaced by the emergency CA rotation (03-13); **UNVERIFIED**: that procedure does not exist yet. |
 | `the KRL holds as many explicit keys as it may` (`explicit_key_cap_reached`) | See [below](#explicit_key_cap_reached). | See below. |
-| `this signer revokes user and host subjects only` (`subject_kind_unsupported`) | The request named a machine subject, or a host subject reached a signer older than this version, which refuses every subject but a user. | `keyroster revoke user` and `keyroster revoke host` send user and host subjects; machine subjects arrive with 03-11. For `revoke host` against an older signer, upgrade the signer (keyroster-signer first, then keyroster-server) and run it again. |
+| `this signer does not revoke this kind of subject` (`subject_kind_unsupported`) | A host or machine subject reached a signer older than this CLI: a signer without host subjects refuses every subject but a user, one without machine certificates refuses machine subjects. | Run the command again after you upgrade the signer (keyroster-signer first, then keyroster-server). |
+| `the signer refuses a subject revocation of a probe. name` (`subject_reserved`) | A subject revocation named a `probe.` subject: probe certificates share the machine CA and are never revoked by subject (`keyroster revoke machine` refuses such a name before sending). | Name a machine of the directory: `probe.` names are reserved for probe certificates. |
 | `... (revoke_installation_missing)` or `... another installation ... (revoke_installation_mismatch)` | The request reached the signer without an installation ID (this CLI always sends one), or for another installation than the signer's. | Check the server URL and root pins `keyroster init` saved; a missing ID means something between the CLI and the signer changed the request. |
 | `the server reports ... revoked, but that could not be confirmed: KRL vN, the one the server serves, does not list ... (not listed)` | The verified KRL does not list the target: the revocation is not effective, or the entry was already pruned (section 6). | Treat it as not revoked. Check the signer's `revoked` line (`journalctl -u keyroster-signer`) and run the command again. |
 | `the KRL the server serves (vN) is signed but does not parse` | The ops key signed bytes that the strict parser refuses. | Treat it as not revoked; read the signer's log. |
@@ -542,7 +628,9 @@ and its rollback ran in the signer's unit tests
 An explicit key never leaves the KRL, so the signer revokes at most 1000
 distinct keys by key, taking at most 1 MiB of the KRL (an RSA key above
 4096 bits or a security-key key with a long application string reaches
-the 1 MiB first). Revoking a key that is already revoked always works.
+the 1 MiB first). `keyroster revoke host --keys` and `keyroster revoke
+machine --keys` use the same cap. Revoking a key that is already revoked
+always works.
 Beyond the cap a key revocation is refused and nothing is recorded, so
 the other 3 MiB of the KRL stay for serial and key-ID entries, which
 leave it as their certificates expire: one admin cannot fill the KRL for
@@ -689,7 +777,8 @@ revokes the key plain and in every certificate for it. This path is
 run in CI e2e (03-06c): `TestRestoreRecoversLostRevocations` revokes a
 kept host certificate this way, with the public key read from the
 summary. A kept host certificate is in neither the issuance records nor
-audit's subject index, so neither `keyroster revoke host` nor the
+audit's subject index, so neither `keyroster revoke host` nor
+`keyroster revoke machine` nor the
 revocations before a directory install that removes a host find it: they
 end with the notice "Certificates that a signer recovery kept are not
 covered by this revoke: revoke each with `keyroster revoke key FILE`"
