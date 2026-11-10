@@ -148,6 +148,58 @@ T-03-397 (the order: the key hold, the bound and machine_key_unusable each have 
 - `TestMachineIssueBucket/admin_refusals_still_logged` uses a refused admin issue; `flood_does_not_drain_shared_bucket` uses a refused revoke.
 - audit's `installation_key_fails` logs a directory that lists the fixture's ops key as machine `opsm` (the fixture logs directories without the signer's install rules); the signer's `installation_key_unusable` stores one through `seedDirectory`.
 
+## Task 3
+
+T3: b5ad578
+
+### RED evidence
+
+- signer: `a.nameHeld undefined (type machineIndex has no field or method nameHeld)` (sameMachineIndex and `name_hold_index_matches_rebuild` read the name hold).
+- audit: every `TestVerifyRevokeMachine` subtest failed, the fail-direction ones through `wantFail` with `revokes a machine subject, which this version does not resolve` in place of their own message.
+
+### Existing tests changed (Task 3)
+
+- Removed, as the plan says: `TestRevokeHostSubject/subject_machine_still_unsupported` (signer/revoke_host_test.go), `TestRevokeSubject/subject_kind_unsupported` (signer/revoke_test.go), the case `revoke_subject_kind_machine_refused` (audit/verify_test.go) and `TestVerifyRevokeHost/subject_machine_fails` (audit/verify_test.go). The doc comment of `TestVerifyRevokeHost` no longer says it refuses a machine subject.
+- No other existing test failed.
+
+### Mutants
+
+Run as in Tasks 1 and 2. None survived and none was equivalent.
+
+mutant killed: M40 subjectRole(SubjectMachine) returning the user role in internal/signer/revoke.go (TestRevokeMachine/kr3_pop_cert_included)
+mutant killed: M41 the signer's subject_reserved removed (TestRevokeMachine/subject_reserved_probe)
+mutant killed: M42 audit's subject_reserved removed (TestVerifyRevokeMachine/revoke_machine_subject_reserved_fails)
+mutant killed: M43 audit's subjectRole(SubjectMachine) returning the user role (TestVerifyRevokeMachine/revoke_machine_rederived)
+mutant killed: M44 the index moving revokedAtDir on a re-listing, the keep-first line removed (TestRevokeMachine/full_revoke_quorum1_then_renew_is_disabled)
+mutant killed: M45 reservedNames ignoring probe. machines (TestInstallDirectoryMachineReservations/machine_name_reserved)
+mutant killed: M46 the principal-union bound removed (TestInstallDirectoryMachineReservations/machine_principals_exceed)
+mutant killed: M58 the name hold removed (TestRevokeMachine/kr1_only_revoke_holds_name)
+mutant killed: M59 the name hold derived from the sweep entries instead of the logged request (TestRevokeMachine/idle_machine_revoke_holds_name)
+mutant killed: M60 the name hold moved before the PoP (TestRevokeMachine/name_hold_bad_pop_is_pop_invalid)
+mutant killed: M61 the name hold moved before machine_disabled (TestRevokeMachine/full_revoke_quorum1_then_renew_is_disabled)
+mutant killed: M62 audit skips the name hold (TestVerifyRevokeMachine/name_hold_fails)
+mutant killed: M63 audit's mirror deriving the name hold from the entries (TestVerifyRevokeMachine/idle_machine_name_hold_fails)
+mutant killed: M64 nameHeld set only when absent (keep-first) in the index (TestRevokeMachine/name_hold_rearmed_by_later_sweep)
+mutant killed: M65 nameHeld set only when absent (keep-first) in audit's mirror (TestVerifyRevokeMachine/name_hold_rearmed_fails)
+
+### Gates on b5ad578
+
+- Gate 1: every subtest of Task 3's behaviour list, the 03-10 reservation test, the host revoke tests and the registry test printed `--- PASS` under `-race`; no FAIL, panic or DATA RACE.
+- Gate 2: the six packages pass under `-race` (signer 433.959 s, audit 94.426 s, tlog 3.959 s, wire 8.727 s, directory 19.897 s, cert 7.598 s; a pass or fail run); the frozen paths and the capslock baseline are unchanged; internal/wire/revoke.go changes in comment lines only.
+- Gate 3: golangci-lint for linux, windows and darwin, gofmt; the registry names `machine_name_reserved`.
+
+### Threat rows (Task 3)
+
+T-03-399, T-03-400 (the name hold) and T-03-403 are mitigated.
+
+### Deviations (Task 3)
+
+- `name_hold_is_per_name` uses ci3, an active machine the test adds, because ci2 is disabled in the env; the plan names ci2.
+- `name_hold_rearmed_by_later_sweep` lets the certificate issued at V+1 expire past the live margin before the second sweep, so that sweep lists nothing and only the name hold can refuse (otherwise the key hold would refuse too, and M64 could not be told apart).
+- `probe_certificates_untouched` adds a host named ci to the directory and issues it a probe certificate (`sub=probe.ci`).
+- `no_issue_time_cutoff` lowers the machine cap to 600 s; the stored directory is then no longer authorized, which a subject revoke does not need.
+- The signer's `subject_kind_unsupported` branch stays as defence in depth and is unreachable through the wire: UNVERIFIED by a test.
+
 ## Open at T1
 
 The hold, the bound, `machine_key_unusable` and the index's revoke handling are Task 2's. The reservations and the machine subject revoke are Task 3's.
