@@ -99,8 +99,26 @@ func TestAuditLoginAcrossPolicyChange(t *testing.T) {
 	sign := []string{"root", "sign", "--prev", env.BundleDir, "--prev-sha256", prevSHA,
 		"--roots", filepath.Join(filepath.Dir(env.BundleDir), "roots.pub"), "--threshold", "1",
 		"--policy", policyV2, "--out-dir", succ, "--agent-key", rootFP}
-	if code, out := keyrosterWithAgent(t, rootAgent, append(sign, "--confirm", "00000000")...); code != 1 || !strings.Contains(out, "nothing was signed") {
+	code, out = keyrosterWithAgent(t, rootAgent, append(sign, "--confirm", "00000000")...)
+	if code != 1 || !strings.Contains(out, "nothing was signed") {
 		t.Fatalf("root sign --prev with a wrong confirmation exited %d:\n%s", code, out)
+	}
+	// The policy block and the summary's pop line, from the real binary
+	// (03-14b, F04, F14): only the RP changes, so no WARNING line.
+	blockLines := []string{
+		"Policy in force: v1, sha256 " + trust.SHA256Hex(v1),
+		"  webauthn: CHANGED (rp_id is one-way)",
+		"  admins: carried over",
+		"  pop: carried over",
+		"  pop: none (host agents and machine renewals are off)",
+	}
+	for _, want := range blockLines {
+		if !strings.Contains(out, want) {
+			t.Fatalf("root sign --prev output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "WARNING: this successor changes") {
+		t.Fatalf("root sign --prev warns about a change root successor-policy wrote:\n%s", out)
 	}
 	succBundle, err := os.ReadFile(filepath.Join(succ, "bundle.json")) //nolint:gosec // test file
 	if err != nil {
@@ -109,10 +127,16 @@ func TestAuditLoginAcrossPolicyChange(t *testing.T) {
 	if code, out := keyrosterWithAgent(t, rootAgent, append(sign, "--confirm", trust.SHA256Hex(succBundle)[:8])...); code != 0 {
 		t.Fatalf("root sign --prev exited %d:\n%s", code, out)
 	}
-	if code, out := runKeyroster(t, "trust", "verify", "--prev", env.BundleDir, "--prev-sha256", prevSHA, "--pin", rootFP, "--threshold", "1",
-		"--bundle", filepath.Join(succ, "bundle.json"), "--policy", filepath.Join(succ, "policy.json")); code != 0 ||
-		!strings.Contains(out, "OK: successor of trust bundle v1") {
+	code, out = runKeyroster(t, "trust", "verify", "--prev", env.BundleDir, "--prev-sha256", prevSHA, "--pin", rootFP, "--threshold", "1",
+		"--bundle", filepath.Join(succ, "bundle.json"), "--policy", filepath.Join(succ, "policy.json"))
+	if code != 0 || !strings.Contains(out, "OK: successor of trust bundle v1") {
 		t.Fatalf("trust verify --prev exited %d:\n%s", code, out)
+	}
+	// The same policy block and pop line (03-14b).
+	for _, want := range blockLines {
+		if !strings.Contains(out, want) {
+			t.Fatalf("trust verify --prev output lacks %q:\n%s", want, out)
+		}
 	}
 
 	// 5. Stop, install without pins, restart.
