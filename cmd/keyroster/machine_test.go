@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
@@ -222,23 +223,50 @@ func TestMachineCommands(t *testing.T) {
 	// The removal hint (03-11b, OQ-4 of 03-11, D-09): a removal revokes
 	// nothing, so an installed or proposed one names revoke machine.
 	t.Run("machine_remove_prints_revoke_hint", func(t *testing.T) {
-		hint := "The certificates machine ci already holds stay valid until they expire (at most its max TTL, 2h0m0s). " +
+		installed := "The certificates machine ci already holds stay valid until they expire (at most its max TTL, 2h0m0s). " +
 			"If its key may be compromised, end them with keyroster revoke machine ci (it sweeps a name that is no longer in the directory too, " +
 			"and then exits 3 because there is nothing to disable) and block the key with keyroster revoke key FILE.\n"
-		for _, proposed := range []bool{false, true} {
-			roleEnv(t, nil)
-			keyFile, _ := writeEntryKey(t, "ci")
-			if code, _, stderr := run(t, "machine", "add", "ci", "--key", keyFile, "--role", "ops", "--max-ttl", "2h", "--yes"); code != 0 {
-				t.Fatal(stderr)
-			}
-			args := []string{"machine", "remove", "ci", "--yes"}
-			if proposed {
-				args = append(args, "--out", filepath.Join(t.TempDir(), "p"))
-			}
-			code, stdout, stderr := run(t, args...)
-			if code != 0 || !strings.HasSuffix(stdout, hint) || strings.Count(stdout, hint) != 1 {
-				t.Fatalf("proposed %v: exit %d, stderr %q, stdout:\n%s; want it to end with the hint", proposed, code, stderr, stdout)
-			}
+		// A proposed removal leaves ci in the installed directory (pre-merge
+		// review 1, 03-11b): the hint says what ci still does there.
+		proposedActive := "This removal is only a proposal: until it is installed, machine ci stays in the installed directory, active, " +
+			"and keeps obtaining certificates (each valid for at most its max TTL, 2h0m0s). " +
+			"If its key may be compromised, keyroster revoke machine ci run before the install disables it in a competing directory version, " +
+			"and this removal proposal must then be made again on that version. The rotate recipe's order avoids that " +
+			"(docs/runbooks/machine-identities.md): keyroster revoke machine ci --keys first and, once its disable is installed, keyroster machine remove ci.\n"
+		proposedDisabled := "This removal is only a proposal: until it is installed, machine ci stays in the installed directory, disabled, " +
+			"so it obtains no new certificate. The certificates it already holds stay valid until they expire (at most its max TTL, 2h0m0s). " +
+			"If its key may be compromised, end them with keyroster revoke machine ci (the entry is disabled already, so it changes no directory version) " +
+			"and block the key with keyroster revoke key FILE.\n"
+		for _, tc := range []struct {
+			name     string
+			status   string
+			proposed bool
+			hint     string
+		}{
+			{"installed", directory.StatusActive, false, installed},
+			{"installed_disabled", directory.StatusDisabled, false, installed},
+			{"proposed_active", directory.StatusActive, true, proposedActive},
+			{"proposed_disabled", directory.StatusDisabled, true, proposedDisabled},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				_, key := writeEntryKey(t, "ci")
+				roleEnv(t, func(d *directory.Directory) {
+					d.Machines = []directory.Machine{{Name: "ci", Key: key, Roles: []string{"ops"}, MaxTTLSeconds: 7200, Status: tc.status}}
+				})
+				args := []string{"machine", "remove", "ci", "--yes"}
+				if tc.proposed {
+					args = append(args, "--out", filepath.Join(t.TempDir(), "p"))
+				}
+				code, stdout, stderr := run(t, args...)
+				if code != 0 || !strings.HasSuffix(stdout, tc.hint) || strings.Count(stdout, tc.hint) != 1 {
+					t.Fatalf("exit %d, stderr %q, stdout:\n%s\nwant it to end with the hint %q", code, stderr, stdout, tc.hint)
+				}
+				for _, other := range []string{installed, proposedActive, proposedDisabled} {
+					if other != tc.hint && strings.Contains(stdout, other) {
+						t.Fatalf("stdout also holds another outcome's hint %q:\n%s", other, stdout)
+					}
+				}
+			})
 		}
 	})
 	t.Run("machine_remove_refused_edit_prints_no_hint", func(t *testing.T) {

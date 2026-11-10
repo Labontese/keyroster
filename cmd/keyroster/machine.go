@@ -137,8 +137,13 @@ func runMachineAdd(ctx context.Context, args []string, stdout, stderr io.Writer)
 //
 // A removal revokes nothing (OQ-4 of 03-11): after an installed or
 // proposed removal, the output ends with a hint that names keyroster
-// revoke machine and keyroster revoke key (03-11b, D-09); a refused edit
-// prints none.
+// revoke machine (03-11b, D-09); a refused edit prints none. After an
+// installed removal it also names keyroster revoke key. A proposed
+// removal leaves the entry in the installed directory, so its hint says
+// what the entry still does there: a disabled one obtains nothing new; an
+// active one keeps obtaining certificates, and a revoke machine run
+// before the install disables it in a competing version (pre-merge
+// review 1, 03-11b).
 func runMachineRemove(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("machine remove", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -163,8 +168,9 @@ func runMachineRemove(ctx context.Context, args []string, stdout, stderr io.Writ
 		orphans  []directory.Role // roles that no user, group or other machine uses after the removal
 		userProf *trust.CAProfile
 		ttl      uint64 // the removed machine's max TTL, for the hint
+		status   string // the removed machine's status, for the hint
 	)
-	err = editDirectory(ctx, s, editOpts{Yes: *ef.yes, Out: *ef.out}, stdout, func(d *directory.Directory, pol *trust.Policy) error {
+	outcome, err := editDirectoryOutcome(ctx, s, editOpts{Yes: *ef.yes, Out: *ef.out}, stdout, func(d *directory.Directory, pol *trust.Policy) error {
 		orphans, userProf = nil, nil
 		if i := slices.IndexFunc(pol.CAProfiles, func(p trust.CAProfile) bool { return p.Role == trust.RoleUser }); i >= 0 {
 			userProf = &pol.CAProfiles[i]
@@ -174,7 +180,7 @@ func runMachineRemove(ctx context.Context, args []string, stdout, stderr io.Writ
 			return fmt.Errorf("there is no machine %s in the directory; nothing was signed", name)
 		}
 		roles := d.Machines[i].Roles
-		ttl = d.Machines[i].MaxTTLSeconds
+		ttl, status = d.Machines[i].MaxTTLSeconds, d.Machines[i].Status
 		d.Machines = slices.Delete(d.Machines, i, i+1)
 		for _, r := range roles {
 			named := slices.ContainsFunc(d.Machines, func(m directory.Machine) bool { return slices.Contains(m.Roles, r) })
@@ -186,12 +192,29 @@ func runMachineRemove(ctx context.Context, args []string, stdout, stderr io.Writ
 		return nil
 	})
 	if err == nil {
-		// The rotate recipe's order: revoke before remove, so that --keys
-		// can still read the key from the entry.
-		_, err = fmt.Fprintf(stdout, "The certificates machine %s already holds stay valid until they expire (at most its max TTL, %s). "+
-			"If its key may be compromised, end them with keyroster revoke machine %s (it sweeps a name that is no longer in the directory too, "+
-			"and then exits 3 because there is nothing to disable) and block the key with keyroster revoke key FILE.\n",
-			name, time.Duration(min(ttl, 1<<32))*time.Second, name) //nolint:gosec // G115: clamped
+		maxTTL := time.Duration(min(ttl, 1<<32)) * time.Second //nolint:gosec // G115: clamped
+		switch {
+		case outcome == editInstalled:
+			// The rotate recipe's order: revoke before remove, so that --keys
+			// can still read the key from the entry.
+			_, err = fmt.Fprintf(stdout, "The certificates machine %s already holds stay valid until they expire (at most its max TTL, %s). "+
+				"If its key may be compromised, end them with keyroster revoke machine %s (it sweeps a name that is no longer in the directory too, "+
+				"and then exits 3 because there is nothing to disable) and block the key with keyroster revoke key FILE.\n",
+				name, maxTTL, name)
+		case status == directory.StatusDisabled:
+			_, err = fmt.Fprintf(stdout, "This removal is only a proposal: until it is installed, machine %s stays in the installed directory, disabled, "+
+				"so it obtains no new certificate. The certificates it already holds stay valid until they expire (at most its max TTL, %s). "+
+				"If its key may be compromised, end them with keyroster revoke machine %s (the entry is disabled already, so it changes no directory version) "+
+				"and block the key with keyroster revoke key FILE.\n",
+				name, maxTTL, name)
+		default:
+			_, err = fmt.Fprintf(stdout, "This removal is only a proposal: until it is installed, machine %s stays in the installed directory, active, "+
+				"and keeps obtaining certificates (each valid for at most its max TTL, %s). "+
+				"If its key may be compromised, keyroster revoke machine %s run before the install disables it in a competing directory version, "+
+				"and this removal proposal must then be made again on that version. The rotate recipe's order avoids that "+
+				"(docs/runbooks/machine-identities.md): keyroster revoke machine %s --keys first and, once its disable is installed, keyroster machine remove %s.\n",
+				name, maxTTL, name, name, name)
+		}
 		return err
 	}
 	if !errors.Is(err, directory.ErrPolicy) {
