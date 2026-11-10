@@ -1285,7 +1285,8 @@ func TestRevokeHost(t *testing.T) {
 		if code != 0 || !strings.Contains(stdout, successLine) {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
-		for _, no := range []string{"403", "not_approved"} {
+		// The text a 403 prints is serverclient's "HTTP 403"; a bare "403" matches random hex.
+		for _, no := range []string{"HTTP 403", "not_approved"} {
 			if strings.Contains(stdout+stderr, no) {
 				t.Fatalf("output names %q:\n%s%s", no, stdout, stderr)
 			}
