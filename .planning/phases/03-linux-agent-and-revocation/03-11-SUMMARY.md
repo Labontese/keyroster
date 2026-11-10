@@ -285,7 +285,64 @@ gate control: roadmap gate exits 1 on a worktree that also ticks 03-12 (a throwa
 The lanes are unchanged by this plan; the differences are runner noise.
 
 - **Local gates on f66194f:** the files gate, the author and signature gate, the wave gate, the roadmap gate, the scrub gate, the auto-merge gate, the delta gate and the whole-module gate (`go test -race ./...`, the e2e and distro vets, gofmt, golangci-lint for three GOOS, capslock, the dependency and test-only firewalls, pinned actions) all exit 0.
-- **The pre-merge review** is the orchestrator's, against T-03-70, T-03-71, T-03-72, T-03-75 and T-03-397 to T-03-403. It is not recorded here yet.
+- **The pre-merge review** is the orchestrator's, against T-03-70, T-03-71, T-03-72, T-03-75 and T-03-397 to T-03-403. Fix round 1 is recorded under 'Pre-merge review fix round 1'.
+
+### Pre-merge review fix round 1
+
+The orchestrator's review of 46748a9 upheld two low-severity issues. The plan's "Pre-merge review addendum" states both; the amended plan copy is 59bc62b, committed on its own and checked byte-identical with `cmp`. The review's two other items (the directory-membership answers at the signer socket, and a key hold released by reinstalling the lost version) are not changed, as the addendum records.
+
+**R1 (low): audit checked the bound at the issuance second.** verifyMachineIssue evaluated `cert.MachineRenewTooOften` at ValidAfter + 300, which its CreatedAt checks let sit up to about 600 s after the serial's second. The signer checks the bound at a clock read before it draws the serial, so a log with a 13th issuance whose serial is about 3001 s after twelve others passed audit, although no honest signer could write it.
+- **Fix (20013fb):** audit evaluates the bound at the serial's second (`body.Serial / 1e6`) and still records the issuance second in the key's recent list. The doc comments of verifyMachineIssue (step 14) and `cert.MachineRenewTooOften` say which second each side uses.
+- **Test:** `TestVerifyMachineIssue/bound_checked_at_serial_second_fails`. Twelve issuances at second T, then a 13th created 300 s after its serial and issued at T + 3601: with its serial at T + 3001 audit fails it with `machine_renew_too_often`; the same log with the serial at T + 3600 passes.
+
+**R2 (low): a clock step back between the rate check and issuance.** MachineIssue read the clock for the rate check, and the tail read it again for the serial and the issuance time, refusing only an issuance time below the serial. A clock that stepped back across a second boundary after the check issued at a second where the bound counts more issuances than were checked, and audit (after R1, at the serial's second) then refused the committed leaf.
+- **Fix (44c58b3):** issueMachineLocked takes the rate-check time and refuses `clock_regression` (CodeUnavailable, as the tail's other clock check) when the serial is below it, before anything is committed. The serial is at or below the issuance time there, so the issuance time is covered too.
+- **No clock_regression leaf.** The refusal does not call `logClockRegressionLocked`. That leaf records "the wall clock read below the serial high-water mark" (tlog.ClockRegressionBody), and here the clock is above the last serial; recording the rate-check time as the high-water mark would change what the field means. The tail's other clock check (issuance time below the serial) logs no such leaf either, and this check mirrors it. The refusal itself is recorded like every refusal, through `machineIssueOrRefuse`.
+- **Test:** `TestMachineIssue/clock_step_back_after_bound_check_refused`, in its own environment. Twelve issuances of ci's key at second T; a step clock that returns T + 3600 for the first read (the rate check) and T + 3599 for every later read. The answer is `clock_regression` (unavailable), with no serial drawn and no new machine_issue leaf, and `e.verifyExport()` passes. With the clock restored, a 13th issuance at T + 3600 is issued and the export verifies with 13 machine_issue entries.
+
+**RED at 59bc62b** (the code of 46748a9, with the new subtests):
+
+fix-round RED: --- FAIL: TestVerifyMachineIssue/bound_checked_at_serial_second_fails (0.02s): verify = <nil>, want an error containing "machine_renew_too_often"
+fix-round RED: --- FAIL: TestMachineIssue/clock_step_back_after_bound_check_refused (0.17s): issued serial 1794303933501000, want the refusal clock_regression
+
+**Mutants.** Each ran at 44c58b3 on its test function, was restored with `git checkout --`, and `git diff --exit-code` on the file was clean afterwards. Each failed only its own subtest.
+
+fix-round mutant killed: M67 audit's bound evaluated at issuedSecs again (TestVerifyMachineIssue/bound_checked_at_serial_second_fails): --- FAIL: TestVerifyMachineIssue/bound_checked_at_serial_second_fails (0.01s)
+fix-round mutant killed: M68 the new serial-below-the-rate-check refusal removed (TestMachineIssue/clock_step_back_after_bound_check_refused): --- FAIL: TestMachineIssue/clock_step_back_after_bound_check_refused (0.14s)
+
+**Gates at 44c58b3 (local, through scripts/linux.sh where they run Go).** This SUMMARY's revision was uncommitted in the working tree; it changes docs only.
+- Task 1 unit gate (the -race -v run and its subtest list): exit 0, 62 s.
+- Task 2 unit gate (the -race -v run and its subtest list): exit 0, 44 s.
+- Task 2 package gate: `go test -race -count=1 -timeout 15m` of cert, signer, audit, tlog, wire and directory, the frozen-path diff and capslock: exit 0 (signer 397.306 s, audit 97.371 s, tlog 4.453 s, wire 10.300 s, cert 8.536 s, directory 22.209 s).
+- The four fuzz targets, 20 s each (FuzzParseMachineIssueRequest, FuzzParseMachineIssueSigningBytes, FuzzDecodeLeaf, FuzzVerifyExport), with no new corpus file: exit 0.
+- golangci-lint for linux, windows and darwin, gofmt, the dependency firewall and the test-only firewall (Task 1's lint gate): exit 0.
+- The files gate: exit 0.
+- Both new subtests pass under -race.
+
+**CI at 44c58b3.**
+The `pull_request` runs, all with headSha 44c58b3:
+
+| Run ID | Workflow | Result |
+|---|---|---|
+| 42787380187 | CI | success on attempt 2 (attempt 1: cli-windows failed, see below) |
+| 42787380073 | E2E | success |
+| 42787380230 | E2E distro | success |
+| 42787379745 | Systemd | success |
+| 42787380102 | E2E TPM | success |
+| 42787379730 | E2E PKCS#11 | success |
+| 42787380025 | CodeQL | success |
+| 42787380113 | PIV | success |
+| 42787379792 | PR title | success |
+| 42787379803 | Workflow lint | success |
+
+Attempt 1 of CI failed in cli-windows at `TestRevokeHost/success_line_says_agent_keeps_state` (cmd/keyroster/revoke_test.go:1290, `output names "403"`). That check looks for the substring 403 anywhere in the output, and the output's random directory SHA-256 contained it (`...e856534038ec...`). The test is flaky and existing, in a file outside this plan and untouched by it, so it is not changed here. The failed job was re-run and passed. All 13 required checks pass.
+
+This SUMMARY's revision is pushed after these runs.
+
+**Deviations (fix round 1).**
+- **The R2 check compares the serial, not only the issuance time, with the rate-check time.** The brief says to refuse an issuance clock below the rate-check time. Audit now evaluates the bound at the serial's second, and a clock that stepped back inside serial.Next and forward again before the issuance read would pass a check on the issuance time alone and give a serial audit refuses. Since the serial is at or below the issuance time, the serial check covers both.
+- **The test's clock steps back from the first read after the rate check**, which is serial.Next's, not from the issuance read. With serial.Next at T + 3600 and only the issuance read at T + 3599, the tail's existing check (issuance time below the serial) refuses first, so the subtest would not fail at 46748a9 and M68 would survive. The addendum's "T + 3599 at issuance" is read as including the draw of the serial.
+- **The final 13th issuance and second export** in the signer subtest are added: they show that the refusal came from the step alone and that the log stays verifiable.
 
 ## Deviations
 
@@ -323,7 +380,7 @@ The per-task deviations are in the Deviations subsections of Tasks 1, 2 and 3 ab
 - UNVERIFIED: a restore of the signer state loses name holds armed by lost subject revoke leaves, so after a restore `revoke machine` must be run again for every machine whose disable is still pending (03-11b runbook); a subject revoke logged after a name was re-added with a new key holds that new key until a newer directory version, so an admin sweeps before re-adding.
 - `machine_name_reserved` and `machine_principals_exceed` at install are signer-only, as 03-10's `principal_reserved` and `account_reserved` are: `audit verify` does not re-check them on a directory_install and enforces their consequences at issuance (`probe_name_fails`, the principals through `checkIssue`) and at subject revoke (`subject_reserved`).
 - A recovery may keep a lost non-probe machine certificate (`krl.CheckCarriedLost`); `revoke machine` cannot cover a kept one, because it is not in the issuance table (T-03-404). The recovery path is covered by unit tests only (as 03-10's R9) and UNVERIFIED end to end.
-- The 12-per-hour bound counts a future issuance second after a clock step back (the safe side, PD4); the interplay with a long clock step is not exercised.
+- The 12-per-hour bound counts a future issuance second after a clock step back (the safe side, PD4); the interplay with a long clock step is not exercised. A one-second step back between the rate check and the serial is refused (`clock_step_back_after_bound_check_refused`, fix round 1).
 - Audit stub coverage: the rules named as "shown by the audit stub" have no individual mutant (the list is in the mutant paragraphs of Tasks 1 and 2); the mutants cover the proof of possession, the lifetime, the principals, the entry key, the `probe.` name, the request-ID namespace, the hold, the bound, the carried-certificate mirror, the export binding and the subject revoke.
 - A log that already holds a machine certificate with `sub=probe.<x>`: none exist (03-10 Q4, owner-confirmed for the owner's installations); `audit verify` on any other log would now fail such a leaf. UNVERIFIED beyond those installations.
 - The signer package's test time under `-race` with the 12-issuance tests: gated by the 90 s delta, measured in Task 4.
@@ -357,5 +414,6 @@ The per-task deviations are in the Deviations subsections of Tasks 1, 2 and 3 ab
 ## Self-Check: PASSED
 
 - The commits T1 7dafbe2, T2 a037604 and T3 b5ad578, the plan copy and the wave commit f66194f are ancestors of HEAD, and the branch is pushed.
+- Fix round 1: the plan copy 59bc62b and the fixes 20013fb and 44c58b3 are ancestors of HEAD, and the branch is pushed.
 - The files the tasks created exist: internal/wire/machineissue.go, internal/signer/machineissue.go, internal/signer/machineindex.go, internal/signer/revoke_machine_test.go, internal/audit/machineissue.go, internal/cert/machinerecent.go and the two vectors.
 - `commits: 9` is `git rev-list --count 1e57863..HEAD` measured at f66194f, before this docs commit.
