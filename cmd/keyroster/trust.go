@@ -182,6 +182,14 @@ func verifySuccessorBundle(stdout io.Writer, prevDir, prevSHA string, bundle, bu
 	}
 	_, _ = fmt.Fprintf(stdout, "Successor of trust bundle v%d, sha256 %s\n", prev.Version, trust.SHA256Hex(prevBundle))
 	_, _ = io.WriteString(stdout, rootceremony.Summary(next, p))
+	// The policy block (03-14b, F04), after VerifySuccessor bound prevPolicy
+	// to the bundle that --prev-sha256 pins. Both documents parsed there, so
+	// the error is unreachable.
+	block, err := policyChange(prevPolicy, policy)
+	if err != nil {
+		return err
+	}
+	_, _ = io.WriteString(stdout, block)
 	prevBoth, _, _, err := reportSigners(stdout, "previous root", bundle, bundleSigs, policy, policySigs, prevRoots)
 	if err != nil {
 		return err

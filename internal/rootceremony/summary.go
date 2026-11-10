@@ -15,7 +15,9 @@ import (
 // with fingerprint, role, algorithm and custody, the root threshold, the
 // admins and quorum, the CA profiles, the WebAuthn relying party (a
 // one-way setting) and the bundle hash. Software-held
-// roots are flagged loudly (D-10, D-11).
+// roots are flagged loudly (D-10, D-11). It also renders the policy's
+// proof-of-possession switches; pop.hosts is one-way, like the WebAuthn RP
+// (03-14b, F14).
 func Summary(b *trust.Bundle, p *trust.Policy) string {
 	var w strings.Builder
 	fmt.Fprintf(&w, "Trust bundle version %d, issued %s\n", b.Version, b.IssuedAt)
@@ -54,6 +56,16 @@ func Summary(b *trust.Bundle, p *trust.Policy) string {
 			fmt.Fprintf(&w, "  webauthn rp_id %s  origins [%s]\n", rp.RPID, strings.Join(rp.Origins, " "))
 		} else {
 			w.WriteString("  webauthn: none (passkey logins refused)\n")
+		}
+		// The PoP switches (03-14b, F14). pop.hosts can never be turned
+		// off again (trust.CheckPoPSuccessor).
+		if pp := p.PoP; pp != nil {
+			fmt.Fprintf(&w, "  pop hosts=%t machines=%t\n", pp.Hosts, pp.Machines)
+			if pp.Hosts {
+				w.WriteString("    pop.hosts is one-way: no later policy may turn it off (pop_hosts_removed)\n")
+			}
+		} else {
+			w.WriteString("  pop: none (host agents and machine renewals are off)\n")
 		}
 		fmt.Fprintf(&w, "  timelock %s\n", seconds(p.TimelockSeconds))
 	}
