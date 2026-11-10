@@ -55,7 +55,9 @@ var errMachinePoP = errors.New("signer: machine proof of possession does not ver
 //     profile; the grant (directory.MachineGrant); the bundle still in
 //     force; a request ID not used before; fewer than twelve issuances of
 //     the key in the last hour (machine_renew_too_often, keyed by the key,
-//     so a rename does not reset it), decided before a serial is drawn.
+//     so a rename does not reset it), decided before a serial is drawn,
+//     at a clock reading the serial and the issuance time may not fall
+//     below (clock_regression).
 //
 // Then a serial, a kr3 key ID and cert.Build with exactly the grant's
 // principals, the profile defaults plus the grant's extensions and the
@@ -160,17 +162,22 @@ func (s *Signer) MachineIssue(ctx context.Context, peer Peer, req *wire.MachineI
 	if d := cert.MachineRenewTooOften(s.loaded.machines.recent[key], uint64(max(now.Unix(), 0))); d != "" { //nolint:gosec // G115: >= 0
 		return nil, refusalErr(wire.CodeRefused, d, nil)
 	}
-	return s.issueMachineLocked(ctx, peer, req, entry, reqKey, caKey, profile, grant)
+	return s.issueMachineLocked(ctx, peer, req, entry, reqKey, caKey, profile, grant, now)
 }
 
 // issueMachineLocked is MachineIssue's issuance tail, issueHostLocked's: a
 // serial, the kr3 key ID, cert.Build with the grant's principals and
 // extensions and the lifetime L, then one transaction with the bundle
 // check, the directory version check (directory_changed), the issuance
-// row, the serial high-water mark and the machine_issue leaf. The caller
-// holds s.mu.
+// row, the serial high-water mark and the machine_issue leaf. checkedAt is
+// the clock MachineIssue checked the 12-per-hour bound at: a serial below
+// it (the clock stepped back after the check) is refused as a
+// clock_regression before anything is committed, since the bound counts
+// more issuances at an earlier second than were checked, and audit
+// verify, which evaluates the bound at the serial's second, would refuse
+// the leaf. The caller holds s.mu.
 func (s *Signer) issueMachineLocked(ctx context.Context, peer Peer, req *wire.MachineIssueRequest, entry *directory.Machine, key ssh.PublicKey,
-	caKey ssh.Signer, profile cert.Profile, grant directory.Grant) (*wire.IssueResponse, error) {
+	caKey ssh.Signer, profile cert.Profile, grant directory.Grant, checkedAt time.Time) (*wire.IssueResponse, error) {
 	lifetime := cert.MachineLifetime(grant.MaxTTLSeconds, profile)
 	// A role may grant a profile default (directory.CheckPolicy); every
 	// certificate already carries those, and cert.Build takes only
@@ -195,6 +202,13 @@ func (s *Signer) issueMachineLocked(ctx context.Context, peer Peer, req *wire.Ma
 	}
 	issuedAt := s.clock()
 	if micros(issuedAt) < ser {
+		return nil, refusalErr(wire.CodeUnavailable, "clock_regression", serial.ErrClockRegression)
+	}
+	// serial <= issuedAt holds here, so this also keeps the issuance clock
+	// at or after the bound check. Like the check above, and unlike the
+	// serial.Next branch, it logs no clock_regression leaf: the clock is
+	// not below the serial high-water mark that leaf records.
+	if ser < micros(checkedAt) {
 		return nil, refusalErr(wire.CodeUnavailable, "clock_regression", serial.ErrClockRegression)
 	}
 	dirVersion := s.directoryVersion

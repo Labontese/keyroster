@@ -590,6 +590,40 @@ func TestMachineIssue(t *testing.T) {
 			t.Fatalf("after the refusal: %d leaves, %d rows, serial %d; want %d, %d, %d", n, i, sr, leaves+1, issued, last)
 		}
 	})
+	t.Run("clock_step_back_after_bound_check_refused", func(t *testing.T) {
+		// Twelve issuances at second T. The rate check reads T + 3600, where
+		// none of them counts; every later read is a second back, at
+		// T + 3599, where all twelve do. Issuing there would log a 13th
+		// within the hour, so the tail refuses it as a clock regression.
+		e := newMachineEnv(t)
+		e.issueN(t, e.k1, "ci", 12)
+		var T uint64
+		for i, l := range e.machineLeaves(t) {
+			c := parseIssued(t, l.Cert)
+			if i == 0 {
+				T = issuedSecs(c)
+			} else if issuedSecs(c) != T {
+				t.Fatalf("issuance %d at second %d, want all twelve at %d", i+1, issuedSecs(c), T)
+			}
+		}
+		e.tickTo(T + 3600)
+		req := e.machineReq(e.k1, "ci")
+		sc := &stepClock{t: e.clock.Now().Add(time.Millisecond), back: time.Second}
+		sc.arm(1)
+		e.s.mu.Lock()
+		e.s.clock = sc.Now
+		e.s.mu.Unlock()
+		e.refusedMachine(t, req, "clock_regression", wire.CodeUnavailable)
+		e.s.mu.Lock()
+		e.s.clock = e.clock.Now
+		e.s.mu.Unlock()
+		e.verifyExport()
+		e.clock.set(sc.t.Add(time.Millisecond))
+		e.mustMachine(t, e.machineReq(e.k1, "ci"))
+		if rep := e.verifyExport(); rep.Counts[tlog.KindMachineIssue] != 13 {
+			t.Fatalf("audit counts %d machine_issue entries, want 13", rep.Counts[tlog.KindMachineIssue])
+		}
+	})
 	machineHoldBoundCases(t)
 }
 

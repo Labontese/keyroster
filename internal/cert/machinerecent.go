@@ -43,10 +43,11 @@ func MachineRecentAdd(recent []uint64, issued uint64) []uint64 {
 // MachineRenewTooOften is the one 12-per-hour rule of machine issuance
 // (03-11, PD4, T-03-401), shared by the signer and audit verify. recent is
 // the key's list (MachineRecentAdd) and now the second of the new request:
-// the signer passes its clock before a serial is drawn, audit the new
-// certificate's issuance second (ValidAfter + 300), never earlier. A
-// second s counts while s + 3600 > now, so a second after now (a clock
-// stepped back) counts too. It returns "machine_renew_too_often" when
+// the signer passes its clock before a serial is drawn (and refuses an
+// issuance clock below it), audit the new certificate's serial second
+// (serial / 10^6), which is never before the signer's. A second s counts
+// while s + 3600 > now, so a second after now (a clock stepped back)
+// counts too. It returns "machine_renew_too_often" when
 // twelve or more count, else "".
 func MachineRenewTooOften(recent []uint64, now uint64) string {
 	n := 0
