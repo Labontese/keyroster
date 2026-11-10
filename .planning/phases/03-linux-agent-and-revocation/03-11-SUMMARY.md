@@ -1,11 +1,18 @@
 ---
 phase: 03-linux-agent-and-revocation
 plan: 11
-status: in-progress
+status: complete
 requirements-completed: []
+commits: 9
+plan_head_before: 1e5786328d4580c528cd757c34fae0327ec61047
+plan_head_after: f66194f911beb64137dda469797d9e2c123abfda
+actuals:
+  tokens: 49000
+  tasks: 4
+  commits: 9
 ---
 
-# Phase 3 Plan 11: machine certificates by proof of possession, signer half (draft)
+# Phase 3 Plan 11: machine certificates by proof of possession, signer half
 
 ## Reconcile (Task 1 Step 0)
 
@@ -212,3 +219,143 @@ Task 1 is done, gated and pushed. Tasks 2, 3 and 4 are open, and no PR is open y
 - The plan-commit ledger base is 1e57863.
 - Task 2 adds `revoked` and `revokedAtDir` to the signer's `machineLatest` and to audit's `machineLatest` (see Deviations).
 - The shared `readyEnv` of `TestMachineIssue` already issues for `ci` four times, so the bound tests need their own environments.
+
+## Continued after Task 1 (2026-11-10)
+
+A continuation took over at Task 2 from the clean head 8f1c715 and did Tasks 2, 3 and 4 in order. The sections above are Task 1's, as written then.
+
+## Task 4
+
+### Plan copy
+
+The checked plan is copied byte for byte over the early 03-11-PLAN.md (`cmp` exits 0, LF, no carriage return) and committed alone first.
+
+### Publish
+
+- ROADMAP, Phase 3 only: the 03-11 row is ticked with the signer-half text. 03-11b is added unticked at Wave 28. 03-12 to 03-16 move to Waves 29 to 33 with their "blocked on" clauses. The Plans line says `in 33 waves`.
+- The `wave:` lines of 03-12 to 03-16 are 29 to 33. Nothing else in those files changed. 03-12 still depends on 03-11.
+- REQUIREMENTS.md is not touched.
+
+requirements-completed: []
+AUTH-06: open until 03-11b
+REVOKE-01: open until 03-11b
+Owner answers: OQ-1 OQ-2 OQ-3 OQ-4 defaults-1-to-12
+T-03-405: accepted (OQ-3); the runbook sentence is 03-11b's
+T-03-406: accepted (OQ-2); the runbook sentence is 03-11b's
+
+### Test time
+
+The base line is Task 1's (measured at=1794286787, under 24 h old when the delta gate ran). The reading is the delta gate's separate run of the six-package command on f66194f.
+
+| Package | Base (s) | Reading (s) | Delta (s) |
+|---|---|---|---|
+| signer | 417.445 | 414.416 | -3.029 |
+| audit | 90.637 | 99.784 | +9.147 |
+| tlog | 4.204 | 4.669 | +0.465 |
+| wire | 8.764 | 10.154 | +1.390 |
+| cert | 10.002 | 9.818 | -0.184 |
+| directory | 20.049 | 22.913 | +2.864 |
+
+No package added more than 90 s. The whole-module `go test -race ./...` passed. It is a pass or fail run only.
+
+### Gate controls
+
+gate control: files gate exits 0 on the branch as committed
+gate control: files gate exits 1 on a throwaway detached worktree with one commit adding an unlisted file (`unlisted-control.txt`, the only name the gate printed; the worktree was removed and its commit never pushed)
+gate control: key parser reads all six keys (the sample base line `test-time base: signer=1.5 audit=2.5 tlog=3.5 wire=4.5 cert=5.5 directory=6.5 at=1` through the same g() printed 1.5, 2.5, 3.5, 4.5, 5.5 and 6.5)
+gate control: roadmap gate exits 0 on the correct edit
+gate control: roadmap gate exits 1 on origin/main (a throwaway detached worktree at 1e57863: no 03-11b row, the 03-11 row unticked)
+gate control: roadmap gate exits 1 on a worktree that also ticks 03-12 (a throwaway detached worktree at f66194f with one commit that ticks 03-12; removed, never pushed)
+
+### Push, the PR and CI
+
+- **Branch:** pushed at f66194f with `env -u GITHUB_TOKEN -u GH_TOKEN git push`.
+- **PR:** #95, opened by keyroster-bot through scripts/gh-as-bot.sh with the plan's title. Auto-merge is not enabled (gate checked).
+- **The PR body** names the changes, the owner decisions (OQ-1 to OQ-4, defaults 1 to 12, the name hold of 2026-11-10), the deviations (pointing here), what stays UNVERIFIED, and that no route reaches the new signer request until 03-11b and that AUTH-06 and REVOKE-01 stay open until then.
+- **CI on f66194f, all green:** CI 42772897020 (lint, govulncheck, the test lanes, fuzz 32m21s), E2E 42772896958, E2E distro 42772896909 (all seven distro jobs), E2E TPM 42772897148, E2E PKCS#11 42772897049, PIV 42772896890, Systemd 42772896822 (systemd-sandbox), CodeQL 42772896907, Workflow lint 42772896918, PR title 42772896843.
+- **The e2e gate** (03-10b's script, `MODE=pr`) passed on run 42772896958. Its `PROBE_PASS` list is the plan's.
+
+| Lane | 03-10d | This PR | Limit |
+|---|---|---|---|
+| e2e (9.5p1) | 758.538 s | 787.355 s | 900 s; no `=== RUN   TestProbe` line |
+| e2e (10.5p1) | 777.304 s | 770.902 s | 900 s; no `=== RUN   TestProbe` line |
+| e2e-probe (9.5p1) | n/a | 292.151 s | 420 s |
+| e2e-probe (10.5p1) | n/a | 292.386 s | 420 s |
+
+The lanes are unchanged by this plan; the differences are runner noise.
+
+- **Local gates on f66194f:** the files gate, the author and signature gate, the wave gate, the roadmap gate, the scrub gate, the auto-merge gate, the delta gate and the whole-module gate (`go test -race ./...`, the e2e and distro vets, gofmt, golangci-lint for three GOOS, capslock, the dependency and test-only firewalls, pinned actions) all exit 0.
+- **The pre-merge review** is the orchestrator's, against T-03-70, T-03-71, T-03-72, T-03-75 and T-03-397 to T-03-403. It is not recorded here yet.
+
+## Deviations
+
+### From the design note (copied from the plan)
+
+The code at 1e57863 was read against the design note. No claim of the note was contradicted by the code; the differences below are scope or placement choices, additions the code review found, and one decision the note left open.
+- **The 2 of 12 budget share is not here.** The scope sentence of this plan's request listed it with the signer; it is `internal/server` code (budgetSigner, `MaxServerSignerCalls`, capacity_test rows) and the note's own file split puts it in 03-11b. The signer's refusal bucket (`s.machineLimiter`) is here.
+- **Added: `machine_name_reserved` at issuance (PD5).** The note refuses a `probe.` name at install and in audit; the signer had no step for a directory stored before the rule.
+- **Added: audit request-ID parity in both directions (PD8)**, with mutant M39 and five subtests. The note lists only the machine verifier's direction; the signer's `RequestIDUsed` is one table across all five issuing kinds.
+- **Added: the two order mutants M6 and M7** for the signer half of T-03-397 (`machine_disabled` or `machine_key_revoked` moved before the PoP).
+- **Decided: recovery-carried certificates do not count toward the 12 per hour (PD3).** The note says only that they become the latest certificate; signer and audit apply the same rule.
+- **Dropped: `machine_key_type_unsupported`** and its mutant (OQ-2 = keep sk); replaced by the two sk unit tests.
+- **Placement:** the wire fuzzers sit in machineissue_test.go (PD7), so wire/fuzz_test.go is not touched; MachineGrant's test sits in directory/hosts_test.go (there is no authorize_test.go); `cert.MachineLifetime` is added as the one lifetime function (PD6); the reserved-names registry row is edited in Task 3 with the rule it describes.
+- **Two placements the note did not give.** The reservation tests sit in machineissue_test.go (as 03-10's sit in probeissue_test.go), so signer/directory_test.go is not touched; three existing test files whose assertions flip when machine subjects resolve are added to files_modified (the note's list had none).
+- **03-11b-PLAN.md is not committed here.** The note says this task adds a 03-11b plan file; the plan is made later from the 'Not done here' table. The ROADMAP row is added, the totals follow the files on disk.
+- **The wave lines of 03-12 to 03-16 are edited** (03-10's precedent), because the executor reads `wave:` from the plan files; nothing else in those files changes (03-12's dependency stays 03-11). REQUIREMENTS.md is not touched.
+- **Added after plan check 1 (owner decision, 2026-11-10): the name hold** (PD11) beside the key hold, with its subtests and mutants M58 to M65; Task 3 grows by about 8k tokens.
+- **Mutants:** 66 here (M1 to M66) against the note's 31 and 31a for the signer half; the note's mutant 17 (a leaf-append error ignored) is M14 with the concrete fault of `failingSigner`; 31a (the index moves `revokedAtDir` on a re-listing) is M44 and, for audit's mirror, M57; 16 (request-ID reuse allowed) is M54, built to bite at the bound, because outside the bound the issuance table's unique request_id gives the same refusal; 19 (the index ignores revoke entries) is M30 for key-ID entries and M55 for serial entries. The note's `directory_changed_refused` is `directory_changed_before_commit` with M47.
+- An executor's own deviation is added to the SUMMARY's `## Deviations` section when it happens.
+
+### The executor's
+
+The per-task deviations are in the Deviations subsections of Tasks 1, 2 and 3 above. In short:
+- Task 1: `machineLatest` got no revoke fields until Task 2 (lint); `bad_principal` is refused only above `cert.MaxPrincipals`; the export fuzzer's machine seed is built under the pinned root; `TestHostForgetBody/kinds_are_a_set` was changed too.
+- Task 2: the forms of `hold_equal_dir_version_still_holds` and `bad_pop_attempts_do_not_consume_the_bound`; shared environments built on first use; M28 changes two files; the bucket subtests' refusal kinds; audit's `installation_key_fails` fixture.
+- Task 3: `name_hold_is_per_name` uses ci3; `name_hold_rearmed_by_later_sweep` lets the V+1 certificate expire; the host ci in `probe_certificates_untouched`; the cap in `no_issue_time_cutoff`.
+- Task 4: `roadmap.update-plan-progress` (the tracking update) also ticked the 03-11b row, apparently by matching the 03-11 prefix; the tick was undone by hand before the commit, so 03-11b stays unticked as the plan requires. The plan totals are GSD's (28/33).
+
+## UNVERIFIED
+
+**UNVERIFIED in this repository** (nothing named above exercises it; the SUMMARY repeats the list):
+- sk machine keys with a real token: the signer's handling is tested with a software sk signer with and without the user-presence flag (`TestMachineIssueSK`); a real token's touch, the agent path and the CLI's named error are 03-11b's, and a token stays UNVERIFIED until a homelab drill.
+- Anything reached through the renew route: nothing anonymous can call MachineIssue yet, so rate behaviour under an anonymous flood is tested at the signer socket and through `machineIssueOrRefuse` only (T-03-398), not end to end.
+- Any newer directory version releases both holds (T-03-400); `pending_disable_renew_is_cert_revoked` and `idle_machine_revoke_holds_name` pin the window. The key hold is latest-only and keep-first, so a serial revoke of an older certificate arms nothing; the name hold (PD11) covers the subject revoke whether or not a certificate was live. A key's certificates under a former name are not swept by `revoke machine NEWNAME` (T-03-72, 03-11b).
+- UNVERIFIED: a restore of the signer state loses name holds armed by lost subject revoke leaves, so after a restore `revoke machine` must be run again for every machine whose disable is still pending (03-11b runbook); a subject revoke logged after a name was re-added with a new key holds that new key until a newer directory version, so an admin sweeps before re-adding.
+- `machine_name_reserved` and `machine_principals_exceed` at install are signer-only, as 03-10's `principal_reserved` and `account_reserved` are: `audit verify` does not re-check them on a directory_install and enforces their consequences at issuance (`probe_name_fails`, the principals through `checkIssue`) and at subject revoke (`subject_reserved`).
+- A recovery may keep a lost non-probe machine certificate (`krl.CheckCarriedLost`); `revoke machine` cannot cover a kept one, because it is not in the issuance table (T-03-404). The recovery path is covered by unit tests only (as 03-10's R9) and UNVERIFIED end to end.
+- The 12-per-hour bound counts a future issuance second after a clock step back (the safe side, PD4); the interplay with a long clock step is not exercised.
+- Audit stub coverage: the rules named as "shown by the audit stub" have no individual mutant (the list is in the mutant paragraphs of Tasks 1 and 2); the mutants cover the proof of possession, the lifetime, the principals, the entry key, the `probe.` name, the request-ID namespace, the hold, the bound, the carried-certificate mirror, the export binding and the subject revoke.
+- A log that already holds a machine certificate with `sub=probe.<x>`: none exist (03-10 Q4, owner-confirmed for the owner's installations); `audit verify` on any other log would now fail such a leaf. UNVERIFIED beyond those installations.
+- The signer package's test time under `-race` with the 12-issuance tests: gated by the 90 s delta, measured in Task 4.
+- Windows and macOS: no Windows or macOS code or CI change here; the signer is Linux-only and its tests carry `//go:build linux`.
+- The signer's `subject_kind_unsupported` branch for a machine subject is unreachable through the wire and has no test (Task 3).
+- The 03-11b row of ROADMAP has no plan file yet; GSD's plan totals follow the files on disk.
+
+## For 03-11b
+
+| Item | Where it goes |
+|---|---|
+| The renew route `POST /api/v1/machine/renew` (internal/server/machine.go, server.go): unauthenticated; a per-client limiter with a global backstop (30 per minute, burst 10); a 16 KiB body cap (`MaxMachineIssueBody`) and strict decoding; with pop.machines off in the cached status, 403 `machine_pop_not_enabled` and no signer call (the `popHostsEnabled` precedent, server/agent.go:161); the call through `signerAPI` to `signerclient.MachineIssue` (landed here), under `signerCallTimeout`; answers mapped as `agentSignerFailed` maps them (server/agent.go:925-943), `signer_too_old` for `unknown_message_type`, never `dropKRL` (server/revoke.go:96-101) | 03-11b |
+| The server's collapse of the three identity details (`unknown_machine`, `machine_key_mismatch`, `machine_pop_invalid`) into one `machine_not_authenticated`, with the specific detail in the server's own log (default 1, T-03-397; the signer half is here) | 03-11b |
+| The signer-call budget: a machine share of 2 of the 12 tokens taken before the total token (`MaxServerSignerCalls` = 12, wire/frame.go:52; agent share 6, server/signer.go:141-145; budgetSigner's named field :183-193), `signerAPI`, `socketSigner`, `budgetSigner`, `fakeSigner`, `gateSigner`; capacity_test rows (:74, :205-216, :241-244, :315-316) | 03-11b (server code; owner D6). The signer's own refusal bucket is here |
+| routes_test.go `otherRoutes` entry for the new pattern with an honest reason (machine proof of possession, decided by the signer; no session, no login code, no user certificate) and the fix of its doc comment (:33-35, :36-58, :92-105); `serverclient.MachineRenewPath` and the body and answer types | 03-11b |
+| `keyroster machine renew NAME (--agent-key FP \| --key FILE [--passphrase-fd N]) --out CERTFILE [--expect-principal P]... [--if-due]` and `machinekey.go`: needs `keyroster init` without `--user`; refuses early without pop.machines; F11 (T-03-244): 64 KiB bound `maxMachineKeyFileBytes` and `key_file_too_large` before parsing, `ssh.ParseRawPrivateKey`, `rootceremony.ReadPassphrase` only on a passphrase-missing error with its terminal check, buffers and the Ed25519 key cleared, no secret in any error; an sk key file gives a named error and an sk key renews only through `--agent-key` with a touch (OQ-2); the answer is checked against a machine CA key of the root-verified bundle (`krl.RoleCAKeys(bundle, "machine")`), the request's key, the kr3 key ID (ca machine, sub NAME, the request's req, pol equal to the bundle's), ValidAfter within 300 s and a lifetime between 60 s and the machine cap, and every `--expect-principal`; written by temp file plus rename, certificate only, 0644, never the private key (TestMachineRenewNeverWritesKey with a mutant); `--if-due` skips while now is before issued + 2/3 of the lifetime minus min(1 h, lifetime/10); one refusal text per detail, `machine_not_authenticated` included | 03-11b |
+| `keyroster revoke machine NAME [--keys] [--yes] [--out DIR] [--reason TEXT] [--admin-key FP]` as `runRevokeHost` (cmd/keyroster/revoke.go:579-777) with SubjectMachine and the machine entry: `checkHostTrustFloor` reused as `CheckBase` (:659-663, :776-783) with `TestRevokeMachine/stale_base_refused_no_key_revoked`; `--keys` as separate TargetKey requests, a key omitted at the cap and exit 3 (:710-728, :820-843); an unknown or removed name a partial run, exit 3; the pending-proposal exit 4 whose text names the `cert_revoked` hold; `recoveryKeptNotice`; the `subject_kind_unsupported` text (:975); `machine remove` prints a hint that names `keyroster revoke machine NAME` (OQ-4) | 03-11b |
+| e2e `TestMachineIdentityEndToEnd` (test/e2e/machine_test.go, both OpenSSH lanes, `-timeout 20m`, under the 900 s stop): PoPMachines merged into the PoPHosts struct of the bootstrap (bootstrap_test.go:52-55, :250-259; server_test.go:58-60, :99), the harness of revoke_test.go (a real sshd whose RevokedKeys file the test renames into place, no agent), a renew, the login, `revoke machine`, the refused login, `machine_disabled` on the next renew, `--keys` on a second machine and `machine_key_revoked`, `audit verify`; the sk-dummy step through a real ssh-agent as TestRootSK does (root_sk_test.go:24-31, :130-135) | 03-11b |
+| Runbooks: machine-identities.md (:13-16 "issues nothing", :27, the rotate recipe :76-83 with a `revoke machine` step when the old key may be compromised (OQ-4), :109-119), sk keys as "interactive renewal" and unattended jobs needing Ed25519 or ECDSA (a file, an agent, or PIV through the agent), unattended renewal and passphrases (F11), an example systemd timer and cron line labelled UNVERIFIED, "After revoke machine" (what is refused, the hold, `--keys`, the kept-certificate notice); revoke.md (:318, :441, a `revoke machine` section, the `subject_reserved` row, machine wording in the explicit-key cap section); the source_address residual T-03-405 (OQ-3) and T-03-406 | 03-11b |
+| `cmd/keyroster/audit.go` text line for machine certificates (as 03-10c did for probes); optional | 03-11b |
+| AUTH-06 and REVOKE-01 complete: REQUIREMENTS.md ticks and traceability rows, `requirements-completed: [AUTH-06, REVOKE-01]` | 03-11b |
+| The mutants of the route and the CLI: the server passes `unknown_machine` through; the server calls the signer with pop.machines off; MachineIssue in the total pool only; `dropKRL` on 5xx; the CLI writes the private key; CERTFILE written in place; a 64 KiB + 1 file parsed; a passphrase read from a non-terminal stdin; the CLI skips the CA-key check; the `--keys` omission not reported; `--if-due` sends when not due; `revoke machine` without the base floor | 03-11b |
+| T-03-73's route half, T-03-74, T-03-244, T-03-397's server half, the runbook sentences of T-03-405 and T-03-406 | 03-11b |
+| A renamed key's earlier-name certificates: `revoke machine NEWNAME` sweeps `sub=NEWNAME` only, so certificates the same key obtained under a former name stay live up to the cap (T-03-72, plan check 1 sec-08). The CLI's `revoke machine` output or the runbook must say that `revoke machine OLDNAME` or `--keys` is needed after a rename; optionally the CLI sweeps the former names of the key | 03-11b |
+| The pending-proposal exit 4 text names both holds (the key hold and the name hold, default 2 amended) and what releases them (any newer directory version), and points to `--keys` for the permanent block; it and the runbook also say that after a restore of the signer state `revoke machine` is run again for every machine whose disable is still pending, and that a machine is swept before it is re-added with a new key | 03-11b |
+| CLI tests run portably on the linux, windows and macos lanes with the environment setup of login_disk_test.go:37-56 (design G23); Windows `--agent-key` through the named pipe is UNVERIFIED unless a fake-agent case runs on the windows lane | 03-11b |
+| The statement, for the SUMMARY and the runbook, that ECDSA private-key big integers cannot be cleared reliably in Go (the Ed25519 key and the buffers are cleared), with the `parse_clears_buffers` subtest | 03-11b |
+| The e2e lane budget estimate (+40 to 60 s per lane, estimated, not measured) and the note that the `revoke machine` generation narrows access and so applies at once | 03-11b |
+| Not planned at all: a per-name limiter on the route (it would let an anonymous caller lock a machine out); a signed client-side directory for principal checks; a per-machine source_address or force-command (OQ-3); an automatic revoke on `machine remove`, a key change or a role loss (OQ-4); a machine view in the audit report beyond Report.Certificates and the export (Phase 4); a change to `ca issue --ca machine` (kr1); clearing pop.machines; machine-only CA rotation behaviour (03-12 takes the CA set as an input); the installation-binding test over every signed request type (a later Phase 3 plan; MachineIssueRequest carries the ID, so it passes there without an exemption); the ceremony's pop.machines carry (03-15, unchanged) | Not planned or later plans, as stated |
+
+## Self-Check: PASSED
+
+- The commits T1 7dafbe2, T2 a037604 and T3 b5ad578, the plan copy and the wave commit f66194f are ancestors of HEAD, and the branch is pushed.
+- The files the tasks created exist: internal/wire/machineissue.go, internal/signer/machineissue.go, internal/signer/machineindex.go, internal/signer/revoke_machine_test.go, internal/audit/machineissue.go, internal/cert/machinerecent.go and the two vectors.
+- `commits: 9` is `git rev-list --count 1e57863..HEAD` measured at f66194f, before this docs commit.
