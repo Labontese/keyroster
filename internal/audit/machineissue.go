@@ -58,8 +58,12 @@ const machineReservedPrefix = "probe."
 //  13. the request ID is new across the issue, login, host, probe and
 //     machine entries;
 //  14. fewer than twelve issuances of the key in the hour before the
-//     certificate's issuance second (cert.MachineRenewTooOften over the
-//     mirror's recent list).
+//     serial's second (cert.MachineRenewTooOften over the mirror's recent
+//     list, which holds issuance seconds). The signer checks the bound at
+//     its clock before it draws the serial and refuses an issuance clock
+//     below that check, so the second it checked is at or before the
+//     serial's: audit is never stricter than an honest signer, and a
+//     serial the bound refuses is one no honest signer could have drawn.
 //
 // It records the certificate in machines.
 func verifyMachineIssue(index uint64, body *tlog.MachineIssueBody, leafMicros uint64, a *anchor, ds *directoryInForce, iss *issuance,
@@ -219,8 +223,9 @@ func verifyMachineIssue(index uint64, body *tlog.MachineIssueBody, leafMicros ui
 	if prev, used := iss.machineIDs[reqID]; used {
 		return nil, fmt.Errorf("request ID %s replayed: machine_issue entry %d already used it", reqID, prev)
 	}
-	if d := cert.MachineRenewTooOften(machines.recent[k], issuedSecs); d != "" {
-		return nil, fmt.Errorf("machine key %s already has %d issuances in the hour before %d (%s)", ssh.FingerprintSHA256(key), len(machines.recent[k]), issuedSecs, d)
+	if d := cert.MachineRenewTooOften(machines.recent[k], serialSecs); d != "" {
+		return nil, fmt.Errorf("machine key %s already has %d issuances in the hour before the serial's second %d (%s)",
+			ssh.FingerprintSHA256(key), len(machines.recent[k]), serialSecs, d)
 	}
 	iss.machineIDs[reqID] = index
 	iss.next(body.Serial)

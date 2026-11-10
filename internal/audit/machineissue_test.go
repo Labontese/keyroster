@@ -472,6 +472,32 @@ func machineHoldBoundAuditCases(t *testing.T) {
 		mf.addMachine(mf.mkey, nil, nil, nil)
 		mf.wantPass(t)
 	})
+	t.Run("bound_checked_at_serial_second_fails", func(t *testing.T) {
+		// Twelve issuances at second T, then a 13th whose serial is at
+		// T + serialAfter, created 300 s after its serial and issued at
+		// T + 3601. The signer checks the bound at its clock before the
+		// serial is drawn, so audit checks it at the serial's second: at
+		// T + 3001 the twelve still count, at T + 3600 none does.
+		thirteenth := func(serialAfter uint64) *machineFixture {
+			mf := newMachineFixture(t)
+			for range 12 {
+				mf.addMachine(mf.mkey, nil, nil, nil)
+			}
+			T := mf.serial / 1e6
+			if first := mf.serial - 11; first/1e6 != T {
+				t.Fatalf("the twelve serials span seconds %d to %d, want one second", first/1e6, T)
+			}
+			mf.micros = (T+3601)*1e6 + 1000
+			mf.addMachine(mf.mkey, func(m *machineIssue) {
+				m.serial = (T + serialAfter) * 1e6
+				m.issued = time.Unix(int64(T+3601), 0) //nolint:gosec // G115: test times
+				m.req.CreatedAt = T + serialAfter + 300
+			}, nil, nil)
+			return mf
+		}
+		thirteenth(3001).wantFail(t, "machine_renew_too_often")
+		thirteenth(3600).wantPass(t)
+	})
 	t.Run("installation_key_fails", func(t *testing.T) {
 		mf := newMachineFixture(t)
 		mf.machines = append(mf.machines, directory.Machine{Name: "opsm", Key: trust.FormatKey(mf.ops.PublicKey()), Roles: []string{"deploy"},
