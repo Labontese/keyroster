@@ -21,7 +21,7 @@ plan_head_after: 5d5f14e379bc21abf2fe818b1ef713450dd7fbe4
 
 # Phase 3 Plan 14b: show what a root signs (F04, F14) Summary
 
-A custodian who signs or verifies a successor now sees the policy in force, every policy field the successor changes (with a WARNING for changes root successor-policy cannot make), and the PoP switches in every ceremony summary, pinned by goldens committed failing first, reflect gates, single-field cases and runbook checks.
+A custodian who signs or verifies a successor now sees the policy in force, every policy field the successor changes (with a WARNING when it changes admin_quorum, admins, ca_profiles or timelock_seconds, the fields root successor-policy never writes), and the PoP switches in every ceremony summary, pinned by goldens committed failing first, reflect gates, single-field cases and runbook checks.
 
 Written from Task 1 on and completed in Task 3. Task 4 (the owner's merge) is open. `commits` counts the plan's commits before this SUMMARY's final docs commit.
 
@@ -31,7 +31,7 @@ Re-measured in place in Task 3 (the continuation is another session; Budget, "An
 
 ## Handover
 
-Task 1 ran in the first session, which stopped at the planned handover point. The continuation ran Tasks 2 and 3 and stops at Task 4, the owner's merge gate (blocking-human). The pre-merge review (Task 3 step 5) is the orchestrator's and is not yet recorded here.
+Task 1 ran in the first session, which stopped at the planned handover point. The continuation ran Tasks 2 and 3 and stops at Task 4, the owner's merge gate (blocking-human). The orchestrator's pre-merge review (Task 3 step 5) is recorded under Pre-merge review.
 
 ## Task 1: the policy block, the pop line and the goldens
 
@@ -166,10 +166,21 @@ Cumulative: 18 of 18 Task 1 mutants and 17 of 17 Task 2 mutant runs (16 numbered
 - **The house e2e gate in MODE=pr** passed for 5d5f14e: run 42928187670 is for HEAD; main lanes go test 768.538 s (9.5p1) and 803.973 s (10.5p1), both at or under 900 s; probe lanes 297.779 s and 290.418 s, with 03-11b's PASS lines.
 - **The e2e pin.** Both main lanes print `--- PASS: TestAuditLoginAcrossPolicyChange` (0.47 s on 9.5p1, 0.44 s on 10.5p1): the real binaries print the policy block and the pop line. The pin adds only assertions, so its time cost is negligible.
 - The final docs commit triggers the checks again; their result on the final head is reported with the hand-back.
+- **Checks on 2b6423b** (the pre-merge review's fixes, the head before this SUMMARY update), all green with no rerun: CI 42941415196 (build-test, lint, capslock, cli-windows, cli-macos, govulncheck, fuzz, dependency-firewall), E2E 42941415195 (both main and probe lanes), E2E distro 42941415008, E2E PKCS#11 42941415232, E2E TPM 42941415056, Systemd 42941414980, PIV 42941414892, CodeQL 42941415364, Workflow lint 42941415150 and PR title 42941414929.
 
 ## Pre-merge review
 
-Not yet run: the orchestrator runs it on the green PR before Task 4 (T-03-329 to T-03-334), and its results go here.
+One round on the green PR (T-03-329 to T-03-334): four lenses, each item checked by two skeptics and a critic. Two items were fixed and one wording was tightened; the code under test is unchanged.
+
+- **The WARNING's scope in the runbook** (`fe6107b`). root-ceremony.md said the WARNING fires for any change root successor-policy cannot make. It fires for admin_quorum, admins, ca_profiles and timelock_seconds only (Q-B1). The "Change the policy" paragraph and the "Only the agreed change" item now name those four fields, and say that a removed RP and a cleared pop.machines, which also come only from a hand-written successor, read CHANGED with no WARNING and are caught by the agreed-change, RP and PoP items. A new helper entry, `change_the_policy_paragraph`, pins the paragraph (12 entries now).
+- **The values come from the agreed record** (`fe6107b`). The "Only the agreed change" item and the transcript template now take the field names from the `Agreed policy change` row and check every value (admin names and SHA256 fingerprints, renames, quorum and timelock numbers, CA profile sub-fields, the RP, the pop switches) against the record the row refers to. Pinned in `change_the_policy_step_3` and `transcript_template`. On the old runbook texts, `change_the_policy_paragraph`, `change_the_policy_step_3` and `transcript_template` fail; on the new ones all pass.
+- **The policy-block gate drops no case** (`2b6423b`). checkBlock now fails when a case names a line that is not one of policyFieldLines, or changes a field but names no CHANGED line, and the new TestPolicyFieldLines derives the field lines from trust.Policy's JSON names. Mutants, each restored byte for byte:
+  1. A field `Note` added to trust.Policy, pinned, compared and given a case with line `note`, but no render line. The old checkBlock passes it. The new one fails `TestPolicyChangeFields/Policy.Note` (`case line "note" is not one of the block's field lines`) and TestPolicyFieldLines. Killed.
+  2. The same with the case's line empty. The old checkBlock passes it. The new one fails `Policy.Note` (`case changes note but names no CHANGED line`) and TestPolicyFieldLines. Killed.
+  3. The same with `note` added to policyFieldLines: TestPolicyChangeFields fails, from `Policy.AdminQuorum` on, on the missing note line. Killed.
+  4. policyChange prints an extra `  extra: CHANGED` line: 23 subtests fail on the exact comparison, which the old checkBlock already made. Killed.
+
+CI on the fixed head: see The PR and CI.
 
 ## What stays UNVERIFIED
 
