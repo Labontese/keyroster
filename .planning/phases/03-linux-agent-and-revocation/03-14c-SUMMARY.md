@@ -327,8 +327,75 @@ The three UNVERIFIED lines about these branches are gone.
 
 Cumulative: 37 of 37 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20, session 4: 4). M4-3 and M4-4 are killed on the message only.
 
-## Still to do (continuation)
+## Task 4 (session 4): runbooks, registry, pointers, publish edits, gates and PR
 
-- Task 4: the runbooks, the registry, the pointers, the publish edits, the gates, the push and the PR. The base was re-measured in session 4.
-  - It also confirms in CI e2e the PASS lines of TestAuditVerifiesIssuance/binds_installation, the moved e2e audit helpers and revokeClient, and records the run IDs.
-- Task 5: a checkpoint, after Daniel merges.
+**Precondition.** After `git fetch origin`, origin/main is still 3da914f. Task 1's pointer anchor check exits 0, and the stop guard holds:
+- 03-14b's SUMMARY is on main;
+- 03-12 is at wave 30 with ["03-14b"];
+- 03-14b is the only plan at wave 29.
+
+**Commits:**
+- b560970 `docs(runbooks): name and bind the installation in audit verify and the CLI's pin, and the clock bound (F05, F06, F10)`.
+- 376718c `docs(03-14c): publish the plan, point 03-12, 03-13, 03-15 and 03-16 at it, correct the 03-08c SUMMARY, and shift the later waves`. This commit adds this plan, unchanged.
+- 81a7966 `test(cli): state the re-pin paragraph rule without a negated conjunction`. The full gate's golangci-lint (staticcheck QF1001) flagged b560970's new condition in TestRepinInstructionsKeepIdentity. The fix rewrites the condition and leaves its meaning unchanged.
+
+**Runbook texts.** Each new text names its CI tests and carries an UNVERIFIED label. The line numbers are at 81a7966.
+- **Audit verify commands.** All ten audit verify command lines gain ` --installation-id <installation id>` after `--threshold 1`:
+  - signer-install.md:791, 810, 844, 846, 1107, 1109, 1616 and 1618;
+  - root-ceremony.md:464;
+  - enroll-user.md:354.
+  - test/e2e/restore_test.go's `restoreVerify` constant changes with them. `git grep 'keyroster audit verify --pin' -- test cmd ':!cmd/keyroster/audit.go'` finds no other constant.
+- **signer-install.md.**
+  - :306, a new paragraph after "The check that holds": `--installation-id`, `--any-installation`, the `installation id:` and `last entry time:` lines, and the ID-less form.
+  - :323, a new paragraph on the 300 s clock bound, "until this machine's clock reaches the last entry's time minus 300 s".
+  - :909, at the end of restore step 2, before 2b: what `<installation id>` is, the ID-less form, and the clock-ahead hold rule.
+  - :1040, at the end of 2b part 3, the first `revoke recover`: `recovery_installation_other`, `recovery_installation_not_pinned` (with the full re-pin command) and `recovery_clock_ahead`.
+  - :1157, after the recovered verifies' release-check paragraph: the clock-ahead hold rule.
+- **root-ceremony.md.**
+  - "Record the installation id line ..." at :206 (genesis step 4), :388 (rotation step 3) and :699 (policy change step 3).
+  - "trust verify prints the same installation id line ..." at :238 (genesis step 5), :441 (rotation step 5) and :720 (policy change step 4).
+  - :479 (rotation step 7): what `<installation id>` is, and the ID-less form.
+  - Each is its own plain paragraph, never a sectionWindow marker line or a `- **` bullet. TestRootCeremonyPolicyChecks and TestSectionWindowRefusals pass.
+- **ceremony-transcript-template.md:62.** The Installation ID line, after a blank line that follows the "Bundle SHA-256 prefix" line.
+- **server-install.md:517.** In section 5, after "An existing config is replaced only with `--force`.": init saves and prints the ID, the refusals, and the literal re-pin command.
+- **enroll-user.md.**
+  - :67, in the invite section: the admin gives the ID with the invite, and the re-pin command.
+  - :366, after the audit verify command: what `<installation id>` is, and the ID-less form.
+- **host-setup.md.**
+  - :680, appended to the join-token paragraph: the token's ID is the one the config pins.
+  - :399, a change. Old: "bind the installed directory once:". New: "bind the installed directory once.", followed by a new paragraph at :401 ("Since 03-14c, before you run keyroster directory rebind, run `keyroster init --force ...` ... Then rebind:").
+  - :2298, a change in the forget-check paragraph. Old: "`admin_fingerprints`); so the parser lists exactly the verified `host_forget` entries (PR #75 review, fix round 2)." New: "`admin_fingerprints`). It also refuses any key that is not lowercase ASCII letters, digits and underscores, binds the parsed `version`, `policy_version` and the other bound fields to the entry, and refuses those bound names below the top level of `decoded` (03-14c). So a JSON parser, also one that matches keys without regard to case, reads a `host_forget` only on a verified `host_forget` line (PR #75 review; 03-14c)."
+  - :2315, the Run in CI line gains "(its charset cases included), `TestVerifyBoundValues` and `TestVerifyBoundKeysBelowTop`".
+- **revoke.md:529-530.** Two refusal-table rows for the CLI's own refusals. The first quotes the mismatch text's tail, "it is another installation's bundle under your roots". The second is ErrInstallationNotPinned, with the full re-pin command.
+- **machine-identities.md.**
+  - :77, a new paragraph in `## Renew a machine certificate`, with the no-`--user` re-pin form.
+  - Deviation: the init paragraph ended "... are needed. Then:". It now ends "... are needed.", and the command block is introduced by "Then renew:" at :89. This keeps the new paragraph right after the init paragraph without splitting "Then:" from its block. `## Renewal needs pop.machines` is untouched.
+- **TestRepinInstructionsKeepIdentity** now checks signer-install.md, host-setup.md, revoke.md and enroll-user.md too, each with a per-file count of at least one, and the floor of two stays. A paragraph counts when it holds `--force` and either `keyroster init`, or `init` with `--root-pin` (the old rule). No existing paragraph tripped the rule. machine-identities.md stays off the list.
+
+**Registry.** docs/format-registry.md is on origin/main. The 03-14c sentence is its own paragraph after the HostIssue/ProbeIssue/MachineIssue paragraph, and the numstat reads `2 0`. TestFormatRegistry passes. Recover's three refusal names are CLI names and unregistered by design.
+
+**Pointers and publish edits** (Q-C6 A):
+- The numstat reads 03-12 `4 4`, 03-13 `2 2`, 03-14 `1 1`, 03-15 `4 4`, 03-16 `2 2` and 03-08c SUMMARY `1 1`. Verify command 6 exits 0.
+- 03-12 to 03-16 move to waves 31 to 35, and 03-12 depends on ["03-14c"], with the precondition clause.
+- ROADMAP: `30/36 plans executed in 35 waves`, the Wave 30 block with the unchecked 03-14c row, the later blocks renumbered, and the Progress row `30/36`.
+- STATE: `total_plans: 71`, `completed_plans: 65` and `Plan: 30 of 36`.
+- **Deviation (pre-push hook):** the local pre-push scan refused the push. 03-15's line `2. After Claude reports the install ...`, which carries the third 03-15 anchor and so must change, names the owner's lab Windows host as written on main. In that line only, "in PowerShell on <host>" became "in PowerShell on the owner's Windows PC". The anchor and the numstat are unchanged. The two unpushed commits were remade (reset --soft, recommitted, signed) before the first push of them. The other occurrences of that host name in 03-15, which are on main and not touched here, stay.
+
+**Local readings:**
+- The runbook tests pass: TestRootCeremonyPolicyChecks, TestSectionWindowRefusals, TestRepinInstructionsKeepIdentity, TestHostTrustRunbooks, TestProbeAccountRunbook and TestCeremonyGolden, and TestProbeHoldReasonsDocumented in internal/agent/apply.
+- TestRestoreRunbookChecks (`-tags e2e`, a document check) passes locally too.
+- Verify commands 1, 4 (static part), 5 and 6, and the authorship and signature check, exit 0. The privacy, IP and title gate (command 9) exits 0 on the diff, the log and PR #99's title and body.
+
+**Delta gate** (base above, at 81a7966's tree; load average 0.19 at the start): cmd/keyroster 244.954 s (base 259.024), internal/audit 93.261 s (base 89.177, +4.1) and internal/serverclient 4.185 s (base 3.989). It exits 0.
+
+**Full gate:**
+- The first run exits 1 on the two staticcheck QF1001 lines fixed in 81a7966. Every `go test` package was ok.
+- The second run, at 81a7966, exits 0: `go test -race ./...` (36 ok; cmd/keyroster 274.543 s, internal/audit 114.879 s, internal/serverclient 6.252 s, internal/signer 491.720 s, internal/agent/apply 694.227 s), every vet tag (e2e_pkcs11 and e2e_tpm included), gofmt, golangci-lint (0 issues), capslock, dep-firewall, testonly-firewall and check-pinned-actions.
+- capslock reports no new pair. keyroster-signer reads 91 against a baseline of 92 (`internal/signer CAPABILITY_RUNTIME` no longer reported). That stale pair predates this plan.
+
+**PR #99**, https://github.com/Labontese/keyroster/pull/99, was opened by keyroster-bot with the plan's title and no auto-merge.
+
+**Not done in this session:**
+- The tracking update and the gates that run after it, the publish gate (command 7) and the ROADMAP gate (command 8). Before the update they fail by design: `completed_plans` reads 65 and the 03-14c row is unchecked.
+- The final `docs(03-14c): complete installation-binding plan` commit and the pre-merge review (Task 4 step 5). Both are the orchestrator's.
+
