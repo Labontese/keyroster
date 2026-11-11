@@ -390,8 +390,13 @@ func runUserPending(ctx context.Context, args []string, stdout, stderr io.Writer
 	if err != nil {
 		if errors.Is(err, serverclient.ErrAdminAuth) {
 			// Name the cause when the saved server URL is not a policy
-			// origin, from the root-verified policy only.
-			if _, policy, terr := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID); terr == nil && policy.WebAuthn != nil {
+			// origin, from the root-verified policy only. A pin error is
+			// the cause itself and is named (03-14c, F06).
+			_, policy, terr := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
+			if isInstallationPinError(terr) {
+				return terr
+			}
+			if terr == nil && policy.WebAuthn != nil {
 				return adminOriginDiagnosis(err, client.Server(), policy.WebAuthn.Origins)
 			}
 		}
@@ -637,13 +642,25 @@ func runUserApprove(ctx context.Context, args []string, stdout, stderr io.Writer
 
 // diagnose adds adminOriginDiagnosis, from the root-verified policy only,
 // to an admin authentication failure; any other error is returned as is.
+// When the served bundle fails the installation pin, the pin error is
+// returned instead, so the cause is named, not hidden (03-14c, F06).
 func (s *adminSession) diagnose(ctx context.Context, err error) error {
 	if errors.Is(err, serverclient.ErrAdminAuth) {
-		if _, policy, terr := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID); terr == nil {
+		_, policy, terr := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID)
+		if isInstallationPinError(terr) {
+			return terr
+		}
+		if terr == nil {
 			return adminError(err, s, policy)
 		}
 	}
 	return err
+}
+
+// isInstallationPinError reports whether err is a refusal of the
+// installation pin (03-14c, F06).
+func isInstallationPinError(err error) bool {
+	return errors.Is(err, serverclient.ErrInstallationMismatch) || errors.Is(err, serverclient.ErrInstallationNotPinned)
 }
 
 // validFingerprint reports whether fp is "SHA256:" and the unpadded

@@ -146,7 +146,12 @@ var ErrTrustRootNotPinned = errors.New("the server's trust bundle is signed by r
 // or before this installation had an ID. There is no trust on first use;
 // the remedy is a re-init. The user form comes first; the automation-host
 // form extends the remedy for a config made without --user.
-var ErrInstallationNotPinned = errors.New("your saved config pins no installation ID, but the server's trust bundle names one")
+var ErrInstallationNotPinned = errors.New("your saved config pins no installation ID, but the server's root-verified trust bundle names one; " +
+	"it was saved before keyroster pinned installations, or before this installation had an ID. " +
+	"Compare the ID with the installation ID on record (the ceremony transcript's Installation ID line, or the one your admin gives you), then run " +
+	"`keyroster init --force --server <URL> --tls-pin <pin> --root-pin <fp> [--root-pin ...] --threshold <n> --user <name> [--admin-key <your admin key>]` " +
+	"(--force replaces the whole config); on an automation host whose config has no user: " +
+	"`keyroster init --force --server <URL> --tls-pin <pin> --root-pin <fp> [--root-pin ...] --threshold <n>` (docs/runbooks/machine-identities.md)")
 
 // ErrInstallationMismatch means the server's root-verified trust bundle is
 // not the installation the saved config pins (03-14c, F06): another
@@ -162,7 +167,19 @@ var ErrInstallationMismatch = errors.New("the server's trust bundle is not the i
 // and trust.Bundle's validation, so naming it repeats no unauthenticated
 // server text (T-02-93).
 func CheckInstallationPin(pinned, served string, version uint64) error {
-	return nil
+	switch {
+	case pinned != "" && !trust.IsInstallationID(pinned):
+		return fmt.Errorf("%w: the saved config's installation_id %q is not an installation ID; run keyroster init again", ErrInstallationMismatch, pinned)
+	case pinned == served:
+		return nil
+	case pinned == "":
+		return fmt.Errorf("the server's root-verified trust bundle v%d names installation %s: %w", version, served, ErrInstallationNotPinned)
+	case served == "":
+		return fmt.Errorf("%w: the server's trust bundle v%d names no installation ID, but your config pins %s", ErrInstallationMismatch, version, pinned)
+	default:
+		return fmt.Errorf("%w: the server's root-verified trust bundle v%d names installation %s, but your config pins installation %s: "+
+			"it is another installation's bundle under your roots", ErrInstallationMismatch, version, served, pinned)
+	}
 }
 
 // ErrSignerUnavailable is a 503 from the server: it cannot reach its
@@ -720,7 +737,14 @@ func (c *Client) checkCustody(h http.Header, required bool) error {
 // bundle must name exactly that one (CheckInstallationPin), so a bundle of
 // another installation under the same roots is refused (03-14c, F06).
 func (c *Client) Trust(ctx context.Context, rootPins []string, threshold int, installationID string) (*trust.Bundle, *trust.Policy, error) {
-	return c.verifiedTrust(ctx, rootPins, threshold)
+	b, p, err := c.verifiedTrust(ctx, rootPins, threshold)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := CheckInstallationPin(installationID, b.InstallationID, b.Version); err != nil {
+		return nil, nil, err
+	}
+	return b, p, nil
 }
 
 // TrustUnpinned is Trust without the installation pin (03-14c, F06). Only

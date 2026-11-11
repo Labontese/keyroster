@@ -88,7 +88,11 @@ type lostCert struct {
 //     none, and the saved export's has one or any --krl document was
 //     given, refused (recovery_installation_lost), because a KRL is
 //     published only under a bundle with one and no successor drops it;
-//     when neither has one and no --krl document was given, it prints
+//     then the saved config's installation pin (03-14c, F06): an unpinned
+//     config under a bundle with an ID is refused
+//     (recovery_installation_not_pinned, a re-init), any other mismatch
+//     too (recovery_installation_other, an escalation); when neither has
+//     one, no --krl document was given and the pin passes, it prints
 //     nothingToRecover and exits 0 without writing anything;
 //  5. every import (the saved export's last KRL, re-derived by audit
 //     verify, and each --krl document) verified under the restored
@@ -216,6 +220,18 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 					"a lost trust bundle added the installation ID and revocations may have followed, which the restored signer cannot publish. "+
 					"Keep the hold and escalate", restored.Bundle.Version)
 		}
+	}
+	// The saved config's installation pin (03-14c, F06), on both paths,
+	// after recovery_installation_lost: an unpinned config is a re-init,
+	// any other mismatch an escalation.
+	if err := serverclient.CheckInstallationPin(cfg.InstallationID, installation, restored.Bundle.Version); err != nil {
+		if errors.Is(err, serverclient.ErrInstallationNotPinned) {
+			return recoverRefusal("recovery_installation_not_pinned",
+				"the restored export's trust bundle: %v. Keep the hold, re-run keyroster init as the error says, then run keyroster revoke recover again", err)
+		}
+		return recoverRefusal("recovery_installation_other", "the restored export's trust bundle: %v; escalate, do not release the hold", err)
+	}
+	if installation == "" {
 		_, err := fmt.Fprintln(stdout, nothingToRecover)
 		return err
 	}

@@ -81,6 +81,8 @@ func runTrustVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		return err
 	}
 	_, _ = io.WriteString(stdout, rootceremony.Summary(b, p))
+	// root sign's installation line, after the summary (03-14c, render-05).
+	_, _ = io.WriteString(stdout, installationLine(nil, b))
 	both, nBundle, nPolicy, err := reportSigners(stdout, "root", bundle, bundleSigs, policy, policySigs, pinned)
 	if err != nil {
 		return err
@@ -182,6 +184,9 @@ func verifySuccessorBundle(stdout io.Writer, prevDir, prevSHA string, bundle, bu
 	}
 	_, _ = fmt.Fprintf(stdout, "Successor of trust bundle v%d, sha256 %s\n", prev.Version, trust.SHA256Hex(prevBundle))
 	_, _ = io.WriteString(stdout, rootceremony.Summary(next, p))
+	// root sign's installation line, after the summary and before the
+	// policy block (03-14c, render-05).
+	_, _ = io.WriteString(stdout, installationLine(prev, next))
 	// The policy block (03-14b, F04), after VerifySuccessor bound prevPolicy
 	// to the bundle that --prev-sha256 pins. Both documents parsed there, so
 	// the error is unreachable.

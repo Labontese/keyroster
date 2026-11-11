@@ -129,10 +129,14 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err != nil {
 		return err
 	}
+	// The one unpinned Trust (03-14c, F06): init saves the installation ID
+	// of the bundle its root pins verified, which every later command
+	// requires.
 	b, p, err := client.TrustUnpinned(ctx, cfg.TrustPins, cfg.TrustThreshold)
 	if err != nil {
 		return err
 	}
+	cfg.InstallationID = b.InstallationID
 	if err := printTrustSummary(stdout, b, p); err != nil {
 		return err
 	}
@@ -240,6 +244,13 @@ func printTrustSummary(w io.Writer, b *trust.Bundle, p *trust.Policy) error {
 	}
 	if p.WebAuthn != nil {
 		fmt.Fprintf(&sb, "WebAuthn RP %s\n", p.WebAuthn.RPID)
+	}
+	// The installation ID init saves with the pins (03-14c, F06).
+	if b.InstallationID == "" {
+		sb.WriteString("installation id: none (the trust bundle names none yet; run keyroster init again once it does)\n")
+	} else {
+		fmt.Fprintf(&sb, "installation id: %s (saved with your pins; compare it with the installation ID on record: "+
+			"the ceremony transcript's Installation ID line, or the one your admin gives you)\n", b.InstallationID)
 	}
 	_, err := io.WriteString(w, sb.String())
 	return err
