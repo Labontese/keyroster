@@ -4534,3 +4534,64 @@ func TestVerifyBoundValues(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifyBoundKeysBelowTop (03-14c; owner decision Q1, 2026-11-11):
+// Export writes version, directory, sigs, bundle_version,
+// import_krl_versions and policy_version only at the top level of decoded,
+// so each is refused at any other depth of a leaf line, after unescaping,
+// also on a kind where the name is legal or bound at the top level.
+// Written escaped inside a nested object, such a key passes the byte
+// checks, and checkBoundValues reads the top level only; a recursive
+// reader (jq `..`) reads it. Lines: TestVerifyBoundValues' fixture (0
+// bundle_install, 2 directory_install v2) and a recovery fixture.
+func TestVerifyBoundKeysBelowTop(t *testing.T) {
+	lf := newLoginFixture(t, true)
+	for range 3 {
+		lf.addDirectory(lf.directory(nil), nil)
+	}
+	lf.addLogin(nil, nil)
+	login := lf.lines()
+	rf := newRevokeFixture(t)
+	c := rf.issue()
+	im7 := rf.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: c.SignatureKey.Marshal(), Serial: c.Serial, ValidBefore: c.ValidBefore}}, 7, nil, auditInstallationID)
+	rf.recover([]wire.RecoveryImport{im7}, nil, nil)
+	rf.publish(nil)
+	recovery := rf.lines()
+	rec := len(recovery) - 3
+	if !strings.Contains(recovery[rec], `"kind":"revocation_recovery"`) {
+		t.Fatalf("line %d is not the revocation_recovery line:\n%s", rec, recovery[rec])
+	}
+	nest := func(all []string, i int, frag string) string { // frag inside a new nested object of decoded
+		t.Helper()
+		if !strings.HasSuffix(all[i], "}}") {
+			t.Fatalf("line %d does not end with decoded's object", i)
+		}
+		l := slices.Clone(all)
+		l[i] = strings.TrimSuffix(l[i], "}}") + `,"x":{` + frag + `}}}`
+		return join(l)
+	}
+	below := func(key, kind string) string {
+		return `its key "` + key + `" is below the top level of decoded, where export never writes it (` + kind + `)`
+	}
+	cases := []struct {
+		name   string
+		verify func(string) (*Report, error)
+		export string
+		want   string
+	}{
+		{"version_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"versio\u006e":2`), below("version", "directory_install")},
+		{"directory_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"d\u0069rectory":"e30="`), below("directory", "directory_install")},
+		{"sigs_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"sig\u0073":"e30="`), below("sigs", "directory_install")},
+		{"bundle_version_on_bundle_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 0, `"bundle\u005fversion":1`), below("bundle_version", "bundle_install")},
+		{"import_krl_versions_on_revocation_recovery", func(s string) (*Report, error) { return rf.verify(s, nil) }, nest(recovery, rec, `"import\u005fkrl_versions":[7]`), below("import_krl_versions", "revocation_recovery")},
+		{"policy_version_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"policy_versio\u006e":1`), below("policy_version", "directory_install")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep, err := tc.verify(tc.export)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Verify = %+v, %v; want an error with %q", rep, err, tc.want)
+			}
+		})
+	}
+}
