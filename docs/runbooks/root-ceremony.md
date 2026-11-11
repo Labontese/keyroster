@@ -532,8 +532,13 @@ example, to remove a lost admin key, [enroll-user.md](enroll-user.md)),
 the admin quorum, a CA profile or the timelock, and the chain rule
 accepts it. The policy block of `root sign --prev` is where every
 custodian sees what changed: it prints a
-`WARNING: this successor changes ...` line for any change
-`root successor-policy` cannot make (step 3; run in CI by TestCeremonyGolden and TestPolicyChangeFields, 03-14b; UNVERIFIED in a real ceremony). A
+`WARNING: this successor changes ...` line when the successor changes
+`admin_quorum`, `admins`, `ca_profiles` or `timelock_seconds`, the fields
+`root successor-policy` never writes. Two other changes also come only
+from a hand-written successor: a removed `webauthn` RP, and a cleared
+`pop.machines` (with `pop.hosts` off, that removes `pop`). The block shows
+them as `CHANGED` with no WARNING, and step 3's "Only the agreed change",
+RP and PoP items catch them (step 3; run in CI by TestCeremonyGolden and TestPolicyChangeFields, 03-14b; UNVERIFIED in a real ceremony). A
 quorum-gated policy change comes in Phase 4 (AUTHZ-03).
 
 > **`rp_id` is a one-way setting.** Every passkey enrolled under it works
@@ -623,12 +628,18 @@ You need everything from [What you need](#what-you-need), plus:
      policy's SHA-256.
    - **Only the agreed change.** Under `Successor policy: vN+1, ...`, every
      field reads `carried over` except the fields the
-     `Agreed policy change` row names, and each `-`, `+`, `~` and
-     `CHANGED` line matches that row. If any other field reads `CHANGED`,
-     or a value differs from the row, answer no: nothing is signed. A
-     `WARNING: this successor changes ...` line names fields
-     `root successor-policy` never writes; sign only when the row names
-     exactly those fields and values.
+     `Agreed policy change` row names. Take the field names from that row,
+     and check every value against the record the row refers to: each `-`
+     or `+` admin's name and SHA256 fingerprint, a `~` renamed key, the
+     `admin_quorum` and `timelock_seconds` numbers, each changed CA profile
+     sub-field, the RP and the pop switches. If any other field reads
+     `CHANGED`, or a value differs from the record, answer no: nothing is
+     signed. A `WARNING: this successor changes ...` line names which of
+     `admin_quorum`, `admins`, `ca_profiles` and `timelock_seconds` changed,
+     the fields `root successor-policy` never writes; sign only when the row
+     names exactly those fields and the record holds exactly the values
+     shown. A removed RP or a cleared `pop.machines` reads `CHANGED` with
+     no WARNING; this item and the next two catch it.
    - **The RP.** `webauthn rp_id <hostname>  origins [...]` names exactly
      the hostname and origins in the record that the
      `Agreed policy change` row refers to. `rp_id` is one-way.

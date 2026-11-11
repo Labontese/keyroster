@@ -172,7 +172,9 @@ func successorSigningSections() []*signingSection {
 		start: "3. **Sign the successor bundle", end: "4. **Verify against the paper",
 		want: []string{"Policy in force:", "Successor policy:", "carried over", "CHANGED", "WARNING: this successor changes",
 			"Agreed policy change", "Previous root keys", "Root keys (threshold",
-			"without `--confirm`", "policy version", "bundle you pinned with", "do not apply there"}}
+			"without `--confirm`", "policy version", "bundle you pinned with", "do not apply there",
+			"SHA256 fingerprint", "the record holds exactly the values",
+			"`admin_quorum`, `admins`, `ca_profiles` and `timelock_seconds`", "with no WARNING"}}
 	return []*signingSection{
 		{id: "genesis_step_4", file: "root-ceremony.md", section: "4. Sign with root A",
 			want: []string{"pop: none", "pop.hosts", "without `--confirm`"}},
@@ -182,6 +184,9 @@ func successorSigningSections() []*signingSection {
 		{id: "rotation_step_4", file: "root-ceremony.md", section: "Rotate the roots",
 			start: "4. **Sign with a current root", end: "5. **Verify against the paper",
 			want: []string{"checks of step 3", "policy block"}},
+		{id: "change_the_policy_paragraph", file: "root-ceremony.md", section: "Change the policy",
+			start: "`keyroster root successor-policy` changes only", end: "> **`rp_id` is a one-way setting.**",
+			want: []string{"`admin_quorum`, `admins`, `ca_profiles` or `timelock_seconds`", "a cleared `pop.machines`", "with no WARNING"}},
 		{id: "change_the_policy_you_need", file: "root-ceremony.md", section: "Change the policy",
 			start: "You need everything from", end: "0. **Prepare.**",
 			want: []string{"Agreed policy change", "never from the proposer"}},
@@ -197,7 +202,8 @@ func successorSigningSections() []*signingSection {
 		{id: "hardware_variant", file: "root-ceremony.md", section: "Hardware-root variant",
 			want: []string{"before each touch"}},
 		{id: "transcript_template", file: "ceremony-transcript-template.md", section: "Ceremony",
-			want: []string{"root rotation / policy change / re-sign", "Agreed policy change (the changed field names", "someone other than its proposer"}},
+			want: []string{"root rotation / policy change / re-sign", "Agreed policy change (the changed field names", "someone other than its proposer",
+				"checks every value"}},
 		{id: "host_setup_pop", file: "host-setup.md", section: "Registering a host in the directory",
 			want: []string{"successor_pop", "CHANGED"}},
 		{id: "machine_identities_pop", file: "machine-identities.md", section: "Renewal needs pop.machines",
