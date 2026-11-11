@@ -229,7 +229,13 @@ sends anything, and keyroster-server answers `machine_pop_not_enabled`
 without calling the signer (03-11b). It is set in a root ceremony with
 `keyroster root successor-policy --prev policy.json --out policy-next.json
 --pop-machines` (run in CI, `TestRootSuccessorPolicyPoP`, 03-04; UNVERIFIED
-on the homelab until 03-15). Unlike `pop.hosts`, it can be turned off again
+on the homelab until 03-15), then `keyroster root sign --prev` with the new
+policy. Before you confirm, check the summary's `pop hosts=... machines=true`
+line, and that the policy block marks only `pop` as `CHANGED`, every other
+field `carried over` ([root-ceremony.md](root-ceremony.md), "Change the
+policy", step 3). Run in CI (`TestCeremonyGolden`, `TestPolicyChangeFields`,
+`TestRootCeremonyPolicyChecks`, 03-14b); UNVERIFIED in a real ceremony until
+03-15, whose v4 ceremony runs the same block and pop checks. Unlike `pop.hosts`, it can be turned off again
 by a later successor policy (turning it off only stops machine renewals),
 but this version has no flag that clears it: that needs a hand-written
 successor policy.

@@ -1,0 +1,46 @@
+Successor of trust bundle v1, sha256 5305b6899202797fa6753ab984a07b2835c786a750f17b4c9b991603c86dabbd
+Previous root keys (threshold 2 of 2):
+  SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8  ssh-ed25519                        custody=software
+  SHA256:4A9jyZBOhnKZvcGQ6TRFbf5Gymb41AfYvYaVmWHD+G4  ssh-ed25519                        custody=piv
+signatures needed: 2 of the 2 previous roots AND 2 of the 2 new roots, on both documents
+Trust bundle version 2, issued 2026-10-06T00:00:00Z
+  prev:          5305b6899202797fa6753ab984a07b2835c786a750f17b4c9b991603c86dabbd
+  policy sha256: f76c3e5a251e6624b875fd5289d9e8799e65fb1b2477337127a38a4df3a511ad
+Root keys (threshold 2 of 2):
+  SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8  ssh-ed25519                        custody=software
+    WARNING: SOFTWARE ROOT - this key is not hardware-protected; keep it on offline media
+  SHA256:4A9jyZBOhnKZvcGQ6TRFbf5Gymb41AfYvYaVmWHD+G4  ssh-ed25519                        custody=piv
+CA keys:
+  user     gen 1   active   SHA256:UldozjhLRtMxFfVP9NKV++9jn3fXpWdh/Z6cBNjeyeg  ecdsa-sha2-nistp256  custody=vtpm
+  host     gen 1   active   SHA256:kLPh7MnG2KoZ74EMsUgw57MmiI+kwHfYDEZKKqb1Tnw  ecdsa-sha2-nistp256  custody=vtpm
+  machine  gen 1   active   SHA256:tbmF+7/My1dBY4FK74G3CxiYKMI4NP39WrM3r2Gj9uw  ecdsa-sha2-nistp256  custody=vtpm
+Ops key (KRL authority): SHA256:xdYOYfAqW54EuhVfwuwJx8AAoYAbm1chG9ehYfe8Jdw  ecdsa-sha2-nistp256  custody=vtpm
+Log key: SHA256:fVgyj0kOcqVT1YQ7/hKS1yX147NuE5BtwkamzFG2Isc  ecdsa-sha2-nistp256  custody=vtpm  origin=keyroster/log/7d58328f490e72a5
+Policy version 2:
+  admin quorum 1 of 2
+  admin alice            SHA256:Sy7Qz9Ql8tk5vYkt3wypNP4pnGftzz06aeXKZcuFbxw  ssh-ed25519
+  admin mallory          SHA256:AVClTvWgXEolKWcHEcUxJSIs44sDGtNJ5xliK7332fo  ssh-ed25519
+  profile user     max ttl 720h0m0s  default extensions [permit-pty]  allowed extensions []  allowed critical options []
+  profile host     max ttl 720h0m0s  default extensions []  allowed extensions []  allowed critical options []
+  profile machine  max ttl 24h0m0s  default extensions [permit-pty]  allowed extensions []  allowed critical options []
+  webauthn rp_id keyroster.example.org  origins [https://keyroster.example.org]
+  pop: none (host agents and machine renewals are off)
+  timelock 0s
+Bundle SHA-256: 9f494ec89c79148b578b7accf7f918ce10df0a8f30573d369c11c13c6090aefd
+installation id: 00112233445566778899aabbccddeeff
+Policy in force: v1, sha256 d18c6893440b8becc2e13548fe04dfeba6ed0d7d2e7a90e9b24b29ff6f654c63
+Successor policy: v2, sha256 f76c3e5a251e6624b875fd5289d9e8799e65fb1b2477337127a38a4df3a511ad, chained to the policy in force; against it:
+WARNING: this successor changes admins, ca_profiles, which root successor-policy never writes; sign only if each is part of the agreed change
+  admin_quorum: carried over
+  admins: CHANGED
+    + admin mallory SHA256:AVClTvWgXEolKWcHEcUxJSIs44sDGtNJ5xliK7332fo ssh-ed25519
+    carried over: alice
+  ca_profiles user: CHANGED
+    max_ttl_seconds: 43200 (12h0m0s) -> 2592000 (720h0m0s)
+  ca_profiles host: carried over
+  ca_profiles machine: carried over
+  timelock_seconds: carried over
+  webauthn: CHANGED (rp_id is one-way)
+    rp_id: (none) -> keyroster.example.org
+    origins: (none) -> [https://keyroster.example.org]
+  pop: carried over

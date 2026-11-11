@@ -347,8 +347,8 @@ refuses while a host names the host group.
 
 **Host agents need `pop.hosts` in the root-signed policy.** Run in CI
 (`TestPoPSuccessor`, `TestRootSuccessorPolicyPoP`, `TestInstallBundlePoP`,
-`TestVerifyBundlePoP`, 03-04; `trust verify --prev` runs the same
-`VerifySuccessor` check, but no test runs that command with such a policy);
+`TestVerifyBundlePoP`, 03-04; `TestCeremonyGolden/successor_pop` runs
+`root sign --prev` and `trust verify --prev` with such a policy, 03-14b);
 UNVERIFIED on the homelab until 03-15. A host
 agent gets its certificates on proof of possession of a host key the
 directory names, which the signer allows only when the policy in force has
@@ -359,7 +359,16 @@ directory names, which the signer allows only when the policy in force has
 keyroster root successor-policy --prev policy.json --out policy-next.json --pop-hosts
 ```
 
-then `keyroster root sign --prev` with the new policy. Once set, `pop.hosts`
+then `keyroster root sign --prev` with the new policy. Before you confirm,
+check the summary's `pop hosts=true ...` line with its one-way note
+(`pop.hosts is one-way: ...`), and that the policy block marks only `pop`
+as `CHANGED`, every other field `carried over`
+([root-ceremony.md](root-ceremony.md#change-the-policy-successor-policy-for-example-add-the-webauthn-rp),
+"Change the policy", step 3). Run in CI (`TestCeremonyGolden/successor_pop`,
+`TestRootCeremonyPolicyChecks`, 03-14b); UNVERIFIED in a real ceremony
+until 03-15, whose v4 ceremony runs the same block and pop checks.
+
+Once set, `pop.hosts`
 cannot be turned off again (owner decision 2026-10-24): `root
 successor-policy` prints `note: pop.hosts cannot be removed once set
 (pop_hosts_removed)`, and `root sign --prev`, `trust verify --prev`,

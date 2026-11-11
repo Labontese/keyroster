@@ -177,11 +177,27 @@ Insert USB A. Sign the bundle and the policy with threshold 1:
 2. refuses if `roots.pub` does not declare this root `custody=software`;
 3. prints a summary of what the signature vouches for: every root, CA, ops
    and log key with fingerprint, role, algorithm and custody, the
-   threshold, the admins and CA profiles, and the bundle SHA-256;
+   threshold, the admins and CA profiles, the WebAuthn RP, the PoP
+   switches, and the bundle SHA-256;
 4. asks you to type the first 8 hex digits of the bundle SHA-256.
 
 Before typing, compare **both root fingerprints in the summary with the
-paper**, and the CA fingerprints with `ca-init`'s output. Then type the hash
+paper**, and the CA fingerprints with `ca-init`'s output. Also check:
+
+- **No `--confirm`.** Run `root sign` without `--confirm`. `--confirm`
+  skips the prompt and signs as soon as the prefix matches, so the summary
+  is never read before signing. Remove it from any command you were given.
+- **The pop line.** A policy from `root genesis-policy` reads
+  `pop: none (host agents and machine renewals are off)`. A policy that
+  sets `pop.hosts` reads `pop hosts=true ...` followed by
+  `pop.hosts is one-way: ...`: once a policy sets it, no later policy may
+  clear it, so answer no unless the agreed policy sets it.
+
+These two checks run in CI (TestCeremonyGolden, TestSummaryGolden and
+TestRootCeremonyPolicyChecks, 03-14b; TestAuditLoginAcrossPolicyChange,
+e2e, real binaries) and are UNVERIFIED in a real ceremony.
+
+Then type the hash
 prefix. `root sign` prints the `SOFTWARE ROOT:` banner and appends the
 signatures to `bundle.json.sigs` and `policy.json.sigs`. If it stops after
 writing only one of them, run the same command again: it signs only the
@@ -333,11 +349,30 @@ apply the same rule (`trust.VerifySuccessor`):
 
    It refuses, and writes nothing, if `prev/bundle.json` does not have
    exactly that SHA-256. Before you type the hash prefix, compare:
+   - that you run `root sign` without `--confirm`: `--confirm` skips the
+     prompt and signs as soon as the prefix matches, so the summary is
+     never read. Remove it from any command you were given;
    - the `Successor of trust bundle vN, sha256 ...` line with the
      transcript once more;
    - the new root fingerprints with the paper;
    - the CA, ops and log fingerprints with the previous ceremony;
-   - the policy hash.
+   - the policy block: with this section's command, which passes the
+     policy in force as `--policy`, it reads `Policy in force: ...` and
+     `Successor policy: unchanged, every field carried over`. Any other
+     block means answer no.
+
+   A ceremony that both rotates the roots and changes the policy (03-15's
+   v4) follows the section written for it. That section compares the new
+   roots with the paper, as this list does, and checks the policy items of
+   the policy-change list: no `--confirm`, the policy in force, only the
+   agreed change, the RP, the PoP switches and the hash. It expects the
+   installation line its own section names. The unchanged-block item of
+   this list and the roots item of the policy-change list do not apply
+   there.
+
+   The `--confirm` and policy-block checks run in CI (TestCeremonyGolden
+   and TestRootCeremonyPolicyChecks, 03-14b) and are UNVERIFIED in a real
+   ceremony.
 
    The summary also prints `signatures needed: t1 of the n previous roots
    AND t2 of the m new roots, on both documents`. Then repeat the command
@@ -345,6 +380,9 @@ apply the same rule (`trust.VerifySuccessor`):
 4. **Sign with a current root.** Run the same command with the current
    root's key and the same `--out-dir`. Use `--key` for a software root, or
    `--agent-key SHA256:<fingerprint>` for a root in an `ssh-agent`.
+   Before you type the hash prefix, make the checks of step 3, the policy
+   block included (run in CI by TestCeremonyGolden and
+   TestRootCeremonyPolicyChecks, 03-14b; UNVERIFIED in a real ceremony).
    - A current root that is still offline signs offline, in the same way.
    - A current root that is already treated as exposed signs where it is
      kept, and is never brought to the ceremony machine. An example is the
@@ -365,7 +403,10 @@ apply the same rule (`trust.VerifySuccessor`):
    ```
 
    It lists the signers as `signed by previous root ...` and
-   `signed by new root ...`. It refuses unless `prev/bundle.json` has the
+   `signed by new root ...`, after the summary and the same policy block
+   as step 3 (`Successor policy: unchanged, every field carried over`;
+   run in CI by TestCeremonyGolden, 03-14b; UNVERIFIED in a real
+   ceremony). It refuses unless `prev/bundle.json` has the
    recorded SHA-256 and its own roots' signatures, both thresholds are met,
    and the new root set is exactly the pinned fingerprints. It must end with an
    `OK: successor of trust bundle v1: ...` line. In the homelab shape (two
@@ -482,11 +523,23 @@ version N+1 whose `prev` is the SHA-256 of the policy in force. The
 signer, `trust verify --prev` and `audit verify` apply the same rule as
 for a rotation (`trust.VerifySuccessor`).
 
-In Phase 2 the only field you can change this way is the **WebAuthn
-relying party** (`rp_id` and its origins), which passkey logins need.
-`keyroster root successor-policy` carries every other field over
-unchanged: admins, admin quorum, CA profiles and timelock. A quorum-gated
-policy change for those fields comes in Phase 4 (AUTHZ-03).
+`keyroster root successor-policy` changes only the **WebAuthn relying
+party** (`rp_id` and its origins), which passkey logins need, and the
+**PoP switches** (`--pop-hosts`, `--pop-machines`), and carries every
+other field over. `root sign --prev` signs any policy that chains to the
+policy in force: a successor written by hand may change the admins (for
+example, to remove a lost admin key, [enroll-user.md](enroll-user.md)),
+the admin quorum, a CA profile or the timelock, and the chain rule
+accepts it. The policy block of `root sign --prev` is where every
+custodian sees what changed: it prints a
+`WARNING: this successor changes ...` line when the successor changes
+`admin_quorum`, `admins`, `ca_profiles` or `timelock_seconds`, the fields
+`root successor-policy` never writes. Two other changes also come only
+from a hand-written successor: a removed `webauthn` RP, and a cleared
+`pop.machines` (with `pop.hosts` off, that removes `pop`). The block shows
+them as `CHANGED` with no WARNING, and step 3's "Only the agreed change",
+RP and PoP items catch them (step 3; run in CI by TestCeremonyGolden and TestPolicyChangeFields, 03-14b; UNVERIFIED in a real ceremony). A
+quorum-gated policy change comes in Phase 4 (AUTHZ-03).
 
 > **`rp_id` is a one-way setting.** Every passkey enrolled under it works
 > only for that exact hostname. Renaming the host or changing `rp_id`
@@ -500,7 +553,14 @@ You need everything from [What you need](#what-you-need), plus:
   copied to `/media/transfer/prev` (as for a rotation);
 - the SHA-256 of that `bundle.json` from the transcript;
 - the `roots.pub` of the bundle in force (the roots do not change), and
-  enough of those roots to meet its threshold.
+  enough of those roots to meet its threshold;
+- **the agreed change**: which policy fields change, and to what. It is
+  agreed before step 2. The transcript's `Agreed policy change` row
+  records the field names and a reference to the record that holds the
+  agreed values, written by someone other than the proposer, or by the
+  owner on a single-owner installation. A custodian who was not part of
+  the agreement takes it from that row and that record, never from the
+  proposer's message or command (run in CI (TestCeremonyGolden, TestSummaryGolden and TestRootCeremonyPolicyChecks, 03-14b; TestAuditLoginAcrossPolicyChange, e2e, real binaries); UNVERIFIED in a real ceremony).
 
 0. **Prepare.** Do [step 1](#1-prepare-the-binary-and-the-ceremony-machine)
    first: build the binary and compare its SHA-256 with a second machine's
@@ -544,16 +604,64 @@ You need everything from [What you need](#what-you-need), plus:
      --key /media/usbA/root-a.age
    ```
 
-   Before you confirm, check two lines of the summary:
+   Before you confirm, check the list below. Each further custodian runs
+   the same command with their own key and the same `--out-dir`, and every
+   root custodian who signs checks the whole list, including one who did
+   not see step 2's output. The list is run in CI (TestCeremonyGolden, TestSummaryGolden and TestRootCeremonyPolicyChecks, 03-14b; TestAuditLoginAcrossPolicyChange, e2e, real binaries); UNVERIFIED in a real ceremony.
 
-   - `webauthn rp_id <hostname>  origins [...]` must name exactly the
-     hostname and origins you chose. `rp_id` is one-way, and this is the
-     only place `root sign` shows it. Every root custodian who signs
-     checks it, including one who did not see step 2's output.
-   - `policy sha256:` must equal the **last** `sha256:` line of step 2's
-     output, which is the new policy's hash. The first line of that output
-     (`successor of policy vN, sha256 ...`) is the hash of the previous
-     policy.
+   - **No `--confirm`.** Run `root sign` without `--confirm`. If the
+     command you were given carries it, remove it: `--confirm` signs as
+     soon as the prefix matches, so the block is never read.
+   - **The roots do not change.** With this section's command, which
+     reuses the roots in force, the `Root keys (threshold t of n)` lines
+     list exactly the keys of the `Previous root keys (threshold t of n)`
+     lines, at the same threshold, and match the paper; and the summary
+     shows no installation line marked `(new in this version)`. Otherwise
+     answer no.
+   - **The policy in force.** `Policy in force: vN, sha256 ...` names the
+     policy version you expect. This is the version of the policy, which
+     after a rotation is lower than the bundle version; on the homelab,
+     bundle v3 carries policy v2. `root sign` has already bound this
+     policy to the bundle you pinned with `--prev-sha256`: it takes the
+     `policy.json` that bundle names and refuses any other. Compare its
+     SHA-256 with your transcript only where the transcript records that
+     policy's SHA-256.
+   - **Only the agreed change.** Under `Successor policy: vN+1, ...`, every
+     field reads `carried over` except the fields the
+     `Agreed policy change` row names. Take the field names from that row,
+     and check every value against the record the row refers to: each `-`
+     or `+` admin's name and SHA256 fingerprint, a `~` renamed key, the
+     `admin_quorum` and `timelock_seconds` numbers, each changed CA profile
+     sub-field, the RP and the pop switches. If any other field reads
+     `CHANGED`, or a value differs from the record, answer no: nothing is
+     signed. A `WARNING: this successor changes ...` line names which of
+     `admin_quorum`, `admins`, `ca_profiles` and `timelock_seconds` changed,
+     the fields `root successor-policy` never writes; sign only when the row
+     names exactly those fields and the record holds exactly the values
+     shown. A removed RP or a cleared `pop.machines` reads `CHANGED` with
+     no WARNING; this item and the next two catch it.
+   - **The RP.** `webauthn rp_id <hostname>  origins [...]` names exactly
+     the hostname and origins in the record that the
+     `Agreed policy change` row refers to. `rp_id` is one-way.
+   - **The PoP switches.** The pop line,
+     `pop: none (host agents and machine renewals are off)` or
+     `pop hosts=<true|false> machines=<true|false>`, matches the agreed
+     change. `pop.hosts` is one-way: once a policy sets it, no later policy
+     may clear it, and the summary then prints
+     `pop.hosts is one-way: ...` under the pop line. This line is as
+     mandatory as the rp_id line.
+   - **The hash, if you saw step 2.** `policy sha256:` equals the **last**
+     `sha256:` line of step 2's output, which is the new policy's hash.
+     The first line of that output (`successor of policy vN, sha256 ...`)
+     is the hash of the previous policy.
+
+   A ceremony that both rotates the roots and changes the policy (03-15's
+   v4) follows the section written for it. That section compares the new
+   roots with the paper, as the rotation list does, and checks the policy
+   items of this list: no `--confirm`, the policy in force, only the
+   agreed change, the RP, the PoP switches and the hash. It expects the
+   installation line its own section names. The roots item of this list
+   and the unchanged-block item of the rotation list do not apply there.
 
    A root in both the previous and the new root set counts toward both
    thresholds, so the roots' threshold of signatures is enough.
@@ -567,9 +675,9 @@ You need everything from [What you need](#what-you-need), plus:
      --policy /media/transfer/policy-change/policy.json
    ```
 
-   It must end with `OK: successor of trust bundle vN: ...`, and its
-   summary must show the same `webauthn rp_id ... origins [...]` line you
-   checked in step 3.
+   It must end with `OK: successor of trust bundle vN: ...`. Its summary
+   must show the same `webauthn` and `pop` lines, and its policy block the
+   same lines, that you checked in step 3 (run in CI (TestCeremonyGolden, TestSummaryGolden and TestRootCeremonyPolicyChecks, 03-14b; TestAuditLoginAcrossPolicyChange, e2e, real binaries); UNVERIFIED in a real ceremony).
 5. **Install** with the signer stopped:
    [signer-install.md, "Install a successor bundle"](signer-install.md#install-a-successor-bundle-stop-install-start).
    If `keyroster-server` runs on the host and the `rp_id` changed, put a
@@ -642,6 +750,15 @@ the change.
 > `login certificates 1, directory installs 1`. The successor-policy
 > refusals are unit-tested (`TestRootSuccessorPolicy`).
 >
+> **The step-3 checks (03-14b).** The policy block, the warning line and
+> the pop line are pinned byte for byte through the real commands by
+> `TestCeremonyGolden` and on the test vectors by `TestSummaryGolden`; every
+> policy field has a single-field case in `TestPolicyChangeFields`;
+> `TestRootCeremonyPolicyChecks` pins this list in the runbook; and
+> `TestAuditLoginAcrossPolicyChange` checks the block and the pop line
+> from the real binaries. They run in CI. Reading the block in a real
+> ceremony is UNVERIFIED.
+>
 > **Run on the homelab in 02-13, as a rehearsal.** Steps 1 to 5 ran
 > against the homelab vTPM signer, giving trust bundle v3 and policy v2.
 >
@@ -680,7 +797,10 @@ the change.
 ## Hardware-root variant
 
 For the product path (D-11), replace steps 3 and 4 with hardware keys. The
-rest of the ceremony is unchanged.
+rest of the ceremony is unchanged. The checks of the step being replaced
+apply before each touch or confirmation, the policy block and the pop line
+included (run in CI by TestCeremonyGolden and TestRootCeremonyPolicyChecks,
+03-14b, with software keys; UNVERIFIED in a real ceremony).
 
 **FIDO2 (`ed25519-sk`, custody `fido`).** On the ceremony machine, with
 `libfido2` available, create one key per token:

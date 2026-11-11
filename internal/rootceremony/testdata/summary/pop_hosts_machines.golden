@@ -1,0 +1,24 @@
+Trust bundle version 1, issued 2026-10-05T00:00:00Z
+  prev:          0000000000000000000000000000000000000000000000000000000000000000
+  policy sha256: d18c6893440b8becc2e13548fe04dfeba6ed0d7d2e7a90e9b24b29ff6f654c63
+Root keys (threshold 1 of 2):
+  SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8  ssh-ed25519                        custody=software
+    WARNING: SOFTWARE ROOT - this key is not hardware-protected; keep it on offline media
+  SHA256:eUjVPa81eD0giadfuQciei2Prn60eJEut8nagrTsovQ  ecdsa-sha2-nistp256                custody=piv
+CA keys:
+  user     gen 1   active   SHA256:UldozjhLRtMxFfVP9NKV++9jn3fXpWdh/Z6cBNjeyeg  ecdsa-sha2-nistp256  custody=vtpm
+  host     gen 1   active   SHA256:kLPh7MnG2KoZ74EMsUgw57MmiI+kwHfYDEZKKqb1Tnw  ecdsa-sha2-nistp256  custody=vtpm
+  machine  gen 1   active   SHA256:tbmF+7/My1dBY4FK74G3CxiYKMI4NP39WrM3r2Gj9uw  ecdsa-sha2-nistp256  custody=vtpm
+Ops key (KRL authority): SHA256:xdYOYfAqW54EuhVfwuwJx8AAoYAbm1chG9ehYfe8Jdw  ecdsa-sha2-nistp256  custody=vtpm
+Log key: SHA256:fVgyj0kOcqVT1YQ7/hKS1yX147NuE5BtwkamzFG2Isc  ecdsa-sha2-nistp256  custody=vtpm  origin=keyroster/log/7d58328f490e72a5
+Policy version 2:
+  admin quorum 1 of 1
+  admin alice            SHA256:Sy7Qz9Ql8tk5vYkt3wypNP4pnGftzz06aeXKZcuFbxw  ssh-ed25519
+  profile user     max ttl 12h0m0s  default extensions [permit-pty]  allowed extensions []  allowed critical options []
+  profile host     max ttl 720h0m0s  default extensions []  allowed extensions []  allowed critical options []
+  profile machine  max ttl 24h0m0s  default extensions [permit-pty]  allowed extensions []  allowed critical options []
+  webauthn: none (passkey logins refused)
+  pop hosts=true machines=true
+    pop.hosts is one-way: no later policy may turn it off (pop_hosts_removed)
+  timelock 0s
+Bundle SHA-256: 745a3301f3e0d007851f23499a9593045f089b4489be60031d468d3241ceffb5

@@ -1,0 +1,31 @@
+Successor of trust bundle v1, sha256 5305b6899202797fa6753ab984a07b2835c786a750f17b4c9b991603c86dabbd
+Previous root keys (threshold 2 of 2):
+  SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8  ssh-ed25519                        custody=software
+  SHA256:4A9jyZBOhnKZvcGQ6TRFbf5Gymb41AfYvYaVmWHD+G4  ssh-ed25519                        custody=piv
+signatures needed: 2 of the 2 previous roots AND 2 of the 2 new roots, on both documents
+Trust bundle version 2, issued 2026-10-06T00:00:00Z
+  prev:          5305b6899202797fa6753ab984a07b2835c786a750f17b4c9b991603c86dabbd
+  policy sha256: d18c6893440b8becc2e13548fe04dfeba6ed0d7d2e7a90e9b24b29ff6f654c63
+Root keys (threshold 2 of 2):
+  SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8  ssh-ed25519                        custody=software
+    WARNING: SOFTWARE ROOT - this key is not hardware-protected; keep it on offline media
+  SHA256:4A9jyZBOhnKZvcGQ6TRFbf5Gymb41AfYvYaVmWHD+G4  ssh-ed25519                        custody=piv
+CA keys:
+  user     gen 1   active   SHA256:UldozjhLRtMxFfVP9NKV++9jn3fXpWdh/Z6cBNjeyeg  ecdsa-sha2-nistp256  custody=vtpm
+  host     gen 1   active   SHA256:kLPh7MnG2KoZ74EMsUgw57MmiI+kwHfYDEZKKqb1Tnw  ecdsa-sha2-nistp256  custody=vtpm
+  machine  gen 1   active   SHA256:tbmF+7/My1dBY4FK74G3CxiYKMI4NP39WrM3r2Gj9uw  ecdsa-sha2-nistp256  custody=vtpm
+Ops key (KRL authority): SHA256:xdYOYfAqW54EuhVfwuwJx8AAoYAbm1chG9ehYfe8Jdw  ecdsa-sha2-nistp256  custody=vtpm
+Log key: SHA256:fVgyj0kOcqVT1YQ7/hKS1yX147NuE5BtwkamzFG2Isc  ecdsa-sha2-nistp256  custody=vtpm  origin=keyroster/log/7d58328f490e72a5
+Policy version 1:
+  admin quorum 1 of 1
+  admin alice            SHA256:Sy7Qz9Ql8tk5vYkt3wypNP4pnGftzz06aeXKZcuFbxw  ssh-ed25519
+  profile user     max ttl 12h0m0s  default extensions [permit-pty]  allowed extensions []  allowed critical options []
+  profile host     max ttl 720h0m0s  default extensions []  allowed extensions []  allowed critical options []
+  profile machine  max ttl 24h0m0s  default extensions [permit-pty]  allowed extensions []  allowed critical options []
+  webauthn: none (passkey logins refused)
+  pop: none (host agents and machine renewals are off)
+  timelock 0s
+Bundle SHA-256: ed589476804505b47e221a46c678fb78831abf431dd04cb9b54e34996655e7f0
+installation id: 00112233445566778899aabbccddeeff
+Policy in force: v1, sha256 d18c6893440b8becc2e13548fe04dfeba6ed0d7d2e7a90e9b24b29ff6f654c63
+Successor policy: unchanged, every field carried over

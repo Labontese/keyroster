@@ -1,0 +1,41 @@
+Successor of trust bundle v1, sha256 5305b6899202797fa6753ab984a07b2835c786a750f17b4c9b991603c86dabbd
+Trust bundle version 2, issued 2026-10-06T00:00:00Z
+  prev:          5305b6899202797fa6753ab984a07b2835c786a750f17b4c9b991603c86dabbd
+  policy sha256: caab9f3eb8a7e673bba7ddecd42668652c80a3a9f9b647d141d74f5bc107a575
+Root keys (threshold 2 of 2):
+  SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8  ssh-ed25519                        custody=software
+    WARNING: SOFTWARE ROOT - this key is not hardware-protected; keep it on offline media
+  SHA256:4A9jyZBOhnKZvcGQ6TRFbf5Gymb41AfYvYaVmWHD+G4  ssh-ed25519                        custody=piv
+CA keys:
+  user     gen 1   active   SHA256:UldozjhLRtMxFfVP9NKV++9jn3fXpWdh/Z6cBNjeyeg  ecdsa-sha2-nistp256  custody=vtpm
+  host     gen 1   active   SHA256:kLPh7MnG2KoZ74EMsUgw57MmiI+kwHfYDEZKKqb1Tnw  ecdsa-sha2-nistp256  custody=vtpm
+  machine  gen 1   active   SHA256:tbmF+7/My1dBY4FK74G3CxiYKMI4NP39WrM3r2Gj9uw  ecdsa-sha2-nistp256  custody=vtpm
+Ops key (KRL authority): SHA256:xdYOYfAqW54EuhVfwuwJx8AAoYAbm1chG9ehYfe8Jdw  ecdsa-sha2-nistp256  custody=vtpm
+Log key: SHA256:fVgyj0kOcqVT1YQ7/hKS1yX147NuE5BtwkamzFG2Isc  ecdsa-sha2-nistp256  custody=vtpm  origin=keyroster/log/7d58328f490e72a5
+Policy version 2:
+  admin quorum 1 of 1
+  admin alice            SHA256:Sy7Qz9Ql8tk5vYkt3wypNP4pnGftzz06aeXKZcuFbxw  ssh-ed25519
+  profile user     max ttl 12h0m0s  default extensions [permit-pty]  allowed extensions []  allowed critical options []
+  profile host     max ttl 720h0m0s  default extensions []  allowed extensions []  allowed critical options []
+  profile machine  max ttl 24h0m0s  default extensions [permit-pty]  allowed extensions []  allowed critical options []
+  webauthn: none (passkey logins refused)
+  pop hosts=true machines=true
+    pop.hosts is one-way: no later policy may turn it off (pop_hosts_removed)
+  timelock 0s
+Bundle SHA-256: 54ca4d45f1c880076c8a8b65ba918d753f33c4d8c2ede7b348da3923b5a2766b
+Policy in force: v1, sha256 d18c6893440b8becc2e13548fe04dfeba6ed0d7d2e7a90e9b24b29ff6f654c63
+Successor policy: v2, sha256 caab9f3eb8a7e673bba7ddecd42668652c80a3a9f9b647d141d74f5bc107a575, chained to the policy in force; against it:
+  admin_quorum: carried over
+  admins: carried over
+  ca_profiles user: carried over
+  ca_profiles host: carried over
+  ca_profiles machine: carried over
+  timelock_seconds: carried over
+  webauthn: carried over
+  pop: CHANGED (none) -> hosts=true machines=true
+    pop.hosts is one-way: no later policy may turn it off (pop_hosts_removed)
+signed by previous root SHA256:4A9jyZBOhnKZvcGQ6TRFbf5Gymb41AfYvYaVmWHD+G4
+signed by previous root SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8
+signed by new root SHA256:4A9jyZBOhnKZvcGQ6TRFbf5Gymb41AfYvYaVmWHD+G4
+signed by new root SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8
+OK: successor of trust bundle v1: previous roots 2 of 2 signed both documents (threshold 2); new roots 2 of 2 signed both documents (threshold 2, pinned)

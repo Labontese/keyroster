@@ -455,13 +455,14 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	var (
 		prev       *trust.Bundle
 		prevBundle []byte
+		prevPolicy []byte // the policy in force, for the policy block (03-14b)
 		build      bundleBuilder
 		inputs     = "--ca-pubkeys, --roots, --threshold and --policy"
 		rootSets   = [][]trust.RootKey{roots}
 		idRule     = installationRule{fresh: true} // a genesis always gets one
 	)
 	if successor {
-		prev, prevBundle, build, err = successorBuilder(*prevDir, *prevSHA, *outDir, roots, thr, policy)
+		prev, prevBundle, prevPolicy, build, err = successorBuilder(*prevDir, *prevSHA, *outDir, roots, thr, policy)
 		if err != nil {
 			return err
 		}
@@ -552,6 +553,17 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	}
 	_, _ = io.WriteString(stdout, rootceremony.Summary(b, pol))
 	_, _ = io.WriteString(stdout, installationLine(prev, b))
+	if prev != nil {
+		// The policy block, the last thing before the prompt (03-14b, F04).
+		// prepareBundle ran BuildSuccessor in both of its branches, so
+		// prevPolicy is bound to the bundle that --prev-sha256 pins. Both
+		// documents parsed above, so the error is unreachable.
+		block, err := policyChange(prevPolicy, policy)
+		if err != nil {
+			return fmt.Errorf("%w; nothing was signed", err)
+		}
+		_, _ = io.WriteString(stdout, block)
+	}
 	answer := *confirm
 	if answer == "" {
 		_, _ = fmt.Fprintf(stderr, "Type the first 8 hex digits of the bundle SHA-256 to sign with %s: ", fp)
@@ -790,30 +802,31 @@ func buildBundle(cas *trust.CAPubKeys, roots []trust.RootKey, threshold uint32, 
 
 // successorBuilder reads and authenticates the bundle and policy in force
 // from prevDir (loadPrev: the recorded SHA-256 prevSHA and its own roots'
-// signatures) and returns the previous bundle, its bytes and the builder of
-// its successor (trust.BuildSuccessor). outDir must not be prevDir: the
+// signatures) and returns the previous bundle, its bytes, the policy in
+// force (for the policy block, 03-14b) and the builder of its successor
+// (trust.BuildSuccessor). outDir must not be prevDir: the
 // successor never overwrites the documents it chains to. Every refusal
 // comes before anything is written.
-func successorBuilder(prevDir, prevSHA, outDir string, roots []trust.RootKey, threshold uint32, policy []byte) (*trust.Bundle, []byte, bundleBuilder, error) {
+func successorBuilder(prevDir, prevSHA, outDir string, roots []trust.RootKey, threshold uint32, policy []byte) (*trust.Bundle, []byte, []byte, bundleBuilder, error) {
 	absPrev, err := filepath.Abs(prevDir)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	absOut, err := filepath.Abs(outDir)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if absPrev == absOut {
-		return nil, nil, nil, fmt.Errorf("--out-dir %s is the --prev directory; write the successor to a new directory; nothing was written or signed", outDir)
+		return nil, nil, nil, nil, fmt.Errorf("--out-dir %s is the --prev directory; write the successor to a new directory; nothing was written or signed", outDir)
 	}
 	prev, prevBundle, prevPolicy, err := loadPrev(prevDir, prevSHA)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("%w; nothing was written or signed", err)
+		return nil, nil, nil, nil, fmt.Errorf("%w; nothing was written or signed", err)
 	}
 	build := func(issuedAt, installationID string) (*trust.Bundle, error) {
 		return trust.BuildSuccessor(prev, prevBundle, prevPolicy, roots, threshold, policy, issuedAt, installationID)
 	}
-	return prev, prevBundle, build, nil
+	return prev, prevBundle, prevPolicy, build, nil
 }
 
 // successorHeader describes the bundle a successor chains to, before the
