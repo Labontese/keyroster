@@ -931,6 +931,24 @@ func TestRevokeRecover(t *testing.T) {
 			t.Fatalf("a lost installation ID under a pinned config: exit %d:\n%s%s", code, stdout, errOut)
 		}
 	})
+	// F10 (03-14c, Q-C4 B): a saved export whose last KRL was published
+	// past c's prune time, dated ahead of this clock, leaves out c's
+	// revocation; recover refuses it before it writes a request.
+	t.Run("forward_dated_saved_export_refused", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		b := newLogBuilder(t, e, nil)
+		c := b.issue(trust.RoleUser)
+		b.publish()
+		restoredN := len(b.leaves)
+		b.revokeSerial(c)
+		b.micros = (c.ValidBefore + krl.PruneMargin + 1) * 1_000_000
+		b.publish()
+		out := filepath.Join(t.TempDir(), "recovery.req")
+		code, stdout, errOut := run(t, "revoke", "recover", "--restored", b.export(restoredN), "--saved", b.export(-1), "--out", out, "--yes")
+		if code == 0 || !strings.Contains(errOut, "refused (recovery_clock_ahead)") || !strings.Contains(errOut, "Keep the hold") || fileExists(out) {
+			t.Fatalf("a forward-dated saved export: exit %d:\n%s%s", code, stdout, errOut)
+		}
+	})
 	t.Run("restore_before_recovery_relists_carried", func(t *testing.T) {
 		e := newDirEnv(t, 1, 1)
 		b := newLogBuilder(t, e, nil)

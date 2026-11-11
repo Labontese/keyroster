@@ -6,6 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -210,4 +217,150 @@ func TestExportHostIssue(t *testing.T) {
 			t.Errorf("a host_issue line with %s: %v, want it refused", mut[1], err)
 		}
 	}
+}
+
+// TestExportKeysLowercase (03-14c; PR #75 review): every key the export's
+// decoders write is lowercase ASCII letters, digits and underscores, which
+// Verify's charset rule requires of every line. The gate is syntactic: in
+// the bodies of Decode, decodeLeaf and every function whose name starts
+// with "decode", in the non-test files of this package, each string
+// literal written as a map index (an index of an identifier the function
+// declares with a map type) or as a map composite literal's key must match,
+// and any other such key fails, except the one recorded site
+// counts[tlog.ReasonName(c.Reason)], whose names are checked instead. A
+// data-derived key needs its own charset proof or an allowlist entry here.
+// Verification bookkeeping maps elsewhere in the package never reach an
+// export line and are out of scope.
+func TestExportKeysLowercase(t *testing.T) {
+	const allowed = "counts[tlog.ReasonName(c.Reason)]"
+	lower := regexp.MustCompile(`^[a-z0-9_]+$`)
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	keys, found := map[string]bool{}, map[string]bool{}
+	allowedSeen := false
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || (fd.Name.Name != "Decode" && !strings.HasPrefix(fd.Name.Name, "decode")) {
+				continue
+			}
+			found[fd.Name.Name] = true
+			mapVars := mapIdents(fd)
+			check := func(at ast.Node, key ast.Expr, site string) {
+				if lit, ok := key.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					k, err := strconv.Unquote(lit.Value)
+					if err != nil || !lower.MatchString(k) {
+						t.Errorf("%s: %s writes the key %s, which is not lowercase ASCII letters, digits and underscores", fset.Position(at.Pos()), fd.Name.Name, lit.Value)
+					}
+					keys[k] = true
+					return
+				}
+				if site == allowed {
+					allowedSeen = true
+					return
+				}
+				t.Errorf("%s: %s writes the map key %s, which is not a string literal: a data-derived key needs its own charset proof or an allowlist entry in this test",
+					fset.Position(at.Pos()), fd.Name.Name, types.ExprString(key))
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.AssignStmt:
+					for _, lhs := range n.Lhs {
+						if ix, ok := lhs.(*ast.IndexExpr); ok {
+							if id, ok := ix.X.(*ast.Ident); ok && mapVars[id.Name] {
+								check(ix, ix.Index, types.ExprString(ix))
+							}
+						}
+					}
+				case *ast.CompositeLit:
+					if _, ok := n.Type.(*ast.MapType); ok {
+						for _, el := range n.Elts {
+							if kv, ok := el.(*ast.KeyValueExpr); ok {
+								check(kv, kv.Key, "")
+							}
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	if !allowedSeen {
+		t.Errorf("the recorded site %s was not found: update this test's allowlist", allowed)
+	}
+	for i := range 256 {
+		r := uint8(i) //nolint:gosec // G115: i < 256
+		if tlog.ValidReason(r) && !lower.MatchString(tlog.ReasonName(r)) {
+			t.Errorf("reason %d is named %q, which is not lowercase ASCII letters, digits and underscores", r, tlog.ReasonName(r))
+		}
+	}
+	for _, k := range []string{"kind", "policy_version", "directory", "admin_fingerprints"} {
+		if !keys[k] {
+			t.Errorf("the decoders write no %q key: the scope matches nothing it should", k)
+		}
+	}
+	for _, fn := range []string{"decodeLeaf", "decodeRevoke", "decodeRecovery", "decodeHostForget", "decodeLoginIssue", "decodeHostIssue", "decodeMachineIssue", "decodeProbeIssue"} {
+		if !found[fn] {
+			t.Errorf("no function %s found: the scope matches nothing it should", fn)
+		}
+	}
+}
+
+// mapIdents is the identifiers fd declares with a map type: a map-typed
+// parameter, a variable declared with a map type, or one assigned a map
+// composite literal or make(map[...]).
+func mapIdents(fd *ast.FuncDecl) map[string]bool {
+	out := map[string]bool{}
+	isMap := func(e ast.Expr) bool {
+		switch e := e.(type) {
+		case *ast.MapType:
+			return true
+		case *ast.CompositeLit:
+			_, ok := e.Type.(*ast.MapType)
+			return ok
+		case *ast.CallExpr:
+			if id, ok := e.Fun.(*ast.Ident); ok && id.Name == "make" && len(e.Args) > 0 {
+				_, ok := e.Args[0].(*ast.MapType)
+				return ok
+			}
+		}
+		return false
+	}
+	for _, p := range fd.Type.Params.List {
+		if isMap(p.Type) {
+			for _, n := range p.Names {
+				out[n.Name] = true
+			}
+		}
+	}
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			if n.Tok == token.DEFINE {
+				for i, lhs := range n.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && i < len(n.Rhs) && isMap(n.Rhs[i]) {
+						out[id.Name] = true
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for i, id := range n.Names {
+				if (n.Type != nil && isMap(n.Type)) || (i < len(n.Values) && isMap(n.Values[i])) {
+					out[id.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	return out
 }

@@ -64,7 +64,28 @@ type Options struct {
 	// carries an installation ID unchanged once it is set, while the
 	// anchor may predate it.
 	InstallationID string
+	// Now is the verifier's clock in Unix microseconds; 0 disables the
+	// bound (03-14c, F10). With it, Verify refuses a log whose last entry
+	// is more than maxLeafAheadMicros (krl.PruneMargin) after Now, with
+	// ErrEntryAhead. An entry may be left out of a KRL issued at T only if
+	// T >= ValidBefore + krl.PruneMargin, and an accepted issued_at is at
+	// most Now + the allowance, so with the allowance equal to PruneMargin
+	// an accepted KRL leaves out only certificates already expired at the
+	// verifier's clock. The bound is detective: a signer whose clock ran
+	// ahead writes the same entries, and keeps writing them at least that
+	// late, because appendLocked clamps leaf times forward.
+	Now uint64
 }
+
+// ErrEntryAhead is wrapped by Verify's refusal of a log whose last entry
+// is dated more than maxLeafAheadMicros after Options.Now (03-14c, F10).
+var ErrEntryAhead = errors.New("audit: an entry is dated past this verifier's clock")
+
+// maxLeafAheadMicros is how far, in microseconds, the last entry may be
+// dated after Options.Now. It is krl.PruneMargin by definition and must
+// not exceed it: a larger allowance would let an accepted KRL leave out a
+// certificate still valid at the verifier's clock (03-14c, F10).
+const maxLeafAheadMicros = krl.PruneMargin * 1_000_000
 
 // LoggedCertificate is a certificate a verified log holds: the index and
 // kind of its entry and the certificate (SSH wire format) from the
@@ -130,6 +151,8 @@ type Report struct {
 	LastKRL *PublishedKRL
 	// Bundle is the trust bundle in force at the end of the log.
 	Bundle *trust.Bundle
+	// LastTimeMicros is the last entry's leaf time (03-14c, F10).
+	LastTimeMicros uint64
 }
 
 // anchor is the trust state in force at a point of the log: the last

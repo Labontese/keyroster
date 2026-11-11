@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -61,6 +62,10 @@ type verifyResult struct {
 	// at the end of the log, "" when it names none (03-14c, F05).
 	InstallationID string `json:"installation_id"`
 }
+
+// auditClock is the clock of audit verify and revoke recover, which they
+// pass to audit.Verify as Options.Now (03-14c, F10); tests set it.
+var auditClock = time.Now
 
 func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("audit verify", flag.ContinueOnError)
