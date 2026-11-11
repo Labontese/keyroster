@@ -112,6 +112,8 @@ Pass on R2, as planned: TestClientTrust/{installation_pinned_ok, unpinned_id_les
 - M2-7, diagnose swallows the pin error: killed by TestInstallationPinned/admin_error_names_installation.
 - M2-8, runTrustVerify omits the line: killed by TestCeremonyGolden/genesis_pop/trust_verify.
 
+Unmutated, at T2, both mutant commands (vet, then `-timeout 5m -run`, no -race) pass: `ok github.com/Labontese/keyroster/internal/serverclient 0.069s` and `ok github.com/Labontese/keyroster/cmd/keyroster 2.182s`.
+
 Cumulative: 13 of 13 mutants killed (Task 1: 5, Task 2: 8).
 
 **Moved setups (assertions unchanged):**
