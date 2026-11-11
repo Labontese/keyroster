@@ -328,7 +328,7 @@ func runHostCAKey(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
-	b, _, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold)
+	b, _, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
 	if err != nil {
 		return err
 	}
@@ -359,7 +359,7 @@ var errHostPoPNotEnabled = errors.New("host_pop_not_enabled: the root-signed pol
 // saved pins (Trust) and refuses errHostPoPNotEnabled when the verified
 // policy does not set pop.hosts.
 func requireHostPoP(ctx context.Context, s *adminSession) (*trust.Bundle, *trust.Policy, error) {
-	b, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold)
+	b, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID)
 	if err != nil {
 		return nil, nil, err
 	}

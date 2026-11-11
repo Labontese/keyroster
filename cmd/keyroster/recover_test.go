@@ -588,6 +588,12 @@ func noIDBundles(t *testing.T, e *dirEnv) (genesis, successor *tlog.BundleInstal
 	g := *e.bundle
 	g.InstallationID = ""
 	genesis = sign(&g)
+	// The config pins the restored bundle's (no) installation ID, as
+	// keyroster init saves it under that bundle (03-14c, F06).
+	e.cfg.InstallationID = ""
+	if _, err := saveConfig(e.cfg, true); err != nil {
+		t.Fatal(err)
+	}
 	next := g
 	next.Version, next.Prev, next.InstallationID = 2, trust.SHA256Hex(genesis.Bundle), "fedcba9876543210fedcba9876543210"
 	return genesis, sign(&next)
@@ -868,6 +874,61 @@ func TestRevokeRecover(t *testing.T) {
 		code, stdout, errOut := run(t, "revoke", "recover", "--restored", export, "--saved", export, "--out", out, "--yes")
 		if code != 0 || stdout != nothingToRecover+"\n" || fileExists(out) {
 			t.Fatalf("neither bundle with an installation ID: exit %d:\n%s%s", code, stdout, errOut)
+		}
+	})
+	// The saved config's installation pin (03-14c, F06), after
+	// recovery_installation_lost: an unpinned config is a re-init, any other
+	// mismatch an escalation; nothing is written either way.
+	repin := func(t *testing.T, e *dirEnv, id string) {
+		t.Helper()
+		cfg := *e.cfg
+		cfg.InstallationID = id
+		if _, err := saveConfig(&cfg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("other_installation_refused", func(t *testing.T) {
+		s := newRecoverScenario(t)
+		repin(t, s.e, "fedcba9876543210fedcba9876543210")
+		code, stdout, errOut := s.run(t)
+		if code == 0 || !strings.Contains(errOut, "refused (recovery_installation_other)") || !strings.Contains(errOut, "escalate") || fileExists(s.out) {
+			t.Fatalf("a config pinned to another installation: exit %d:\n%s%s", code, stdout, errOut)
+		}
+	})
+	t.Run("unpinned_config_refused", func(t *testing.T) {
+		s := newRecoverScenario(t)
+		repin(t, s.e, "")
+		code, stdout, errOut := s.run(t)
+		if code == 0 || !strings.Contains(errOut, "refused (recovery_installation_not_pinned)") || !strings.Contains(errOut, "Keep the hold") ||
+			!strings.Contains(errOut, "--user") || fileExists(s.out) {
+			t.Fatalf("a config that pins no installation: exit %d:\n%s%s", code, stdout, errOut)
+		}
+	})
+	t.Run("id_less_exports_with_pin_refused", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		genesis, _ := noIDBundles(t, e)
+		repin(t, e, e.bundle.InstallationID)
+		b := newLogBuilder(t, e, genesis)
+		b.issue(trust.RoleUser)
+		export := b.export(-1)
+		out := filepath.Join(t.TempDir(), "recovery.req")
+		code, stdout, errOut := run(t, "revoke", "recover", "--restored", export, "--saved", export, "--out", out, "--yes")
+		if code == 0 || !strings.Contains(errOut, "refused (recovery_installation_other)") || strings.Contains(stdout, "nothing to recover") || fileExists(out) {
+			t.Fatalf("ID-less exports under a pinned config: exit %d:\n%s%s", code, stdout, errOut)
+		}
+	})
+	t.Run("lost_still_first", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		genesis, successor := noIDBundles(t, e)
+		repin(t, e, e.bundle.InstallationID)
+		b := newLogBuilder(t, e, genesis)
+		restored := b.export(-1)
+		b.install(successor)
+		saved := b.export(-1)
+		out := filepath.Join(t.TempDir(), "recovery.req")
+		code, stdout, errOut := run(t, "revoke", "recover", "--restored", restored, "--saved", saved, "--out", out, "--yes")
+		if code == 0 || !strings.Contains(errOut, "recovery_installation_lost") || strings.Contains(stdout, "nothing to recover") || fileExists(out) {
+			t.Fatalf("a lost installation ID under a pinned config: exit %d:\n%s%s", code, stdout, errOut)
 		}
 	})
 	t.Run("restore_before_recovery_relists_carried", func(t *testing.T) {

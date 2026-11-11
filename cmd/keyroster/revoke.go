@@ -113,7 +113,7 @@ func openRevocation(ctx context.Context, adminKey string, stderr io.Writer) (*re
 	if err != nil {
 		return nil, err
 	}
-	bundle, _, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold)
+	bundle, _, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID)
 	if err != nil {
 		s.close()
 		return nil, err

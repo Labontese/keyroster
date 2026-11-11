@@ -24,8 +24,12 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/sshsig"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // initServer is a TLS server for localhost under a test root that serves
@@ -37,6 +41,9 @@ type initServer struct {
 	rootFP   string          // the trust root's SHA256 fingerprint
 	otherPin string          // a well-formed pin of a root the server never presents
 	leaf     tls.Certificate // the server's localhost certificate under the test root
+	// installation is the served bundle's installation ID, "" for none
+	// (03-14c, F06).
+	installation string
 }
 
 // newInitServer signs a genesis bundle with one software root (the
@@ -44,7 +51,14 @@ type initServer struct {
 // TLS with custody.
 func newInitServer(t *testing.T, custody string) *initServer {
 	t.Helper()
-	doc, rootFP := initTrustDoc(t)
+	return newInitServerEdit(t, custody, nil)
+}
+
+// newInitServerEdit is newInitServer with the genesis bundle changed by
+// edit (nil: unchanged) and re-signed by the root (03-14c, F06).
+func newInitServerEdit(t *testing.T, custody string, edit func(b *trust.Bundle)) *initServer {
+	t.Helper()
+	doc, rootFP := initTrustDocEdit(t, edit)
 	root, rootKey := initTestRoot(t)
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -69,6 +83,15 @@ func newInitServer(t *testing.T, custody string) *initServer {
 		otherPin: serverclient.PinOf(other),
 		leaf:     cert,
 	}
+	var tr serverclient.TrustResponse
+	if err := json.Unmarshal(doc, &tr); err != nil {
+		t.Fatal(err)
+	}
+	b, err := trust.ParseBundle(tr.Bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	is.installation = b.InstallationID
 	writeTestFile(t, is.rootFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw}))
 	return is
 }
@@ -78,6 +101,13 @@ func newInitServer(t *testing.T, custody string) *initServer {
 // document and the trust root's fingerprint.
 func initTrustDoc(t *testing.T) ([]byte, string) {
 	t.Helper()
+	return initTrustDocEdit(t, nil)
+}
+
+// initTrustDocEdit is initTrustDoc with the genesis bundle changed by edit
+// (nil: unchanged) and re-signed by the root (03-14c, F06).
+func initTrustDocEdit(t *testing.T, edit func(b *trust.Bundle)) ([]byte, string) {
+	t.Helper()
 	g := newCeremony(t, 1)
 	useKeyring(t, g.rootKeys...)
 	typeHashPrefix(t, g.out)
@@ -85,8 +115,26 @@ func initTrustDoc(t *testing.T) ([]byte, string) {
 		t.Fatalf("root sign: exit %d: %s", code, stderr)
 	}
 	read := func(name string) []byte { return readTestFile(t, filepath.Join(g.out, name)) }
+	bundle, bundleSigs := read("bundle.json"), read("bundle.json.sigs")
+	if edit != nil {
+		b, err := trust.ParseBundle(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		edit(b)
+		if bundle, err = b.Canonical(); err != nil {
+			t.Fatal(err)
+		}
+		root, err := ssh.NewSignerFromKey(g.rootKeys[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bundleSigs, err = sshsig.Sign(rand.Reader, root, trust.NamespaceBundle, bundle); err != nil {
+			t.Fatal(err)
+		}
+	}
 	doc, err := json.Marshal(serverclient.TrustResponse{
-		Bundle: read("bundle.json"), BundleSigs: read("bundle.json.sigs"),
+		Bundle: bundle, BundleSigs: bundleSigs,
 		Policy: read("policy.json"), PolicySigs: read("policy.json.sigs"), BundleVersion: 1,
 	})
 	if err != nil {
@@ -187,7 +235,7 @@ func TestRepinInstructionsKeepIdentity(t *testing.T) {
 	if found < 2 {
 		t.Fatalf("found %d re-pin instructions in the runbooks, want at least 2 (root-ceremony step 9, server-install TLS root changed)", found)
 	}
-	for _, err := range []error{serverclient.ErrTrustRootNotPinned, serverclient.ErrTLSRootNotPinned} {
+	for _, err := range []error{serverclient.ErrTrustRootNotPinned, serverclient.ErrTLSRootNotPinned, serverclient.ErrInstallationNotPinned} {
 		if !strings.Contains(err.Error(), "--user") || !strings.Contains(err.Error(), "--admin-key") {
 			t.Errorf("re-pin error without --user and --admin-key: %v", err)
 		}
@@ -234,7 +282,7 @@ func TestInit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := client.Trust(t.Context(), c.TrustPins, c.TrustThreshold); err != nil {
+		if _, _, err := client.Trust(t.Context(), c.TrustPins, c.TrustThreshold, c.InstallationID); err != nil {
 			t.Fatalf("Trust with the saved config: %v", err)
 		}
 
@@ -363,6 +411,46 @@ func TestInit(t *testing.T) {
 			requireNoConfig(t, cfgPath)
 		})
 	}
+
+	// The installation pin (03-14c, F06): init saves the ID of the bundle
+	// its root pins verified and prints it; an ID-less bundle saves none.
+	t.Run("saves_installation", func(t *testing.T) {
+		cfgPath := useConfigDir(t)
+		code, stdout, stderr := run(t, srv.args()...)
+		if code != 0 {
+			t.Fatalf("init exit %d:\n%s\n%s", code, stdout, stderr)
+		}
+		var saved map[string]any
+		if err := json.Unmarshal(readTestFile(t, cfgPath), &saved); err != nil {
+			t.Fatal(err)
+		}
+		if srv.installation == "" || saved["installation_id"] != srv.installation {
+			t.Fatalf("saved installation_id %v, want the bundle's %q", saved["installation_id"], srv.installation)
+		}
+		want := "installation id: " + srv.installation + " (saved with your pins; compare it with the installation ID on record: " +
+			"the ceremony transcript's Installation ID line, or the one your admin gives you)\nsaved " + cfgPath + "\n"
+		lines := strings.Split(stdout, "\n")
+		// The line before it is the summary's last: the WebAuthn RP line, or
+		// the log key line under a policy that names no RP.
+		if !strings.HasSuffix(stdout, want) || len(lines) < 4 ||
+			(!strings.HasPrefix(lines[len(lines)-4], "WebAuthn RP ") && !strings.HasPrefix(lines[len(lines)-4], "log key ")) {
+			t.Fatalf("init stdout does not end with the summary, the installation line and the save:\n%s\nwant suffix\n%s", stdout, want)
+		}
+	})
+	t.Run("id_less_bundle_saves_none", func(t *testing.T) {
+		idless := newInitServerEdit(t, softwareCustody, func(b *trust.Bundle) { b.InstallationID = "" })
+		cfgPath := useConfigDir(t)
+		code, stdout, stderr := run(t, idless.args()...)
+		if code != 0 {
+			t.Fatalf("init exit %d:\n%s\n%s", code, stdout, stderr)
+		}
+		if strings.Contains(string(readTestFile(t, cfgPath)), "installation_id") {
+			t.Fatalf("an ID-less bundle saved an installation_id:\n%s", readTestFile(t, cfgPath))
+		}
+		if !strings.Contains(stdout, "\ninstallation id: none (the trust bundle names none yet; run keyroster init again once it does)\nsaved ") {
+			t.Fatalf("init stdout lacks the none line before the save:\n%s", stdout)
+		}
+	})
 
 	t.Run("no_config_written_on_refusal", func(t *testing.T) {
 		for _, c := range refusals {

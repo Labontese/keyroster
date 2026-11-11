@@ -22,6 +22,7 @@ Policy version 1:
     pop.hosts is one-way: no later policy may turn it off (pop_hosts_removed)
   timelock 0s
 Bundle SHA-256: <BUNDLE_SHA256>
+installation id: <INSTALLATION_ID> (new in this version)
 signed by root SHA256:4A9jyZBOhnKZvcGQ6TRFbf5Gymb41AfYvYaVmWHD+G4
 signed by root SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8
 OK: 2 of 2 pinned roots signed both documents (bundle 2, policy 2, threshold 2)

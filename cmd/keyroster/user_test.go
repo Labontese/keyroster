@@ -108,6 +108,7 @@ func newUserAddEnv(t *testing.T, custody string, handler func(w http.ResponseWri
 		TrustThreshold: 1,
 		User:           "admin",
 		AdminKey:       e.adminFP,
+		InstallationID: trustDocInstallation(t, e.trustDoc), // as keyroster init saves it (03-14c, F06)
 	}
 	useConfigDir(t)
 	if _, err := saveConfig(e.cfg, false); err != nil {
@@ -343,6 +344,7 @@ func TestUserAdd(t *testing.T) {
 		e.trustDoc, rootFP = initTrustDoc(t)
 		useKeyring(t, e.adminKey)
 		e.cfg.TrustPins = []string{rootFP}
+		e.cfg.InstallationID = trustDocInstallation(t, e.trustDoc) // the re-init's pin (03-14c, F06)
 		if _, err := saveConfig(e.cfg, true); err != nil {
 			t.Fatal(err)
 		}

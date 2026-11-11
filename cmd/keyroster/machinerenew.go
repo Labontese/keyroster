@@ -109,7 +109,7 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 	if err != nil {
 		return err
 	}
-	bundle, pol, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold)
+	bundle, pol, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
 	if err != nil {
 		return err
 	}

@@ -120,7 +120,7 @@ func runUserAdd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	// pins verify, read before the account is created: the server chooses
 	// the invite URL, and a compromised one must not send the new user to
 	// an origin of its own under the admin's name.
-	_, policy, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold)
+	_, policy, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
 	if err != nil {
 		return err
 	}
@@ -391,7 +391,7 @@ func runUserPending(ctx context.Context, args []string, stdout, stderr io.Writer
 		if errors.Is(err, serverclient.ErrAdminAuth) {
 			// Name the cause when the saved server URL is not a policy
 			// origin, from the root-verified policy only.
-			if _, policy, terr := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold); terr == nil && policy.WebAuthn != nil {
+			if _, policy, terr := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID); terr == nil && policy.WebAuthn != nil {
 				return adminOriginDiagnosis(err, client.Server(), policy.WebAuthn.Origins)
 			}
 		}
@@ -639,7 +639,7 @@ func runUserApprove(ctx context.Context, args []string, stdout, stderr io.Writer
 // to an admin authentication failure; any other error is returned as is.
 func (s *adminSession) diagnose(ctx context.Context, err error) error {
 	if errors.Is(err, serverclient.ErrAdminAuth) {
-		if _, policy, terr := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold); terr == nil {
+		if _, policy, terr := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID); terr == nil {
 			return adminError(err, s, policy)
 		}
 	}

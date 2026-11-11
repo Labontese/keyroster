@@ -23,6 +23,7 @@ Policy version 2:
   pop: none (host agents and machine renewals are off)
   timelock 0s
 Bundle SHA-256: 9f494ec89c79148b578b7accf7f918ce10df0a8f30573d369c11c13c6090aefd
+installation id: 00112233445566778899aabbccddeeff
 Policy in force: v1, sha256 d18c6893440b8becc2e13548fe04dfeba6ed0d7d2e7a90e9b24b29ff6f654c63
 Successor policy: v2, sha256 f76c3e5a251e6624b875fd5289d9e8799e65fb1b2477337127a38a4df3a511ad, chained to the policy in force; against it:
 WARNING: this successor changes admins, ca_profiles, which root successor-policy never writes; sign only if each is part of the agreed change

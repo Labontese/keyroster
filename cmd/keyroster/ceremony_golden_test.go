@@ -281,6 +281,19 @@ func checkInvariants(t *testing.T, kind, got string) {
 		t.Errorf("invariant: the summary pop line (line %d) is not between the first webauthn line (%d) and the first timelock line (%d)", pop+1, webauthn+1, timelock+1)
 	}
 
+	// Exactly one installation id line (03-14c, render-05): root sign's and
+	// trust verify's alike, after the Bundle SHA-256 line, and before the
+	// policy block and the first signer line where the output has them.
+	inst, sha, signedBy, policyAt := first("installation id: "), first("Bundle SHA-256:"), first("signed by "), first("Policy in force:")
+	switch {
+	case count("installation id: ") != 1:
+		t.Errorf("invariant: %d \"installation id: \" lines, want exactly 1", count("installation id: "))
+	case sha < 0 || inst < sha:
+		t.Errorf("invariant: the installation id line (line %d) does not follow the Bundle SHA-256 line (%d)", inst+1, sha+1)
+	case policyAt >= 0 && inst > policyAt, signedBy >= 0 && inst > signedBy:
+		t.Errorf("invariant: the installation id line (line %d) is not before the policy block (%d) and the first signer line (%d)", inst+1, policyAt+1, signedBy+1)
+	}
+
 	block := first("Policy in force:")
 	switch kind {
 	case kindSuccessorRootSign:

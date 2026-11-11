@@ -23,6 +23,7 @@ Policy version 2:
     pop.hosts is one-way: no later policy may turn it off (pop_hosts_removed)
   timelock 0s
 Bundle SHA-256: 54ca4d45f1c880076c8a8b65ba918d753f33c4d8c2ede7b348da3923b5a2766b
+installation id: 00112233445566778899aabbccddeeff
 Policy in force: v1, sha256 d18c6893440b8becc2e13548fe04dfeba6ed0d7d2e7a90e9b24b29ff6f654c63
 Successor policy: v2, sha256 caab9f3eb8a7e673bba7ddecd42668652c80a3a9f9b647d141d74f5bc107a575, chained to the policy in force; against it:
   admin_quorum: carried over

@@ -28,8 +28,21 @@ import (
 )
 
 // resignBundle serves e's genesis bundle changed by edit, re-signed by
-// the root, as the bundle in force.
+// the root, as the bundle in force, and re-saves the config pinned to its
+// installation ID, as keyroster init --force would (03-14c, F06), so a
+// case that strips or changes the ID reaches its own downstream check.
 func (e *dirEnv) resignBundle(t *testing.T, edit func(b *trust.Bundle)) {
+	t.Helper()
+	e.serveResigned(t, edit)
+	e.cfg.InstallationID = e.bundle.InstallationID
+	if _, err := saveConfig(e.cfg, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// serveResigned is resignBundle without re-saving the config: the saved
+// pin stays as it was (03-14c, F06).
+func (e *dirEnv) serveResigned(t *testing.T, edit func(b *trust.Bundle)) {
 	t.Helper()
 	b := *e.bundle
 	edit(&b)

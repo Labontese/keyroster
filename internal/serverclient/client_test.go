@@ -576,6 +576,20 @@ func trustDoc(t *testing.T, roots []ssh.Signer, threshold uint32, signers ...ssh
 // trustDocAdmin is trustDoc whose policy admin is admin (nil: a new key).
 func trustDocAdmin(t *testing.T, admin ssh.Signer, roots []ssh.Signer, threshold uint32, signers ...ssh.Signer) TrustResponse {
 	t.Helper()
+	return trustDocFull(t, admin, "", roots, threshold, signers...)
+}
+
+// trustDocID is trustDoc for a bundle that names installation id
+// (03-14c, F06).
+func trustDocID(t *testing.T, id string, roots []ssh.Signer, threshold uint32, signers ...ssh.Signer) TrustResponse {
+	t.Helper()
+	return trustDocFull(t, nil, id, roots, threshold, signers...)
+}
+
+// trustDocFull is trustDocAdmin with the bundle's installation ID ("" for
+// none).
+func trustDocFull(t *testing.T, admin ssh.Signer, installationID string, roots []ssh.Signer, threshold uint32, signers ...ssh.Signer) TrustResponse {
+	t.Helper()
 	edKey := func() ssh.Signer {
 		_, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
@@ -614,9 +628,10 @@ func trustDocAdmin(t *testing.T, admin ssh.Signer, roots []ssh.Signer, threshold
 			{Role: trust.RoleHost, Key: keyOf(edKey()), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "active", Generation: 1},
 			{Role: trust.RoleMachine, Key: keyOf(edKey()), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "active", Generation: 1},
 		},
-		OpsKey:       trust.KeyEntry{Key: keyOf(edKey()), Alg: ssh.KeyAlgoED25519, Custody: "software"},
-		Log:          trust.LogEntry{Key: keyOf(logKey), Alg: ssh.KeyAlgoED25519, Custody: "software", Origin: trust.LogOrigin(logKey.PublicKey())},
-		PolicySHA256: trust.SHA256Hex(policy),
+		OpsKey:         trust.KeyEntry{Key: keyOf(edKey()), Alg: ssh.KeyAlgoED25519, Custody: "software"},
+		Log:            trust.LogEntry{Key: keyOf(logKey), Alg: ssh.KeyAlgoED25519, Custody: "software", Origin: trust.LogOrigin(logKey.PublicKey())},
+		PolicySHA256:   trust.SHA256Hex(policy),
+		InstallationID: installationID,
 	}
 	for _, r := range roots {
 		b.Root.Keys = append(b.Root.Keys, trust.RootKey{Key: keyOf(r), Custody: "software"})
@@ -684,7 +699,7 @@ func TestClientTrust(t *testing.T) {
 
 	t.Run("pinned_roots_verified", func(t *testing.T) {
 		c := serveTrust(t, r, trustDoc(t, []ssh.Signer{a, b}, 1, a))
-		bundle, policy, err := c.Trust(ctx, []string{fp(a), fp(b)}, 1)
+		bundle, policy, err := c.Trust(ctx, []string{fp(a), fp(b)}, 1, "")
 		if err != nil || bundle.Version != 1 || policy.WebAuthn == nil {
 			t.Fatalf("Trust = %v, %v, %v", bundle, policy, err)
 		}
@@ -693,7 +708,7 @@ func TestClientTrust(t *testing.T) {
 	t.Run("non_pinned_root_refused", func(t *testing.T) {
 		x := edSigner(t)
 		c := serveTrust(t, r, trustDoc(t, []ssh.Signer{x}, 1, x))
-		if _, _, err := c.Trust(ctx, []string{fp(a)}, 1); !errors.Is(err, ErrTrustRootNotPinned) {
+		if _, _, err := c.Trust(ctx, []string{fp(a)}, 1, ""); !errors.Is(err, ErrTrustRootNotPinned) {
 			t.Fatalf("bundle signed by a non-pinned root: %v, want ErrTrustRootNotPinned", err)
 		}
 	})
@@ -701,7 +716,7 @@ func TestClientTrust(t *testing.T) {
 	t.Run("rotated_roots_error_names_reinit", func(t *testing.T) {
 		cRoot, dRoot := edSigner(t), edSigner(t)
 		c := serveTrust(t, r, trustDoc(t, []ssh.Signer{cRoot, dRoot}, 2, cRoot, dRoot))
-		_, _, err := c.Trust(ctx, []string{fp(a), fp(b)}, 2)
+		_, _, err := c.Trust(ctx, []string{fp(a), fp(b)}, 2, "")
 		if !errors.Is(err, ErrTrustRootNotPinned) {
 			t.Fatalf("successor self-signed by new roots C and D: %v, want ErrTrustRootNotPinned", err)
 		}
@@ -717,7 +732,7 @@ func TestClientTrust(t *testing.T) {
 		// Control: the pinned roots with too few signatures is not a
 		// rotation and gets no re-init hint.
 		bad := trustDoc(t, []ssh.Signer{a, b}, 2, a) // one signature, threshold 2
-		_, _, err = serveTrust(t, r, bad).Trust(ctx, []string{fp(a), fp(b)}, 2)
+		_, _, err = serveTrust(t, r, bad).Trust(ctx, []string{fp(a), fp(b)}, 2, "")
 		if err == nil || errors.Is(err, ErrTrustRootNotPinned) || !strings.Contains(err.Error(), "signed by 1 of your pinned roots, below your threshold of 2") {
 			t.Fatalf("pinned roots below the threshold: %v, want the signature count refusal, not ErrTrustRootNotPinned", err)
 		}
@@ -727,7 +742,7 @@ func TestClientTrust(t *testing.T) {
 		doc := trustDoc(t, []ssh.Signer{a}, 1, a)
 		other := trustDoc(t, []ssh.Signer{a}, 1, a)
 		doc.Policy, doc.PolicySigs = other.Policy, other.PolicySigs // signed by a, but not this bundle's policy
-		if _, _, err := serveTrust(t, r, doc).Trust(ctx, []string{fp(a)}, 1); !errors.Is(err, ErrPolicyNotBundled) {
+		if _, _, err := serveTrust(t, r, doc).Trust(ctx, []string{fp(a)}, 1, ""); !errors.Is(err, ErrPolicyNotBundled) {
 			t.Fatalf("a root-signed policy the bundle does not name: %v, want ErrPolicyNotBundled", err)
 		}
 	})
@@ -736,7 +751,7 @@ func TestClientTrust(t *testing.T) {
 		// The signed bundle is version 1; the server reports 2.
 		doc := trustDoc(t, []ssh.Signer{a}, 1, a)
 		doc.BundleVersion = 2
-		_, _, err := serveTrust(t, r, doc).Trust(ctx, []string{fp(a)}, 1)
+		_, _, err := serveTrust(t, r, doc).Trust(ctx, []string{fp(a)}, 1, "")
 		if err == nil || !strings.Contains(err.Error(), "reports bundle version 2 for a bundle of version 1") {
 			t.Fatalf("a mismatched bundle_version: %v, want the version refusal", err)
 		}
@@ -749,7 +764,7 @@ func TestClientTrust(t *testing.T) {
 		if _, err := trust.VerifySelfSigned(doc.Bundle, doc.BundleSigs, doc.Policy, doc.PolicySigs); err != nil {
 			t.Fatalf("control: the document does not pass VerifySelfSigned: %v", err)
 		}
-		_, _, err := serveTrust(t, r, doc).Trust(ctx, []string{fp(a)}, 1)
+		_, _, err := serveTrust(t, r, doc).Trust(ctx, []string{fp(a)}, 1, "")
 		if !errors.Is(err, trust.ErrKeyIsRoot) {
 			t.Fatalf("a root-signed policy whose admin is the root: %v, want ErrKeyIsRoot", err)
 		}
@@ -757,8 +772,59 @@ func TestClientTrust(t *testing.T) {
 
 	t.Run("bad_pins_refused_before_fetch", func(t *testing.T) {
 		c := serveTrust(t, r, trustDoc(t, []ssh.Signer{a}, 1, a))
-		if _, _, err := c.Trust(ctx, []string{fp(a)}, 2); !errors.Is(err, trust.ErrThreshold) {
+		if _, _, err := c.Trust(ctx, []string{fp(a)}, 2, ""); !errors.Is(err, trust.ErrThreshold) {
 			t.Fatalf("threshold above the pin count: %v, want ErrThreshold", err)
+		}
+	})
+
+	// The installation pin (03-14c, F06): a bundle the same roots signed
+	// for another installation, or for none, is refused under a pin; a
+	// bundle with an ID is refused under no pin, with the full re-pin form.
+	const pinned, other = "00112233445566778899aabbccddeeff", "fedcba9876543210fedcba9876543210"
+	t.Run("installation_pinned_ok", func(t *testing.T) {
+		bundle, _, err := serveTrust(t, r, trustDocID(t, pinned, []ssh.Signer{a}, 1, a)).Trust(ctx, []string{fp(a)}, 1, pinned)
+		if err != nil || bundle.InstallationID != pinned {
+			t.Fatalf("Trust = %v, %v; want the pinned installation", bundle, err)
+		}
+	})
+	t.Run("other_installation_refused", func(t *testing.T) {
+		_, _, err := serveTrust(t, r, trustDocID(t, other, []ssh.Signer{a}, 1, a)).Trust(ctx, []string{fp(a)}, 1, pinned)
+		if !errors.Is(err, ErrInstallationMismatch) || !strings.Contains(err.Error(), "names installation "+other+", but your config pins installation "+pinned) {
+			t.Fatalf("another installation's bundle under the pinned roots: %v, want ErrInstallationMismatch naming both", err)
+		}
+	})
+	t.Run("id_less_bundle_refused_when_pinned", func(t *testing.T) {
+		_, _, err := serveTrust(t, r, trustDoc(t, []ssh.Signer{a}, 1, a)).Trust(ctx, []string{fp(a)}, 1, pinned)
+		if !errors.Is(err, ErrInstallationMismatch) || !strings.Contains(err.Error(), "names no installation ID, but your config pins "+pinned) {
+			t.Fatalf("an ID-less bundle under a pin: %v, want ErrInstallationMismatch", err)
+		}
+	})
+	t.Run("unpinned_config_refused", func(t *testing.T) {
+		_, _, err := serveTrust(t, r, trustDocID(t, pinned, []ssh.Signer{a}, 1, a)).Trust(ctx, []string{fp(a)}, 1, "")
+		if !errors.Is(err, ErrInstallationNotPinned) {
+			t.Fatalf("a bundle with an ID under no pin: %v, want ErrInstallationNotPinned", err)
+		}
+		for _, want := range []string{"names installation " + pinned, "keyroster init --force", "--user", "--admin-key", "on an automation host whose config has no user"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the refusal lacks %q: %v", want, err)
+			}
+		}
+	})
+	t.Run("unpinned_id_less_ok", func(t *testing.T) {
+		if _, _, err := serveTrust(t, r, trustDoc(t, []ssh.Signer{a}, 1, a)).Trust(ctx, []string{fp(a)}, 1, ""); err != nil {
+			t.Fatalf("an ID-less bundle under no pin: %v", err)
+		}
+	})
+	t.Run("malformed_pin_refused", func(t *testing.T) {
+		_, _, err := serveTrust(t, r, trustDocID(t, pinned, []ssh.Signer{a}, 1, a)).Trust(ctx, []string{fp(a)}, 1, strings.ToUpper(pinned))
+		if !errors.Is(err, ErrInstallationMismatch) || !strings.Contains(err.Error(), "is not an installation ID") {
+			t.Fatalf("a malformed pin: %v, want the not-an-installation-ID refusal", err)
+		}
+	})
+	t.Run("unpinned_variant_accepts_any", func(t *testing.T) {
+		bundle, _, err := serveTrust(t, r, trustDocID(t, other, []ssh.Signer{a}, 1, a)).TrustUnpinned(ctx, []string{fp(a)}, 1)
+		if err != nil || bundle.InstallationID != other {
+			t.Fatalf("TrustUnpinned = %v, %v; want the served bundle with its ID", bundle, err)
 		}
 	})
 }

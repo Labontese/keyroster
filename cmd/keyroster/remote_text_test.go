@@ -131,7 +131,7 @@ func TestRemoteTextEscaped(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				_, _, err = c.Trust(ctx, []string{srv.rootFP}, 1)
+				_, _, err = c.Trust(ctx, []string{srv.rootFP}, 1, srv.installation)
 				return err
 			},
 		})

@@ -280,6 +280,7 @@ func newDirEnvPolicy(t *testing.T, admins int, quorum int, edit func(p *trust.Po
 		TrustThreshold: 1,
 		User:           "admin",
 		AdminKey:       e.fps[0],
+		InstallationID: e.bundle.InstallationID, // as keyroster init saves it (03-14c, F06)
 	}
 	useConfigDir(t)
 	if _, err := saveConfig(e.cfg, false); err != nil {

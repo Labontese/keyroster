@@ -22,6 +22,7 @@ Policy version 1:
   pop: none (host agents and machine renewals are off)
   timelock 0s
 Bundle SHA-256: ed589476804505b47e221a46c678fb78831abf431dd04cb9b54e34996655e7f0
+installation id: 00112233445566778899aabbccddeeff
 Policy in force: v1, sha256 d18c6893440b8becc2e13548fe04dfeba6ed0d7d2e7a90e9b24b29ff6f654c63
 Successor policy: unchanged, every field carried over
 signed by previous root SHA256:4A9jyZBOhnKZvcGQ6TRFbf5Gymb41AfYvYaVmWHD+G4

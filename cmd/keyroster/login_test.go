@@ -193,6 +193,7 @@ func newLoginServer(t *testing.T) *loginServer {
 		TrustPins:      []string{g.fingerprint(t, 0)},
 		TrustThreshold: 1,
 		User:           "alice",
+		InstallationID: e.bundle.InstallationID, // as keyroster init saves it (03-14c, F06)
 	}, false); err != nil {
 		t.Fatal(err)
 	}

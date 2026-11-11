@@ -30,6 +30,11 @@ type Config struct {
 	TrustThreshold int      `json:"trust_threshold"`
 	User           string   `json:"user,omitempty"`
 	AdminKey       string   `json:"admin_key,omitempty"`
+	// InstallationID is the installation ID of the trust bundle keyroster
+	// init verified against the root pins; every command requires the
+	// served bundle to name exactly this one (03-14c, F06). Empty: the
+	// bundle named none.
+	InstallationID string `json:"installation_id,omitempty"`
 }
 
 // userConfigDir is os.UserConfigDir; tests point it at a temporary

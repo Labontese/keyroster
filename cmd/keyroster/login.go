@@ -180,7 +180,7 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
-	bundle, policy, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold)
+	bundle, policy, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
 	if err != nil {
 		return err
 	}

@@ -129,7 +129,7 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err != nil {
 		return err
 	}
-	b, p, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold)
+	b, p, err := client.TrustUnpinned(ctx, cfg.TrustPins, cfg.TrustThreshold)
 	if err != nil {
 		return err
 	}
