@@ -230,10 +230,18 @@ Cumulative: 33 of 33 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20).
 
 **Notes and deviations:**
 - The tool layer decoded the backslash-u escapes when the test text was first written, as the plan warned. They were rewritten as bytes with perl, and the readings above were taken from the committed files.
-- checkBoundValues also requires a parsed `import_krl_versions` on a revocation_recovery line to equal the leaf's import versions. Truth 5 asks for it ("the leaf's own where the kind has them"); the action listed only the other-kind refusal. It shares recoveryImportVersions with checkImportVersions. Today the byte check already forces the same value (exactly one plain key, and a duplicate escaped key is refused as repeated), so this case has no test of its own.
-- checkBoundValues reads decoded's top-level keys, as the plan's signature has it. A plain bound key at any depth stays refused by the byte checks. A nested escaped one is not read by a reader of `.decoded.<key>`.
+- checkBoundValues also requires a parsed `import_krl_versions` on a revocation_recovery line to equal the leaf's import versions. Truth 5 asks for it ("the leaf's own where the kind has them"); the action listed only the other-kind refusal. It shares recoveryImportVersions with checkImportVersions.
+  - The branch is reachable. If the plain key, with the right value, moves into a nested object and an escaped top-level `import\u005fkrl_versions` carries another value, the byte check and walkKeys both pass, and only this branch refuses.
+  - **UNVERIFIED:** no test or mutant exercises this branch.
+  - **UNVERIFIED:** two more value branches have no case of their own: `bundle_version` on bundle_install, and `sigs` on directory_install (spaced_replay_pair_refused mismatches only `directory`).
+- **Residual (open question for Daniel):** checkBoundValues reads decoded's top-level keys only, as the plan's signature has it. The byte checks bind the plain bound names at any depth, so a plain nested key is still refused. A nested escaped one, such as `"x":{"versio\u006e":1}` on a bundle_install line, still verifies, and a recursive reader (jq `..`) would read it. Truth 5 ties the refusal to the kinds the byte checks refuse a key on, and those checks work at any depth. The fix would be an any-depth presence check from walkKeys' key set, as a later RED/GREEN pair. It was not patched after T3 without a RED.
 - The bound runs right after the scanner's error check, before revs.finish and the checkpoint checks.
 - go1.27.3's gofmt split two one-line closures in the new tests. This was applied before R3, so no existing row moved.
+- Checks for breakage outside files_modified:
+  - test/e2e has no forward-shifted signer clock (no clock_regression, date or time-offset use).
+  - `go vet` passes under the `e2e`, `e2e_pkcs11` and `e2e_tpm` tags.
+  - The only other `audit.Verify(` caller is internal/signer/log_test.go, which leaves Now at 0. `go test -count=1 -timeout 15m ./internal/signer/` gives ok 59.284 s.
+  - **UNVERIFIED:** the CLI and recover clock bound in the e2e lanes, and golangci-lint/gosec on the new code. Neither has run; CI runs them.
 - recover.go's doc comment (step 2) names `recovery_clock_ahead`. The three recover refusals (`recovery_installation_not_pinned`, `recovery_installation_other`, `recovery_clock_ahead`) are CLI names and unregistered by design.
 
 ## Still to do (continuation)
