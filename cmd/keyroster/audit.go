@@ -66,6 +66,9 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 	threshold := fs.Int("threshold", 0, "root signatures the anchor bundle needs (required; must equal that bundle's threshold)")
 	previousPath := fs.String("previous", "", "an earlier signed checkpoint, or an earlier export, that this log must extend")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
+	installationID := fs.String("installation-id", "", "the installation ID this export must be the log of")
+	var anyInstallation bool
+	fs.BoolVar(&anyInstallation, "any-installation", false, "verify without binding the result to one installation")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -73,7 +76,7 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		_, _ = fmt.Fprintln(stderr, "audit verify: at least one --pin, --threshold N (N >= 1) and exactly one export file are required")
 		return errUsage
 	}
-	opts := audit.Options{Pins: pins, Threshold: *threshold}
+	opts := audit.Options{Pins: pins, Threshold: *threshold, InstallationID: *installationID}
 	if *previousPath != "" {
 		var err error
 		if opts.Previous, err = readPrevious(*previousPath); err != nil {

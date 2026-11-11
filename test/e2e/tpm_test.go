@@ -176,7 +176,7 @@ func tpmIssueAndLogin(t *testing.T, env *signerEnv) {
 func tpmAuditVerify(t *testing.T, env *signerEnv, entries, issued int) {
 	t.Helper()
 	export := env.exportLog(t)
-	args := []string{"audit", "verify", "--threshold", "1"}
+	args := []string{"audit", "verify", "--threshold", "1", "--installation-id", env.InstallationID} // 03-14c, F05
 	for _, fp := range env.RootFingerprints {
 		args = append(args, "--pin", fp)
 	}

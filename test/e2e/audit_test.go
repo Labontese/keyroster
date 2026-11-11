@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,19 +23,25 @@ import (
 const bootstrapLeaves = 3
 
 // auditVerify runs keyroster audit verify pinned to env's roots at
-// threshold 1 and returns its exit code and output.
+// threshold 1, bound to env's installation (--installation-id, 03-14c,
+// F05), and returns its exit code and output.
 func auditVerify(t *testing.T, env *signerEnv, export string, extra ...string) (int, string) {
 	t.Helper()
-	return auditVerifyPins(t, env.RootFingerprints, export, extra...)
+	return auditVerifyPins(t, env.RootFingerprints, export, append([]string{"--installation-id", env.InstallationID}, extra...)...)
 }
 
 // auditVerifyPins runs keyroster audit verify with the given root pins at
-// threshold 1.
+// threshold 1. It knows no installation ID, so it passes
+// --any-installation unless extra already holds --installation-id or
+// --any-installation (03-14c, F05, Q-C7).
 func auditVerifyPins(t *testing.T, pins []string, export string, extra ...string) (int, string) {
 	t.Helper()
 	args := []string{"audit", "verify", "--threshold", "1"}
 	for _, p := range pins {
 		args = append(args, "--pin", p)
+	}
+	if !slices.Contains(extra, "--installation-id") && !slices.Contains(extra, "--any-installation") {
+		args = append(args, "--any-installation")
 	}
 	args = append(args, extra...)
 	return runKeyroster(t, append(args, export)...)
@@ -82,6 +89,36 @@ func TestAuditVerifiesIssuance(t *testing.T) {
 	if code, out := auditVerifyPins(t, []string{fingerprint(t, other+".pub")}, export); code == 0 || !strings.Contains(out, "not anchored in the pinned roots") {
 		t.Fatalf("audit verify pinned to another root exited %d, want a refusal of the bundle_install entry:\n%s", code, out)
 	}
+
+	// The installation binding (03-14c, F05, Q-C7), on this test's own
+	// signer and export. The unbound case runs keyroster directly, because
+	// both helpers pass a flag.
+	t.Run("binds_installation", func(t *testing.T) {
+		id := env.InstallationID
+		if id == "" {
+			t.Fatal("the bootstrap bundle carries no installation ID")
+		}
+		verify := func(extra ...string) (int, string) {
+			args := []string{"audit", "verify", "--threshold", "1"}
+			for _, p := range env.RootFingerprints {
+				args = append(args, "--pin", p)
+			}
+			return runKeyroster(t, append(append(args, extra...), export)...)
+		}
+		if code, out := verify(); code != 1 || !strings.Contains(out, "names installation "+id+": pass --installation-id") {
+			t.Fatalf("audit verify without a flag exited %d, want 1 naming installation %s:\n%s", code, id, out)
+		}
+		if code, out := verify("--installation-id", id); code != 0 || !strings.Contains(out, "installation id: "+id+" (checked against --installation-id)\n") {
+			t.Fatalf("audit verify --installation-id %s exited %d, want OK with the checked line:\n%s", id, code, out)
+		}
+		const other = "ffffffffffffffffffffffffffffffff"
+		if code, out := verify("--installation-id", other); code == 0 || !strings.Contains(out, "not the expected "+other) {
+			t.Fatalf("audit verify --installation-id %s exited %d, want a refusal naming both installations:\n%s", other, code, out)
+		}
+		if code, out := verify("--any-installation"); code != 0 || !strings.Contains(out, "installation id: "+id+" (not checked: --any-installation)\n") {
+			t.Fatalf("audit verify --any-installation exited %d, want OK with the unchecked line:\n%s", code, out)
+		}
+	})
 }
 
 // editExport parses an export file into one map per line, lets edit change

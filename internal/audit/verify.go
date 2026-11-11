@@ -54,6 +54,9 @@ type Options struct {
 	// CertificatesFrom, when set, makes Verify list in Report.Certificates
 	// every certificate the log holds at or after that index (03-06b).
 	CertificatesFrom *uint64
+	// InstallationID is the installation ID the auditor expects (03-14c,
+	// F05). Empty means not checked.
+	InstallationID string
 }
 
 // LoggedCertificate is a certificate a verified log holds: the index and
