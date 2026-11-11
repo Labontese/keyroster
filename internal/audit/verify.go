@@ -87,6 +87,12 @@ var ErrEntryAhead = errors.New("audit: an entry is dated past this verifier's cl
 // certificate still valid at the verifier's clock (03-14c, F10).
 const maxLeafAheadMicros = krl.PruneMargin * 1_000_000
 
+// entryAheadError is Verify's ErrEntryAhead refusal, with its own text.
+type entryAheadError struct{ msg string }
+
+func (e *entryAheadError) Error() string { return e.msg }
+func (e *entryAheadError) Unwrap() error { return ErrEntryAhead }
+
 // LoggedCertificate is a certificate a verified log holds: the index and
 // kind of its entry and the certificate (SSH wire format) from the
 // verified leaf bytes. An issue or login_issue entry holds one; a
@@ -763,6 +769,9 @@ func certTypeName(t uint32) string {
 //     the log names exactly that installation ID (03-14c, F05), checked
 //     after every other check, so this refusal means a valid log of
 //     another installation, or of one whose bundle names none
+//   - with opts.Now, no entry is dated more than krl.PruneMargin (300 s)
+//     after the verifier's clock (03-14c, F10): leaf times never go back,
+//     so the last entry is checked, and the refusal wraps ErrEntryAhead
 //
 // Login issuances are re-proven from the log, as above: a signer holding
 // the CA key and the log key cannot log a login certificate that passes
@@ -774,7 +783,9 @@ func certTypeName(t uint32) string {
 // certificate is the one the admins approved, can be verified from the
 // log: a signer holding the CA key can log an unauthorized admin issuance
 // with any evidence and the log still verifies. Without opts.Previous it
-// cannot detect a log rolled back to an earlier prefix either. A leaf kind
+// cannot detect a log rolled back to an earlier prefix either. Nor can it
+// detect an entry dated in the future once the verifier's clock is within
+// 300 s of it, or ever with opts.Now 0. A leaf kind
 // this version has no check for is refused, never skipped.
 func Verify(r io.Reader, opts Options) (*Report, error) {
 	if len(opts.Pins) == 0 {
@@ -795,6 +806,8 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		checkpoint []byte
 		lineNo     int
 		lastTime   uint64
+		lastIndex  uint64
+		lastKind   tlog.Kind
 	)
 	iss := issuance{issueIDs: map[string]uint64{}, loginIDs: map[string]uint64{}, hostIDs: map[string]uint64{},
 		probeIDs: map[string]uint64{}, probes: newProbesInForce(), machineIDs: map[string]uint64{}}
@@ -847,7 +860,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		if leaf.TimeMicros < lastTime {
 			return nil, fmt.Errorf("audit: entry %d: leaf time goes back (%d after %d)", want, leaf.TimeMicros, lastTime)
 		}
-		lastTime = leaf.TimeMicros
+		lastTime, lastIndex, lastKind = leaf.TimeMicros, want, leaf.Kind
 		if err := checkReplayFields(sc.Bytes(), leaf); err != nil {
 			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
 		}
@@ -1098,6 +1111,17 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("audit: read export: %w", err)
 	}
+	// The verifier's clock (03-14c, F10). Leaf times never go back, so the
+	// last entry is the latest, and the log verifies again once this clock
+	// reaches its time minus the allowance.
+	if opts.Now != 0 && lastTime > opts.Now+maxLeafAheadMicros {
+		rfc := func(us uint64) string { return time.UnixMicro(int64(us)).UTC().Format(time.RFC3339Nano) } //nolint:gosec // G115: for display only
+		return nil, &entryAheadError{fmt.Sprintf("audit: entry %d (%s), the last, is more than %d s after this verifier's clock %s (its time is %s): "+
+			"a KRL published at that time could leave out revocations of certificates that are still valid. "+
+			"The signer never dates a later entry before an earlier one, so correcting its clock does not clear this: it clears when this clock reaches %s. "+
+			"Check the signer's journal and the log's clock_regression entries for a clock episode; without one, treat the signer as compromised",
+			lastIndex, lastKind, maxLeafAheadMicros/1_000_000, rfc(opts.Now), rfc(lastTime), rfc(lastTime-maxLeafAheadMicros))}
+	}
 	if err := revs.finish(); err != nil {
 		return nil, err
 	}
@@ -1171,6 +1195,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	rep.Revocations, rep.RevokedEntries, rep.KRLPublishes, rep.KRLVersion = revs.revokes, revs.revokedEntries, revs.publishes, revs.krlVersion
 	rep.PendingNegativeProbes = pendingNegatives
 	rep.Recoveries, rep.LastKRL, rep.Bundle = revs.recoveries, revs.lastKRL, trustState.bundle
+	rep.LastTimeMicros = lastTime
 	return rep, nil
 }
 
@@ -1366,17 +1391,26 @@ var forgetOnlyKeys = map[string]bool{
 }
 
 // checkLineKeys checks the keys of an export line as a JSON reader sees
-// them (PR #75 review, fix round 2): a reader such as jq, Python or Go
+// them (PR #75 review, fix round 2): a reader such as jq or Python
 // unescapes keys and keeps the last of repeated ones, which the byte checks
-// above do not see. It parses the line with a token decoder and refuses a
-// key that occurs twice in one object at any depth, after unescaping, and
-// a top-level key other than "index", "leaf", "decoded" and "checkpoint"
-// written exactly so (Go's decoder also matches keys in another case). On
+// above do not see. Go's encoding/json struct decoding does so too, and it
+// also matches keys without regard to case, with Unicode simple folding
+// (the Kelvin sign folds to k, the long s to s), at every depth, so exact
+// key checks alone do not cover such a reader (03-14c; PR #75 review). It
+// parses the line with a token decoder and refuses a key that occurs twice
+// in one object at any depth, after unescaping, and a top-level key other
+// than "index", "leaf", "decoded" and "checkpoint" written exactly so. On
 // a leaf line (leaf not nil) decoded must be an object whose "kind" is the
 // name of the leaf's kind, and on a line of another kind than host_forget
-// no key of forgetOnlyKeys may occur at any depth. So a JSON reader reads
-// each line as the kind of its verified leaf, and the fields of a
-// host_forget only on a host_forget line, which checkForgetFields binds.
+// no key of forgetOnlyKeys may occur at any depth. Then the parsed values
+// of the keys the byte checks bind or forbid by kind must be the leaf's
+// own, or absent where the kind does not render them (checkBoundValues).
+// Last, on every line, a key at any depth that is not lowercase ASCII
+// letters, digits and underscores, which is all Export writes, is refused,
+// in sorted key order. So a JSON reader, case-folding or not, reads each
+// line as the kind of its verified leaf with its bound values, and the
+// fields of a host_forget only on a host_forget line, which
+// checkForgetFields binds.
 func checkLineKeys(text []byte, leaf *tlog.Leaf) error {
 	what := "checkpoint"
 	if leaf != nil {
@@ -1404,7 +1438,7 @@ func checkLineKeys(text []byte, leaf *tlog.Leaf) error {
 		}
 	}
 	if leaf == nil {
-		return nil
+		return checkKeyCharset(keys, what)
 	}
 	var decoded map[string]json.RawMessage
 	var kind string
@@ -1418,7 +1452,194 @@ func checkLineKeys(text []byte, leaf *tlog.Leaf) error {
 			}
 		}
 	}
+	if err := checkBoundValues(decoded, leaf); err != nil {
+		return err
+	}
+	return checkKeyCharset(keys, what)
+}
+
+// checkKeyCharset refuses, in sorted order, the first key that is not one
+// or more lowercase ASCII letters, digits and underscores (03-14c; PR #75
+// review): Export writes no other key, and a reader that folds case would
+// read such a key as the lowercase one the exact checks bind.
+func checkKeyCharset(keys map[string]bool, what string) error {
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
+		ok := k != ""
+		for i := 0; i < len(k) && ok; i++ {
+			c := k[i]
+			ok = c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_'
+		}
+		if !ok {
+			return fmt.Errorf("its key %q is not lowercase ASCII letters, digits and underscores (%s)", k, what)
+		}
+	}
 	return nil
+}
+
+// checkBoundValues mirrors the byte checks at the parsed level (03-14c; PR
+// #75 review): a key written escaped or spaced passes checkReplayFields,
+// checkGrepFields and checkImportVersions unseen, but a JSON reader reads
+// it. A parsed "version", "directory" or "sigs" must be the
+// directory_install leaf's own (the version as the decimal Export writes,
+// the documents as their standard base64), "bundle_version" the
+// bundle_install leaf's and "import_krl_versions" the revocation_recovery
+// leaf's, and each is refused on a line of any other kind. A parsed
+// "policy_version" must be the leaf's own on the kinds whose decoder
+// renders it (policyVersionOf), absent being allowed as in older exports,
+// and is refused on every other kind. A body that does not decode is left
+// to its kind's own check.
+func checkBoundValues(decoded map[string]json.RawMessage, leaf *tlog.Leaf) error {
+	refuse := func(key string) error {
+		return fmt.Errorf("its decoded %s field is not the one of its %s leaf", key, leaf.Kind)
+	}
+	number := func(key string, want uint64) error {
+		if raw, ok := decoded[key]; ok && string(raw) != strconv.FormatUint(want, 10) {
+			return refuse(key)
+		}
+		return nil
+	}
+	b64 := func(key string, want []byte) error {
+		raw, ok := decoded[key]
+		if !ok {
+			return nil
+		}
+		var v string
+		if json.Unmarshal(raw, &v) != nil || v != base64.StdEncoding.EncodeToString(want) {
+			return refuse(key)
+		}
+		return nil
+	}
+	absent := func(keys ...string) error {
+		for _, k := range keys {
+			if _, ok := decoded[k]; ok {
+				return refuse(k)
+			}
+		}
+		return nil
+	}
+	switch leaf.Kind {
+	case tlog.KindDirectoryInstall:
+		body, err := tlog.DecodeDirectoryInstallBody(leaf.Body)
+		if err != nil {
+			return nil
+		}
+		if err := number("version", body.Version); err != nil {
+			return err
+		}
+		if err := b64("directory", body.Directory); err != nil {
+			return err
+		}
+		if err := b64("sigs", body.Sigs); err != nil {
+			return err
+		}
+		if err := absent("bundle_version", "import_krl_versions"); err != nil {
+			return err
+		}
+	case tlog.KindBundleInstall:
+		body, err := tlog.DecodeBundleInstallBody(leaf.Body)
+		if err != nil {
+			return nil
+		}
+		if err := number("bundle_version", body.BundleVersion); err != nil {
+			return err
+		}
+		if err := absent("version", "directory", "sigs", "import_krl_versions"); err != nil {
+			return err
+		}
+	case tlog.KindRevocationRecovery:
+		if err := absent("version", "directory", "sigs", "bundle_version"); err != nil {
+			return err
+		}
+		if raw, ok := decoded["import_krl_versions"]; ok {
+			versions, decodes := recoveryImportVersions(*leaf)
+			if !decodes {
+				return nil
+			}
+			var got []json.Number
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.UseNumber()
+			if dec.Decode(&got) != nil || len(got) != len(versions) {
+				return refuse("import_krl_versions")
+			}
+			for i, n := range got {
+				if n.String() != versions[i] {
+					return refuse("import_krl_versions")
+				}
+			}
+		}
+	default:
+		if err := absent("version", "directory", "sigs", "bundle_version", "import_krl_versions"); err != nil {
+			return err
+		}
+	}
+	v, renders, decodes := policyVersionOf(*leaf)
+	switch {
+	case !decodes:
+		return nil
+	case renders:
+		return number("policy_version", v)
+	default:
+		return absent("policy_version")
+	}
+}
+
+// policyVersionOf is the policy version of leaf's body, whether its kind's
+// decoder renders "policy_version" (decodeLeaf for issue and
+// directory_install, decodeRevoke, decodeRecovery, decodeHostForget,
+// decodeLoginIssue, decodeHostIssue, decodeMachineIssue and
+// decodeProbeIssue: nine kinds), and whether the body decodes.
+func policyVersionOf(leaf tlog.Leaf) (version uint64, renders, decodes bool) {
+	var err error
+	switch leaf.Kind {
+	case tlog.KindIssue:
+		var b *tlog.IssueBody
+		if b, err = tlog.DecodeIssueBody(leaf.Body); err == nil {
+			version = b.PolicyVersion
+		}
+	case tlog.KindDirectoryInstall:
+		var b *tlog.DirectoryInstallBody
+		if b, err = tlog.DecodeDirectoryInstallBody(leaf.Body); err == nil {
+			version = b.PolicyVersion
+		}
+	case tlog.KindRevoke:
+		var b *tlog.RevokeBody
+		if b, err = tlog.DecodeRevokeBody(leaf.Body); err == nil {
+			version = b.PolicyVersion
+		}
+	case tlog.KindRevocationRecovery:
+		var b *tlog.RecoveryBody
+		if b, err = tlog.DecodeRecoveryBody(leaf.Body); err == nil {
+			version = b.PolicyVersion
+		}
+	case tlog.KindHostForget:
+		var b *tlog.HostForgetBody
+		if b, err = tlog.DecodeHostForgetBody(leaf.Body); err == nil {
+			version = b.PolicyVersion
+		}
+	case tlog.KindLoginIssue:
+		var b *tlog.LoginIssueBody
+		if b, err = tlog.DecodeLoginIssueBody(leaf.Body); err == nil {
+			version = b.PolicyVersion
+		}
+	case tlog.KindHostIssue:
+		var b *tlog.HostIssueBody
+		if b, err = tlog.DecodeHostIssueBody(leaf.Body); err == nil {
+			version = b.PolicyVersion
+		}
+	case tlog.KindMachineIssue:
+		var b *tlog.MachineIssueBody
+		if b, err = tlog.DecodeMachineIssueBody(leaf.Body); err == nil {
+			version = b.PolicyVersion
+		}
+	case tlog.KindProbeIssue:
+		var b *tlog.ProbeIssueBody
+		if b, err = tlog.DecodeProbeIssueBody(leaf.Body); err == nil {
+			version = b.PolicyVersion
+		}
+	default:
+		return 0, false, true
+	}
+	return version, true, err == nil
 }
 
 // walkKeys reads the rest of the JSON value whose first token is tok,
@@ -1474,26 +1695,37 @@ func checkImportVersions(s string, leaf tlog.Leaf) error {
 		}
 		return nil
 	}
-	body, err := tlog.DecodeRecoveryBody(leaf.Body)
-	if err != nil {
+	versions, ok := recoveryImportVersions(leaf)
+	if !ok {
 		return nil // verifyRecovery refuses the leaf
-	}
-	req, err := wire.ParseRecoverySigningBytes(body.Request)
-	if err != nil {
-		return nil // verifyRecovery refuses the leaf
-	}
-	versions := make([]string, 0, len(req.Imports))
-	for _, im := range req.Imports {
-		m, err := krl.ParseManifest(im.Manifest)
-		if err != nil {
-			return nil // verifyRecovery refuses the leaf
-		}
-		versions = append(versions, strconv.FormatUint(m.KRLVersion, 10))
 	}
 	if n != 1 || !strings.Contains(s, key+"["+strings.Join(versions, ",")+"]") {
 		return refuse
 	}
 	return nil
+}
+
+// recoveryImportVersions is the KRL versions of a revocation_recovery
+// leaf's imports in order, as decimals, and false when its body, request
+// or an import's manifest does not decode (verifyRecovery refuses it).
+func recoveryImportVersions(leaf tlog.Leaf) ([]string, bool) {
+	body, err := tlog.DecodeRecoveryBody(leaf.Body)
+	if err != nil {
+		return nil, false
+	}
+	req, err := wire.ParseRecoverySigningBytes(body.Request)
+	if err != nil {
+		return nil, false
+	}
+	versions := make([]string, 0, len(req.Imports))
+	for _, im := range req.Imports {
+		m, err := krl.ParseManifest(im.Manifest)
+		if err != nil {
+			return nil, false
+		}
+		versions = append(versions, strconv.FormatUint(m.KRLVersion, 10))
+	}
+	return versions, true
 }
 
 // parseLine decodes one line strictly: unknown fields, trailing data and

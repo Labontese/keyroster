@@ -80,7 +80,10 @@ type lostCert struct {
 //     KRL document keyroster-server kept, krl-served.json), each decoded
 //     strictly (recovery_import_invalid otherwise);
 //  2. both exports verified on the saved config's trust pins and threshold
-//     (audit.Verify);
+//     (audit.Verify), and with this clock as Options.Now (03-14c, F10):
+//     an export whose last entry is more than 300 s ahead of it is
+//     refused (recovery_clock_ahead, keep the hold), because its last KRL
+//     could leave out revocations of certificates that are still valid;
 //  3. one export a prefix of the other (the --previous rule); otherwise
 //     they are a fork, which is refused. The lost certificates are those
 //     of the saved export at or after the restored size;
@@ -176,14 +179,26 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 		docs = append(docs, recoverImport{source: p, im: wire.RecoveryImport{KRL: doc.KRL, Manifest: doc.Manifest, Sig: doc.Sig}, m: m})
 	}
 
-	// 2. Both exports, each on its own.
-	opts := audit.Options{Pins: cfg.TrustPins, Threshold: cfg.TrustThreshold}
+	// 2. Both exports, each on its own, bounded by this clock (03-14c, F10,
+	// Q-C4 B): an export dated past it could import a KRL that leaves out a
+	// revocation of a certificate that is still valid.
+	opts := audit.Options{Pins: cfg.TrustPins, Threshold: cfg.TrustThreshold, Now: uint64(max(auditClock().UnixMicro(), 0))} //nolint:gosec // G115: >= 0
+	clockAhead := func(which string, err error) error {
+		return recoverRefusal("recovery_clock_ahead", "the %s export: %v. Keep the hold. If the signer's journal shows a clock episode, "+
+			"wait until this clock passes the time named and run keyroster revoke recover again; otherwise escalate", which, err)
+	}
 	zero := uint64(0)
-	restored, err := audit.Verify(bytes.NewReader(restoredData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, CertificatesFrom: &zero})
+	restored, err := audit.Verify(bytes.NewReader(restoredData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, Now: opts.Now, CertificatesFrom: &zero})
+	if errors.Is(err, audit.ErrEntryAhead) {
+		return clockAhead("restored", err)
+	}
 	if err != nil {
 		return fmt.Errorf("the restored export %s does not verify on your trust pins: %w; escalate, do not release the hold", *restoredPath, err)
 	}
 	saved, err := audit.Verify(bytes.NewReader(savedData), opts)
+	if errors.Is(err, audit.ErrEntryAhead) {
+		return clockAhead("saved", err)
+	}
 	if err != nil {
 		return fmt.Errorf("the saved export %s does not verify on your trust pins: %w; escalate, do not release the hold", *savedPath, err)
 	}
@@ -196,7 +211,10 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 			return err
 		}
 		from := restored.Size
-		ext, err := audit.Verify(bytes.NewReader(savedData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, Previous: prev, CertificatesFrom: &from})
+		ext, err := audit.Verify(bytes.NewReader(savedData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, Now: opts.Now, Previous: prev, CertificatesFrom: &from})
+		if errors.Is(err, audit.ErrEntryAhead) {
+			return clockAhead("saved", err)
+		}
 		if err != nil {
 			return recoverRefusal("recovery_fork", "the saved export does not extend the restored one (%v); the two logs are a fork: escalate, do not release the hold", err)
 		}
@@ -206,7 +224,11 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 		if err != nil {
 			return err
 		}
-		if _, err := audit.Verify(bytes.NewReader(restoredData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, Previous: prev}); err != nil {
+		_, err = audit.Verify(bytes.NewReader(restoredData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, Now: opts.Now, Previous: prev})
+		if errors.Is(err, audit.ErrEntryAhead) {
+			return clockAhead("restored", err)
+		}
+		if err != nil {
 			return recoverRefusal("recovery_fork", "the restored export does not extend the saved one (%v); the two logs are a fork: escalate, do not release the hold", err)
 		}
 	}

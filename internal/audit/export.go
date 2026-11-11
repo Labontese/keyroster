@@ -23,7 +23,13 @@
 // with keys unescaped, as a JSON reader sees it: no key may occur twice
 // in one object, the top-level keys are exactly the ones above, decoded's
 // parsed "kind" is the leaf's, and a key only host_forget renders occurs on
-// no line of another kind (checkLineKeys; PR #75 review, fix round 2).
+// no line of another kind (checkLineKeys; PR #75 review, fix round 2). The
+// bound decoded values above must also be the leaf's as a JSON reader
+// parses them, and "policy_version" is bound too: the leaf's own on the
+// kinds that render it, absent on the others. Every key Export writes, at
+// any depth, is lowercase ASCII letters, digits and underscores, and
+// Verify refuses any other (checkBoundValues, checkKeyCharset; 03-14c, PR
+// #75 review).
 // Exports written before 02-12 have no "version", and those before 03-02
 // no "directory" or "sigs"; their lines still verify.
 package audit

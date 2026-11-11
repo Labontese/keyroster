@@ -61,6 +61,8 @@ type verifyResult struct {
 	// InstallationID is the installation ID of the trust bundle in force
 	// at the end of the log, "" when it names none (03-14c, F05).
 	InstallationID string `json:"installation_id"`
+	// LastEntryMicros is the last entry's leaf time (03-14c, F10).
+	LastEntryMicros uint64 `json:"last_entry_time_micros"`
 }
 
 // auditClock is the clock of audit verify and revoke recover, which they
@@ -93,7 +95,8 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		_, _ = fmt.Fprintln(stderr, "audit verify: --installation-id and --any-installation exclude each other")
 		return errUsage
 	}
-	opts := audit.Options{Pins: pins, Threshold: *threshold, InstallationID: *installationID}
+	opts := audit.Options{Pins: pins, Threshold: *threshold, InstallationID: *installationID,
+		Now: uint64(max(auditClock().UnixMicro(), 0))} //nolint:gosec // G115: >= 0
 	if *previousPath != "" {
 		var err error
 		if opts.Previous, err = readPrevious(*previousPath); err != nil {
@@ -138,6 +141,10 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		installation = "installation id: " + res.InstallationID + " (not checked: --any-installation)\n"
 	}
 	if _, err := io.WriteString(stdout, installation); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "last entry time: %s (entry %d)\n",
+		time.UnixMicro(int64(res.LastEntryMicros)).UTC().Format(time.RFC3339Nano), res.Entries-1); err != nil { //nolint:gosec // G115: for display only
 		return err
 	}
 	_, err = io.WriteString(stdout,
@@ -206,6 +213,7 @@ func verifyResultOf(rep *audit.Report) verifyResult {
 	if rep.Bundle != nil {
 		res.InstallationID = rep.Bundle.InstallationID
 	}
+	res.LastEntryMicros = rep.LastTimeMicros
 	for k, n := range rep.Counts {
 		res.Kinds[k.String()] = n
 	}
