@@ -139,8 +139,105 @@ Cumulative: 13 of 13 mutants killed (Task 1: 5, Task 2: 8).
 
 **UNVERIFIED:** test/e2e/revoke_test.go's revokeClient change was only compiled (vet `-tags e2e`). It first runs in CI e2e.
 
+## Hand-over (session 3 stopped after Task 3)
+
+- Session 3 did Task 3 only. It stopped after Task 3's gates and mutants under the half-context rule, at a task boundary.
+- The next continuation starts at **Task 4**. It reads the plan's shared sections (frontmatter to `</context>`) and Tasks 4 and 5.
+- The plan file is still untracked in the phase directory and `cmp`-identical to the plan. Task 4 commits it.
+- The test-time base line above is still session 1's. No delta gate ran in session 3. Task 4's delta gate re-measures the base first (another session), on origin/main in a detached worktree outside the repository, and replaces the line in place.
+- Branch pushed at the Task 3 SUMMARY commit. No PR yet.
+
+## Task 3 (F10, Q-C4 B; PR #75 review follow-ups): done
+
+- **R3** ce47d25 `test(audit): pin the verifier-clock bound and the export-line key rules (F10)`, signed.
+- **T3** 1f8830e `fix(audit): refuse entries dated past the verifier's clock and export keys a reader would fold (F10)`, signed.
+
+**Declarations R3 added (behaviour unchanged):**
+- `audit.Options.Now` (documented, ignored by Verify);
+- `var ErrEntryAhead`;
+- `const maxLeafAheadMicros = krl.PruneMargin * 1_000_000`;
+- `Report.LastTimeMicros` (never set);
+- `var auditClock = time.Now` in cmd/keyroster (unused).
+
+T3 adds two unexported helpers:
+- `entryAheadError`, so the refusal carries the plan's text verbatim and still satisfies `errors.Is(err, ErrEntryAhead)`;
+- `recoveryImportVersions`, which checkImportVersions now shares. Its messages are unchanged.
+
+**RED from a worktree of R3** (gate 2 exits 0, with no `[build failed]` or `[setup failed]`). All twenty-three named cases end in `--- FAIL:`:
+- TestVerifyLeafTimeBound/{forward_dated_republish_refused, past_allowance_refused, two_ahead_leaves_names_last}: Verify returns no error.
+- TestVerifyLeafTimeBound/last_time_reported: LastTimeMicros reads 0.
+- TestAuditVerifyClock/{prints_last_entry_time, clock_behind_refused}: the command exits 0 with `OK:` and no last entry time line.
+- TestRevokeRecover/forward_dated_saved_export_refused: recover exits 0 and writes the request.
+- The eleven TestVerifyBoundValues refusals and the five charset cases (upper_kind, title_kind, kelvin_kind, long_s_host_gone, nested_upper): the export verifies.
+
+These pass on R3, as planned:
+- `escaped_version_same_value_ok` and `policy_version_missing_ok`: nothing is bound yet.
+- `zero_now_unbounded`: Now is 0.
+- `within_allowance_cannot_drop_valid`: the KRL re-derivation refuses it (SHA-256 mismatch), not the bound. On T3 the test also checks that the error is not ErrEntryAhead.
+- `allowance_is_prune_margin`: it checks a declaration.
+- The ten `forget_only_<key>_refused` cases and `forget_only_keys_pinned`: forgetOnlyKeys already holds all ten keys. Their value is in M3-10..19.
+- `go_reader_folds_case`: it reads Go's behaviour, which is the premise.
+- TestExportKeysLowercase: the gate already passes at 3da914f.
+
+**Fixture lines.** TestVerifyBoundValues uses TestVerifyGrepFields' fixture, which has no admin issue line:
+- line 0 (bundle_install): every `*_on_bundle_install_refused` case;
+- line 2 (directory_install v2): the version, replay, `bundle_version` and `policy_version` escaped, number-form and missing cases;
+- line 4 (login_issue): `policy_version_edited_refused`.
+
+The forget-only and charset cases inject onto line 0 (bundle_install) of the forget fixture.
+
+**Kinds that render policy_version,** derived from `grep -n 'policy_version' internal/audit/*.go`. There are nine, as expected:
+- issue and directory_install (decodeLeaf);
+- revoke (decodeRevoke), revocation_recovery (decodeRecovery) and host_forget (decodeHostForget);
+- login_issue (decodeLoginIssue), host_issue (decodeHostIssue), machine_issue (decodeMachineIssue) and probe_issue (decodeProbeIssue).
+
+bundle_install, krl_publish, refusal, refusal_summary, clock_regression and ca_init render none, so a parsed policy_version is refused on them.
+
+**Escape bytes:**
+- `grep -c '[\]u00'` reads 7 in internal/audit/verify_test.go (0 before) and 18 in internal/audit/forget_test.go (8 before).
+- `grep -c 'versio[\]u006e' internal/audit/verify_test.go` reads 4, and `grep -c '[\]u0068ost_gone' internal/audit/forget_test.go` reads 1. The raw `K` and `ſ` escapes are on two lines.
+- `od -c` of `escaped_version_refused` shows `"   v   e   r   s   i   o   \   u   0   0   6   e   "`. Of `forget_only_host_gone_refused` it shows `"   \   u   0   0   6   8   o   s   t   _   g   o   n   e   "`.
+
+**Kelvin reading.** go1.27.3 reads the Kelvin-sign line as kind `host_forget`, so Go folds the Kelvin sign; `go_reader_folds_case` logs this.
+
+**Gates:**
+- Gate 1 exits 0, with every named PASS line, ten `forget_only_*_refused` PASS lines, and no FAIL or DATA RACE. The full packages under -race read audit 87.429 s and cmd 232.060 s. go vet and gofmt are clean.
+- Gate 2 exits 0.
+- Gate 3 exits 0:
+  - no case row of the origin/main tables moved;
+  - the escapes are bytes;
+  - `git diff --name-only $T2...$T3` stays within Task 3's ten files and .planning;
+  - T3 changes no test.
+
+**Mutants.** Each compiles, `go vet` exits 0, and the file is restored with `git checkout` and checked with `git diff --exit-code`. Unmutated at T3, all three mutant commands pass: audit 0.046 s, cmd 1.288 s, and the export gate 0.033 s.
+- M3-1, the Now check dropped (`if false && ...`): killed by TestVerifyLeafTimeBound/forward_dated_republish_refused, /past_allowance_refused and /two_ahead_leaves_names_last.
+- M3-2, the allowance set to 600 s: killed by /allowance_is_prune_margin (and forward_dated, past_allowance, two_ahead).
+- M3-3, the comparison without the allowance: killed by /at_allowance_ok.
+- M3-4, the CLI's Now multiplied by 0: killed by TestAuditVerifyClock/clock_behind_refused.
+- M3-5, recover's Now multiplied by 0: killed by TestRevokeRecover/forward_dated_saved_export_refused.
+- M3-6, both checkKeyCharset calls replaced by nil: killed by the five charset cases.
+- M3-7, the directory_install version branch replaced by `error(nil)`: killed by TestVerifyBoundValues/escaped_version_refused and /spaced_version_refused.
+- M3-8, the four other-kind `absent(...)` calls replaced by `error(nil)`: killed by the four `escaped_*_on_*_refused` cases.
+- M3-9, the policy_version branch bypassed (`case !decodes || true`): killed by policy_version_edited, policy_version_escaped, policy_version_on_bundle_install and number_form.
+- M3-10..19, one forgetOnlyKeys entry deleted at a time. Each is killed by its `forget_only_<key>_refused` case and by forget_only_keys_pinned. M3-10 is also killed by identity_on_bundle_install_refused and escaped_identity_on_directory_install_refused, and M3-19 by forget_key_only_refused.
+- M3-20, decodeHostForget writing `k := "identity"; m[k] = ...`: killed by TestExportKeysLowercase.
+
+**The same ten forget-key mutants on origin/main's TestVerifyForgetKeysOnOtherKinds,** in a detached worktree of 3da914f (unmutated ok, worktree removed afterwards):
+- killed for identity (identity_on_bundle_install_refused, escaped_identity_on_directory_install_refused) and admin_fingerprints (forget_key_only_refused);
+- surviving for the other eight (expected_name, enrolled_at_us, host_key_fingerprints, approved_once, host_gone, removal_version, confirmed_version, confirmed_sha256). That is the gap the per-key cases close.
+
+Cumulative: 33 of 33 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20).
+
+**Notes and deviations:**
+- The tool layer decoded the backslash-u escapes when the test text was first written, as the plan warned. They were rewritten as bytes with perl, and the readings above were taken from the committed files.
+- checkBoundValues also requires a parsed `import_krl_versions` on a revocation_recovery line to equal the leaf's import versions. Truth 5 asks for it ("the leaf's own where the kind has them"); the action listed only the other-kind refusal. It shares recoveryImportVersions with checkImportVersions. Today the byte check already forces the same value (exactly one plain key, and a duplicate escaped key is refused as repeated), so this case has no test of its own.
+- checkBoundValues reads decoded's top-level keys, as the plan's signature has it. A plain bound key at any depth stays refused by the byte checks. A nested escaped one is not read by a reader of `.decoded.<key>`.
+- The bound runs right after the scanner's error check, before revs.finish and the checkpoint checks.
+- go1.27.3's gofmt split two one-line closures in the new tests. This was applied before R3, so no existing row moved.
+- recover.go's doc comment (step 2) names `recovery_clock_ahead`. The three recover refusals (`recovery_installation_not_pinned`, `recovery_installation_other`, `recovery_clock_ahead`) are CLI names and unregistered by design.
+
 ## Still to do (continuation)
 
-- Task 3 (F10 and the export-line rules): R3, T3, twenty mutants, and the escape-byte readings (`od -c`, `grep -c '[\]u00'`).
-- Task 4: the runbooks, registry, pointers, publish edits, gates, push and PR. Re-measure the base first.
+- Task 4: the runbooks, the registry, the pointers, the publish edits, the gates, the push and the PR. Re-measure the base first.
+  - It also confirms in CI e2e the PASS lines of TestAuditVerifiesIssuance/binds_installation, the moved e2e audit helpers and revokeClient, and records the run IDs.
 - Task 5: a checkpoint, after Daniel merges.
