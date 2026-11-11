@@ -7,7 +7,7 @@ plan_head_before: 3da914f08220420b5b4604d6f867f594e476e0be
 
 # Phase 3 Plan 14c: Installation binding for audit verify and the CLI (draft)
 
-test-time base: cmd=236.661 audit=89.933 serverclient=4.220 at=1794379826
+test-time base: cmd=259.024 audit=89.177 serverclient=3.989 at=1794409348
 
 ## Hand-over (session 1 stopped after Task 1)
 
@@ -231,10 +231,8 @@ Cumulative: 33 of 33 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20).
 **Notes and deviations:**
 - The tool layer decoded the backslash-u escapes when the test text was first written, as the plan warned. They were rewritten as bytes with perl, and the readings above were taken from the committed files.
 - checkBoundValues also requires a parsed `import_krl_versions` on a revocation_recovery line to equal the leaf's import versions. Truth 5 asks for it ("the leaf's own where the kind has them"); the action listed only the other-kind refusal. It shares recoveryImportVersions with checkImportVersions.
-  - The branch is reachable. If the plain key, with the right value, moves into a nested object and an escaped top-level `import\u005fkrl_versions` carries another value, the byte check and walkKeys both pass, and only this branch refuses.
-  - **UNVERIFIED:** no test or mutant exercises this branch.
-  - **UNVERIFIED:** two more value branches have no case of their own: `bundle_version` on bundle_install, and `sigs` on directory_install (spaced_replay_pair_refused mismatches only `directory`).
-- **Residual (open question for Daniel):** checkBoundValues reads decoded's top-level keys only, as the plan's signature has it. The byte checks bind the plain bound names at any depth, so a plain nested key is still refused. A nested escaped one, such as `"x":{"versio\u006e":1}` on a bundle_install line, still verifies, and a recursive reader (jq `..`) would read it. Truth 5 ties the refusal to the kinds the byte checks refuse a key on, and those checks work at any depth. The fix would be an any-depth presence check from walkKeys' key set, as a later RED/GREEN pair. It was not patched after T3 without a RED.
+  - This branch, `bundle_version` on bundle_install and `sigs` on directory_install now each have a case and a killed mutant (Q2, session 4, below). After Q1 the nested carrier that session 3 named here is refused by the new check, so the cases use other carriers.
+- **Residual: closed by owner decision Q1 (2026-11-11).** checkBoundKeysBelowTop refuses `version`, `directory`, `sigs`, `bundle_version`, `import_krl_versions` and `policy_version` anywhere on a leaf line except at the top level of decoded, after unescaping (session 4, below). A nested escaped key such as `"x":{"versio\u006e":1}` on a bundle_install line no longer verifies.
 - The bound runs right after the scanner's error check, before revs.finish and the checkpoint checks.
 - go1.27.3's gofmt split two one-line closures in the new tests. This was applied before R3, so no existing row moved.
 - Checks for breakage outside files_modified:
@@ -244,8 +242,93 @@ Cumulative: 33 of 33 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20).
   - **UNVERIFIED:** the CLI and recover clock bound in the e2e lanes, and golangci-lint/gosec on the new code. Neither has run; CI runs them.
 - recover.go's doc comment (step 2) names `recovery_clock_ahead`. The three recover refusals (`recovery_installation_not_pinned`, `recovery_installation_other`, `recovery_clock_ahead`) are CLI names and unregistered by design.
 
+## Session 4 (continuation): owner decision Q1, the value branches (Q2), then Task 4
+
+**Test-time base, re-measured.** Session 4 is a new session, so the base was measured again before any edit, on origin/main (3da914f) in a detached worktree outside the repository. go1.27.3; load average 0.02 at the start; no other job running. Readings: cmd 259.024 s, audit 89.177 s, serverclient 3.989 s. The `test-time base:` line above was replaced in place, so there is still one. The worktree was removed afterwards.
+
+### Q1 (Daniel, 2026-11-11: "ja, alla nivåer"): bound keys at every depth
+
+**Precondition: Export writes none of the six names below decoded's top level.** It holds, so there is no STOP.
+- decodeLeaf's nested objects:
+  - `counts` (refusal_summary) is keyed by `tlog.ReasonName`. That gives the fifteen names `peer_not_allowed` … `unauthorized` (`maxReason = ReasonUnauthorized`), or `unknown(N)` out of range. None of them is one of the six.
+  - `keys` (ca_init) holds `role`, `alg`, `custody` and `fingerprint`.
+  - decodeRevoke's `entries` hold `entry_kind`, `serial`, `ca_fingerprint`, `valid_before`, `key_id` and `key_fingerprint`.
+- Every other decoder writes only scalars, or arrays of scalars, into decoded's top-level map. This covers decodeRecovery, decodeHostForget, decodeLoginIssue, decodeHostIssue, decodeMachineIssue and decodeProbeIssue, plus decodeLeaf's inline issue, refusal, clock_regression, bundle_install, directory_install and krl_publish cases.
+- The line's other top-level values are `index` (a number), `leaf` (a base64 string) and `checkpoint` (a string).
+- Mechanical check on export.go:
+  - The only nested-map writes are `counts[tlog.ReasonName(...)]`, `e["fingerprint"]` and the `r[...]` lines listed above, plus the `role`/`alg`/`custody` literal.
+  - `grep -cE '\b(r|e|counts)\["(version|directory|sigs|bundle_version|import_krl_versions|policy_version)"\]'` reads 0.
+  - All 14 writes of the six names go to decodeLeaf's top-level `m`.
+
+**Commits:**
+- **R4** d18f25f `test(audit): pin the refusal of bound export keys below decoded's top level`, signed. It is test only and adds no declaration.
+- **T4** e8f367a `fix(audit): refuse bound export keys anywhere but at decoded's top level`, signed.
+
+**RED from a worktree of R4.** `go vet` exits 0, with no `[build failed]` or `[setup failed]`. All six cases end in `--- FAIL:`, and the export verifies with no error:
+- TestVerifyBoundKeysBelowTop/version_on_directory_install
+- /directory_on_directory_install
+- /sigs_on_directory_install
+- /bundle_version_on_bundle_install
+- /import_krl_versions_on_revocation_recovery
+- /policy_version_on_directory_install
+
+Each case nests the escaped name in a new object `"x":{...}` of decoded, on a kind where that name is legal or bound at the top level. The recovery case uses its own revoke fixture.
+
+**GREEN at T4.**
+- The six cases pass, and so do TestVerifyBoundValues, TestVerifyForgetKeysOnOtherKinds, TestVerifyGrepFields, TestVerifyRecoveryImportVersions and TestExportKeysLowercase.
+- Without -race: internal/audit 11.030 s, internal/signer 124.471 s and cmd/keyroster 90.406 s, all ok.
+- go vet and gofmt are clean.
+
+**The check.** checkBoundKeysBelowTop walks every value of the line other than decoded, and every value of decoded, collecting keys with walkKeys after unescaping. It then refuses the first of `boundKeys` it finds, in a fixed order. A walk error refuses the line.
+- It runs after the forgetOnlyKeys loop and before checkBoundValues, so no existing refusal moves.
+- It runs on leaf lines only, as the owner's rule says. A checkpoint line is checked as before.
+- Deviation: its message is a new refusal text, `its key "<name>" is below the top level of decoded, where export never writes it (<kind>)`. The output contract does not list it. A text of its own lets the cases and the mutant tell this check from the value checks, whose wording the byte checks share.
+- checkLineKeys' doc comment names it.
+
+**Escape bytes.**
+- The escapes were written as bytes with perl (`chr(92)`), because the tool layer decodes backslash-u sequences.
+- `grep -c '[\]u00' internal/audit/verify_test.go` reads 13, up from 7 at T3: the six new cases.
+- `od -c` of the version case reads `"   v   e   r   s   i   o   \   u   0   0   6   e   "   :   2`.
+
+**Mutant M4-1:** the call replaced by `error(nil)`.
+- `go vet` exits 0.
+- Run with `-timeout 5m`, it is killed by all six TestVerifyBoundKeysBelowTop cases.
+- The file was restored. Its sha256 prefix, c60ff47ba720ba54, reads the same before and after, and `git status` showed only the intended files.
+
+### Q2: the three untested value branches in checkBoundValues
+
+**Reachability after Q1.** The suggested carrier, the bytes `\"bundle_version\":3,` inside a JSON string value, does not work:
+- Inside a JSON string every `"` is escaped, so the byte after `bundle_version` is a backslash, and the plain `"bundle_version":` never occurs inside a string.
+- A `"` followed by `:` only occurs where a key ends.
+
+Two of the keys are required on their kind: `bundle_version` on bundle_install (checkGrepFields) and `import_krl_versions` on revocation_recovery (checkImportVersions). For them the byte check needs exactly one plain occurrence with the leaf's own value. After Q1 that occurrence can sit only in one of three places:
+- (a) As the plain top-level key. A second, hidden top-level key of the same name is then a duplicate after unescaping (walkKeys).
+- (b) In a nested object. Q1 refuses it before checkBoundValues runs.
+- (c) As the tail of another top-level key whose unescaped text holds a quote, such as `"x\"bundle_version":1`. This is the only carrier left. checkBoundValues refuses it first, and the charset check, which runs last, would refuse that key anyway.
+
+`sigs` is not required on directory_install. checkReplayFields returns nil when neither plain key occurs, so spaced keys reach the branch with no other check involved.
+
+**Cases** (commit **B** c2ffcfb, `test(audit): cover the sigs, bundle_version and import_krl_versions value checks`, signed; test only, no fix commit). Each passes on b2e8dee's code and at T4: they cover existing branches. The b2e8dee run used a throwaway worktree, which was removed.
+- TestVerifyBoundValues/spaced_sigs_refused, on line 2 (directory_install v2). Both keys are spaced, the directory keeps the leaf's own value and sigs gets another.
+- TestVerifyBoundValues/bundle_version_value_refused, on line 0 (bundle_install). It carries `"bundle_version" :2` and the top-level key `x\"bundle_version` with 1.
+- TestVerifyRecoveryImportVersions/parsed_value_refused. It carries `"import_krl_versions" :[7,20]` and the top-level key `x\"import_krl_versions` with [7,19].
+- `od -c` shows the escaped quote as bytes: `"   x   \   "   b   u   n   d   l   e   _   v   e   r   s   i   o   n   "   :   1   ,`.
+
+**Mutants.** Each disables only its branch with `false && err != nil` or `ok && false`. Each compiles, `go vet` exits 0, and each runs with `-timeout 5m`. After each one, verify.go was restored with `git checkout` and `git diff --exit-code` was clean.
+- M4-2, the sigs branch: killed by spaced_sigs_refused on the verdict. Verify returns no error.
+- M4-3, the bundle_version branch: killed by bundle_version_value_refused, **on the message only**. Under the mutant the line is still refused, by the charset check: `its key "x\"bundle_version" is not lowercase ASCII letters, digits and underscores (bundle_install)`.
+- M4-4, the import_krl_versions branch: killed by parsed_value_refused, **on the message only**. Under the mutant the charset check refuses the line (`... (revocation_recovery)`).
+
+**Classification:**
+- `sigs` on directory_install is reachable and does real work: only it refuses spaced_sigs.
+- `bundle_version` on bundle_install and `import_krl_versions` on revocation_recovery refuse first, but after Q1 the charset check would refuse the same lines anyway. They are kept as defence in depth (Truth 5), and the orchestrator chooses the final label. Their kills show that the branch runs and refuses. They do not show that it is load-bearing.
+
+The three UNVERIFIED lines about these branches are gone.
+
+Cumulative: 37 of 37 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20, session 4: 4). M4-3 and M4-4 are killed on the message only.
+
 ## Still to do (continuation)
 
-- Task 4: the runbooks, the registry, the pointers, the publish edits, the gates, the push and the PR. Re-measure the base first.
+- Task 4: the runbooks, the registry, the pointers, the publish edits, the gates, the push and the PR. The base was re-measured in session 4.
   - It also confirms in CI e2e the PASS lines of TestAuditVerifiesIssuance/binds_installation, the moved e2e audit helpers and revokeClient, and records the run IDs.
 - Task 5: a checkpoint, after Daniel merges.
