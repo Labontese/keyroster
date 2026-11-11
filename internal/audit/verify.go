@@ -54,8 +54,15 @@ type Options struct {
 	// CertificatesFrom, when set, makes Verify list in Report.Certificates
 	// every certificate the log holds at or after that index (03-06b).
 	CertificatesFrom *uint64
-	// InstallationID is the installation ID the auditor expects (03-14c,
-	// F05). Empty means not checked.
+	// InstallationID is the installation ID the auditor expects: a trust
+	// bundle's installation_id, from the ceremony transcript's
+	// Installation ID line (03-14c, F05). Empty means not checked by
+	// Verify; keyroster audit verify then refuses an installation-bound
+	// log unbound (Q-C7). With it, Verify refuses a log whose trust bundle
+	// in force names another installation or none. The comparison is with
+	// the bundle in force, not the anchor, because trust.VerifySuccessor
+	// carries an installation ID unchanged once it is set, while the
+	// anchor may predate it.
 	InstallationID string
 }
 
@@ -729,6 +736,10 @@ func certTypeName(t uint32) string {
 //     it is signed by the log key of the root-signed bundle
 //   - with opts.Previous, the log neither shrank nor rewrote the entries
 //     that checkpoint covered
+//   - with opts.InstallationID, the trust bundle in force at the end of
+//     the log names exactly that installation ID (03-14c, F05), checked
+//     after every other check, so this refusal means a valid log of
+//     another installation, or of one whose bundle names none
 //
 // Login issuances are re-proven from the log, as above: a signer holding
 // the CA key and the log key cannot log a login certificate that passes
@@ -748,6 +759,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	}
 	if err := trust.CheckPins(opts.Pins, opts.Threshold); err != nil {
 		return nil, fmt.Errorf("audit: %w", err)
+	}
+	if opts.InstallationID != "" && !trust.IsInstallationID(opts.InstallationID) {
+		return nil, fmt.Errorf("audit: the expected installation ID %q is not 32 lowercase hex digits", opts.InstallationID)
 	}
 	rep := &Report{Counts: map[tlog.Kind]uint64{}, IssuedByCA: map[string]int{}}
 	tree := tlog.NewLog()
@@ -1113,6 +1127,19 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		}
 		if !bytes.Equal(oldRoot, prev.Root) {
 			return nil, fmt.Errorf("audit: log rewritten: the first %d entries do not reproduce the previous checkpoint", prev.Size)
+		}
+	}
+	// The installation binding (03-14c, F05), last, against the bundle in
+	// force: VerifySuccessor carries its installation ID unchanged once
+	// set, so every earlier bundle that names one names the same.
+	if want := opts.InstallationID; want != "" {
+		switch got := trustState.bundle.InstallationID; {
+		case got == "":
+			return nil, fmt.Errorf("audit: the trust bundle in force (v%d) names no installation ID, but %s is expected",
+				trustState.bundle.Version, want)
+		case got != want:
+			return nil, fmt.Errorf("audit: the trust bundle in force (v%d) names installation %s, not the expected %s: this export is the log of another installation",
+				trustState.bundle.Version, got, want)
 		}
 	}
 	rep.Size, rep.Root = cp.Size, root

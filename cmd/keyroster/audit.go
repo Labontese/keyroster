@@ -14,6 +14,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/audit"
 	"github.com/Labontese/keyroster/internal/tlog"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 func init() {
@@ -26,7 +27,7 @@ func init() {
 
 func runAudit(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: keyroster audit verify --pin SHA256:... [--pin ...] --threshold N [--previous FILE] [--json] EXPORT.jsonl")
+		_, _ = fmt.Fprintln(stderr, "usage: keyroster audit verify --pin SHA256:... [--pin ...] --threshold N [--installation-id ID | --any-installation] [--previous FILE] [--json] EXPORT.jsonl")
 		return errUsage
 	}
 	switch args[0] {
@@ -56,6 +57,9 @@ type verifyResult struct {
 	// PendingNegativeProbes counts the negative probe certificates that no
 	// published KRL lists yet (03-10c, owner answer P2); omitted when zero.
 	PendingNegativeProbes int `json:"pending_negative_probes,omitempty"`
+	// InstallationID is the installation ID of the trust bundle in force
+	// at the end of the log, "" when it names none (03-14c, F05).
+	InstallationID string `json:"installation_id"`
 }
 
 func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) error {
@@ -66,14 +70,22 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 	threshold := fs.Int("threshold", 0, "root signatures the anchor bundle needs (required; must equal that bundle's threshold)")
 	previousPath := fs.String("previous", "", "an earlier signed checkpoint, or an earlier export, that this log must extend")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
-	installationID := fs.String("installation-id", "", "the installation ID this export must be the log of")
+	installationID := fs.String("installation-id", "", "the installation ID this export must be the log of: 32 lowercase hex digits, from the ceremony transcript's Installation ID line (03-14c, F05)")
 	var anyInstallation bool
-	fs.BoolVar(&anyInstallation, "any-installation", false, "verify without binding the result to one installation")
+	fs.BoolVar(&anyInstallation, "any-installation", false, "verify without binding the result to one installation; the output still names the installation (03-14c, Q-C7)")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
 	if fs.NArg() != 1 || len(pins) == 0 || *threshold < 1 {
 		_, _ = fmt.Fprintln(stderr, "audit verify: at least one --pin, --threshold N (N >= 1) and exactly one export file are required")
+		return errUsage
+	}
+	if *installationID != "" && !trust.IsInstallationID(*installationID) {
+		_, _ = fmt.Fprintln(stderr, "audit verify: --installation-id wants 32 lowercase hex digits")
+		return errUsage
+	}
+	if *installationID != "" && anyInstallation {
+		_, _ = fmt.Fprintln(stderr, "audit verify: --installation-id and --any-installation exclude each other")
 		return errUsage
 	}
 	opts := audit.Options{Pins: pins, Threshold: *threshold, InstallationID: *installationID}
@@ -93,6 +105,13 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
+	// Q-C7 (03-14c, F05): an installation-bound log is never verified
+	// unbound by default. This runs before either output, so --json
+	// prints nothing either.
+	if rep.Bundle != nil && rep.Bundle.InstallationID != "" && *installationID == "" && !anyInstallation {
+		return fmt.Errorf("audit verify: the trust bundle in force (v%d) names installation %s: pass --installation-id with the installation ID you have on record (the ceremony transcript's Installation ID line), or --any-installation to verify without binding the result to one installation",
+			rep.Bundle.Version, rep.Bundle.InstallationID)
+	}
 	res := verifyResultOf(rep)
 	if *asJSON {
 		enc := json.NewEncoder(stdout)
@@ -102,6 +121,18 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		return err
 	}
 	if _, err := fmt.Fprintf(stdout, "anchored: the pinned roots are the root set of trust bundle v%d\n", res.Anchor); err != nil {
+		return err
+	}
+	var installation string
+	switch {
+	case res.InstallationID == "":
+		installation = "installation id: none (the trust bundle in force names none)\n"
+	case *installationID != "":
+		installation = "installation id: " + res.InstallationID + " (checked against --installation-id)\n"
+	default:
+		installation = "installation id: " + res.InstallationID + " (not checked: --any-installation)\n"
+	}
+	if _, err := io.WriteString(stdout, installation); err != nil {
 		return err
 	}
 	_, err = io.WriteString(stdout,
@@ -166,6 +197,9 @@ func verifyResultOf(rep *audit.Report) verifyResult {
 	}
 	if rep.LogKey != nil {
 		res.LogKey = ssh.FingerprintSHA256(rep.LogKey)
+	}
+	if rep.Bundle != nil {
+		res.InstallationID = rep.Bundle.InstallationID
 	}
 	for k, n := range rep.Counts {
 		res.Kinds[k.String()] = n
