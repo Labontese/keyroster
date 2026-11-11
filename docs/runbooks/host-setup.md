@@ -396,7 +396,17 @@ it.
 
 A directory installed before the bundle had an installation ID names none.
 When the bundle first gains one (the 03-15 ceremony, `root sign --prev ...
---installation-id new`), bind the installed directory once:
+--installation-id new`), bind the installed directory once.
+
+Since 03-14c, before you run keyroster directory rebind, run
+`keyroster init --force --server <URL> --tls-pin <pin> --root-pin <fp> [--root-pin ...] --threshold <n> --user <name> [--admin-key <your admin key>]`
+with the pins of the bundle now in force, and compare the installation id
+line it prints with the ceremony transcript's Installation ID line; until
+the config pins the new ID, rebind and every other command refuse. At
+03-15 the CLIs are re-initialised for the new roots anyway. (Run in CI:
+TestInstallationPinned (`rebind_needs_reinit`, which saves the config as
+init does; TestInit covers init's save) and TestDirectoryRebind. The
+init-then-rebind sequence is UNVERIFIED end to end.) Then rebind:
 
 ```
 keyroster directory rebind
@@ -667,7 +677,11 @@ you can read, for example under your user profile, and delete it once it
 is on the host (an owner-only ACL is a pending todo). It carries the
 agent listener's URL, the TLS roots and pins and the trust-root pins and
 threshold of your `keyroster init` config, and the installation ID of the
-trust bundle it verified.
+trust bundle it verified. Since 03-14c that ID is the installation ID
+your config pins: the command refuses a served bundle of another
+installation, or one that names an ID your config does not pin, before
+it mints a token. (Run in CI: TestInstallationPinned
+(`join_token_refused`); UNVERIFIED on the homelab until 03-15.)
 
 **2. Install the agent (on the host, as root).**
 
@@ -2281,8 +2295,13 @@ enrolled host can (D-03); that is the leak this order accepts.
    a `host_forget` line has (`identity`, `expected_name`, `enrolled_at_us`,
    `host_key_fingerprints`, `approved_once`, `host_gone`,
    `removal_version`, `confirmed_version`, `confirmed_sha256`,
-   `admin_fingerprints`); so the parser lists exactly the verified
-   `host_forget` entries (PR #75 review, fix round 2). The fields say what
+   `admin_fingerprints`). It also refuses any key that is not lowercase
+   ASCII letters, digits and underscores, binds the parsed `version`,
+   `policy_version` and the other bound fields to the entry, and refuses
+   those bound names below the top level of `decoded` (03-14c). So a JSON
+   parser, also one that matches keys without regard to case, reads a
+   `host_forget` only on a verified `host_forget` line (PR #75 review;
+   03-14c). The fields say what
    the admins signed, not that it was true: audit verify checks that the
    number of signatures fits the signed `approved_once`; it cannot tell a false one, because the log records no approvals: one
    admin together with a compromised keyroster-server could forget an
@@ -2293,7 +2312,9 @@ enrolled host can (D-03); that is the leak this order accepts.
    without a forget: treat the server as compromised. This check is
    detection only, because a server can always stop serving a host. Run in
    CI: the entry and the fetcher's line in `TestAgentEnrollEndToEnd`, and
-   the refusals in `TestVerifyForgetKeysOnOtherKinds`; as an operator
+   the refusals in `TestVerifyForgetKeysOnOtherKinds` (its charset cases
+   included), `TestVerifyBoundValues` and `TestVerifyBoundKeysBelowTop`;
+   as an operator
    check UNVERIFIED until 03-16.
 
 ## How fast changes arrive

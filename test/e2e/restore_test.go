@@ -117,7 +117,7 @@ EOF`
 var restoreAdminPathWrite = regexp.MustCompile(`(?m)^[ \t]*(?:install|chown|chmod|cp|mv|mkdir|ln|tee|touch)\b[^\n]*(?:<admin>|/home/)`)
 
 // restoreVerify is the first line of the runbook's audit verify commands.
-const restoreVerify = `keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \`
+const restoreVerify = `keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \`
 
 // The order and the condition of step 2's verification of the saved
 // export (03-02 pre-merge review, round 3): it runs whenever step 2's

@@ -72,7 +72,21 @@ above the user cap.
 On the automation host, as the automation's own OS user, run
 `keyroster init` once without `--user` (the server URL, its TLS pin and the
 root pins; the config lives in that user's config directory). No admin key
-and no passkey are needed. Then:
+and no passkey are needed.
+
+Since 03-14c, init also saves the installation ID of the trust bundle it
+verified, and `keyroster machine renew` refuses a bundle of another
+installation. A config made before 03-14c on an installation whose
+bundle names an ID pins none, so every renewal exits 1 with `your saved
+config pins no installation ID` until it is re-initialised: on an
+automation host whose config has no user, compare the printed ID with
+the ceremony transcript's Installation ID line and run
+`keyroster init --force --server <URL> --tls-pin <pin> --root-pin <fp> [--root-pin ...] --threshold <n>`,
+with no `--user` (a `--user` there would make the machine's config a
+user's). (Run in CI: TestInstallationPinned (`machine_renew_refused`).
+UNVERIFIED on a real automation host.)
+
+Then renew:
 
 ```
 keyroster machine renew ci --key /path/to/id_ci --out /path/to/id_ci-cert.pub

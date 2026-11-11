@@ -203,6 +203,13 @@ signatures to `bundle.json.sigs` and `policy.json.sigs`. If it stops after
 writing only one of them, run the same command again: it signs only the
 document this root has not signed yet. Do not edit `.sigs` files by hand.
 
+Record the installation id line that root sign prints in the
+transcript's Installation ID line (03-14c): `installation id: <id>`,
+with `(new in this version)` for a genesis or for a bundle that names an
+ID for the first time. Every later `keyroster init`, `keyroster audit
+verify --installation-id` and recovery compares against that record.
+(Run in CI: TestCeremonyGolden; UNVERIFIED in a real ceremony.)
+
 Remove USB A, insert USB B and run the same command with
 `--key /media/usbB/root-b.age` and the same `--out-dir`. `root sign` refuses
 if the bundle in `--out-dir` does not match the inputs, so both roots sign
@@ -227,6 +234,10 @@ OK: 2 of 2 pinned roots signed both documents (bundle 2, policy 2, threshold 1)
 
 Record that line and the SHA-256 of `bundle.json` and `policy.json` in the
 transcript.
+
+trust verify prints the same installation id line as root sign, right
+after the summary (03-14c); it must equal the recorded one. (Run in CI:
+TestCeremonyGolden; UNVERIFIED in a real ceremony.)
 
 The transfer USB now holds `roots.pub`, `ceremony/bundle.json`,
 `ceremony/bundle.json.sigs`, `ceremony/policy.json` and
@@ -374,6 +385,14 @@ apply the same rule (`trust.VerifySuccessor`):
    and TestRootCeremonyPolicyChecks, 03-14b) and are UNVERIFIED in a real
    ceremony.
 
+   Record the installation id line that root sign prints in the
+   transcript's Installation ID line (03-14c): `installation id: <id>`,
+   with `(new in this version)` for a genesis or for a bundle that names
+   an ID for the first time. Every later `keyroster init`, `keyroster
+   audit verify --installation-id` and recovery compares against that
+   record. (Run in CI: TestCeremonyGolden; UNVERIFIED in a real
+   ceremony.)
+
    The summary also prints `signatures needed: t1 of the n previous roots
    AND t2 of the m new roots, on both documents`. Then repeat the command
    with `--key /media/usbD/root-d.age` and the same `--out-dir`.
@@ -418,6 +437,10 @@ apply the same rule (`trust.VerifySuccessor`):
    ```
 
    Record that line and the SHA-256 of `rotation/bundle.json`.
+
+   trust verify prints the same installation id line as root sign, right
+   after the summary (03-14c); it must equal the recorded one. (Run in
+   CI: TestCeremonyGolden; UNVERIFIED in a real ceremony.)
 6. **Install** with the signer stopped, as in
    [signer-install.md, "Install a successor bundle"](signer-install.md#install-a-successor-bundle-stop-install-start).
    A successor takes no `--pin`: `install-bundle` checks it against the
@@ -438,7 +461,7 @@ apply the same rule (`trust.VerifySuccessor`):
 
    ```
    keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/log.jsonl
-   keyroster audit verify --pin SHA256:<new root C from paper> --pin SHA256:<new root D from paper> --threshold 1 /tmp/log.jsonl
+   keyroster audit verify --pin SHA256:<new root C from paper> --pin SHA256:<new root D from paper> --threshold 1 --installation-id <installation id> /tmp/log.jsonl
    ```
 
    It must print `anchored: the pinned roots are the root set of trust
@@ -452,6 +475,13 @@ apply the same rule (`trust.VerifySuccessor`):
    because the old roots are the anchor of such a fork. Pins of the new
    roots refuse that fork with "not anchored in the pinned roots": no
    bundle in it has the new root set.
+
+   `<installation id>` is the ID on the transcript's Installation ID
+   line (03-14c). On an installation whose trust bundle names no
+   installation ID (pre-D-04; the homelab until 03-15), leave out
+   `--installation-id`, and audit verify prints `installation id: none`.
+   (Run in CI: TestAuditVerifyInstallation; UNVERIFIED on the homelab
+   until 03-15.)
 8. **Retire the old roots.** Once steps 6 and 7 pass, destroy every copy of
    the old root keys and their passphrases. The signer then accepts a
    further successor only with the new roots' signatures. The old roots'
@@ -665,6 +695,14 @@ You need everything from [What you need](#what-you-need), plus:
 
    A root in both the previous and the new root set counts toward both
    thresholds, so the roots' threshold of signatures is enough.
+
+   Record the installation id line that root sign prints in the
+   transcript's Installation ID line (03-14c): `installation id: <id>`,
+   with `(new in this version)` for a genesis or for a bundle that names
+   an ID for the first time. Every later `keyroster init`, `keyroster
+   audit verify --installation-id` and recovery compares against that
+   record. (Run in CI: TestCeremonyGolden; UNVERIFIED in a real
+   ceremony.)
 4. **Verify against the paper:**
 
    ```
@@ -678,6 +716,10 @@ You need everything from [What you need](#what-you-need), plus:
    It must end with `OK: successor of trust bundle vN: ...`. Its summary
    must show the same `webauthn` and `pop` lines, and its policy block the
    same lines, that you checked in step 3 (run in CI (TestCeremonyGolden, TestSummaryGolden and TestRootCeremonyPolicyChecks, 03-14b; TestAuditLoginAcrossPolicyChange, e2e, real binaries); UNVERIFIED in a real ceremony).
+
+   trust verify prints the same installation id line as root sign, right
+   after the summary (03-14c); it must equal the recorded one. (Run in
+   CI: TestCeremonyGolden; UNVERIFIED in a real ceremony.)
 5. **Install** with the signer stopped:
    [signer-install.md, "Install a successor bundle"](signer-install.md#install-a-successor-bundle-stop-install-start).
    If `keyroster-server` runs on the host and the `rp_id` changed, put a

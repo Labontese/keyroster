@@ -303,6 +303,33 @@ fingerprint; with the agent backend, whoever can use the agent socket can
 add keys). The check that holds is `keyroster audit verify --pin` with
 your pins. Compare the root fingerprints doctor prints with your pins.
 
+`keyroster audit verify` also names the installation (03-14c, F05).
+`--installation-id <installation id>`, the ID on the ceremony
+transcript's Installation ID line, binds the result to one installation:
+audit verify refuses a log whose trust bundle in force names another
+installation, or none. It also refuses a log whose trust bundle names an
+installation unless you pass `--installation-id` or
+`--any-installation`, which verifies without binding and still prints
+the ID. After the `anchored:` line it prints `installation id:` (the ID
+and whether it was checked, or `none`) and `last entry time:` (the time
+and index of the log's last entry). On an installation whose trust
+bundle names no installation ID (pre-D-04; the homelab until 03-15),
+leave out `--installation-id`, and audit verify prints
+`installation id: none`. (Run in CI: TestVerifyInstallationBinding,
+TestAuditVerifyInstallation and TestAuditVerifiesIssuance/binds_installation
+(e2e). UNVERIFIED on a real signer, and on the homelab until its bundle
+names an installation at 03-15.)
+
+audit verify refuses an entry more than 300 s after the verifier's clock
+(03-14c, F10). A signer whose clock ran ahead writes such entries and
+keeps writing later ones at least as late, so correcting its clock does
+not clear the refusal: it lasts until this machine's clock reaches the
+last entry's time minus 300 s, which the message names. Check the
+signer's journal and the log's clock_regression entries; without a clock
+episode, treat the signer as compromised. (Run in CI:
+TestVerifyLeafTimeBound and TestAuditVerifyClock. UNVERIFIED on a real
+signer.)
+
 ## Install a successor bundle: stop, install, start
 
 The signer loads the trust bundle and its policy once, when it starts.
@@ -761,7 +788,7 @@ structurally (see the warning above).
 2. Verify the restored export on its own first:
 
    ```
-   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \
      /tmp/restored.jsonl
    ```
 
@@ -780,7 +807,7 @@ structurally (see the warning above).
    comparison would show nothing lost.
 
    ```
-   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \
      --previous /root/latest-saved.jsonl /tmp/restored.jsonl
    ```
 
@@ -814,9 +841,9 @@ structurally (see the warning above).
    log is a prefix of it, before you read anything from the saved export:
 
    ```
-   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \
      /root/latest-saved.jsonl
-   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \
      --previous /tmp/restored.jsonl /root/latest-saved.jsonl
    ```
 
@@ -878,6 +905,18 @@ structurally (see the warning above).
    server's state directory survives the restore. When the server's state
    directory is lost with the restore, only the saved export is imported,
    and revocations after it stay lost.
+
+   `<installation id>` in this section's audit verify commands is the ID
+   on the ceremony transcript's Installation ID line (03-14c). On an
+   installation whose trust bundle names no installation ID (pre-D-04;
+   the homelab until 03-15), leave out `--installation-id`, and audit
+   verify prints `installation id: none`. If audit verify refuses an
+   entry ahead of the clock here, keep the hold and do not release it
+   before this machine's clock passes the time the message names;
+   escalate unless the signer's journal shows a clock episode. (Run in
+   CI: TestAuditVerifyInstallation, TestAuditVerifyClock and
+   TestRestoreRunbookChecks (e2e). UNVERIFIED in a real restore, and on
+   the homelab until 03-15.)
 
    **2b. Recover the revocations the restore lost (every restore, before
    the release).** Run it after every restore, whatever the counts above
@@ -998,6 +1037,20 @@ structurally (see the warning above).
       The command ends `wrote the signed recovery request to
       /home/<admin>/recovery-in/recovery.bin`.
 
+      Since 03-14c, recover also checks the installation and the clock
+      (F06, F10). It refuses a restored export of another installation
+      than your config pins (`recovery_installation_other`: escalate, do
+      not release the hold). It refuses on a config that pins no
+      installation while the export names one
+      (`recovery_installation_not_pinned`: keep the hold, compare the ID
+      with the transcript's Installation ID line, re-run
+      `keyroster init --force --server <URL> --tls-pin <pin> --root-pin <fp> [--root-pin ...] --threshold <n> --user <name> [--admin-key <your admin key>]`,
+      then run recover again). It refuses an export dated ahead of the
+      clock (`recovery_clock_ahead`: keep the hold; if the signer's
+      journal shows a clock episode, wait until this machine's clock
+      passes the time named and run recover again; otherwise escalate).
+      (Run in CI: TestRevokeRecover. UNVERIFIED in a real restore.)
+
    4. **Read the request back.** As root:
 
       ```
@@ -1051,9 +1104,9 @@ structurally (see the warning above).
       ```
 
       ```
-      keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+      keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \
         /tmp/recovered.jsonl
-      keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+      keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \
         --previous /tmp/restored.jsonl /tmp/recovered.jsonl
       ```
 
@@ -1100,6 +1153,12 @@ structurally (see the warning above).
       saved export. It reads the kept copy only in the form keyroster-server
       writes it: one line holding the document's three fields. If either
       verify fails or the release check stops, keep the hold and escalate.
+
+      If either verify refuses an entry ahead of the clock (03-14c), keep
+      the hold and do not release it before this machine's clock passes
+      the time the message names; escalate unless the signer's journal
+      shows a clock episode. (Run in CI: TestAuditVerifyClock.
+      UNVERIFIED in a real restore.)
 
    **The refusals and outcomes of step 2b, and what to do.** Both commands
    exit 1 on a refusal and write nothing. `keyroster revoke recover`
@@ -1554,9 +1613,9 @@ structurally (see the warning above).
    export of the restored log from step 1; both must pass:
 
    ```
-   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \
      /tmp/after-replay.jsonl
-   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \
      --previous /tmp/restored.jsonl /tmp/after-replay.jsonl
    ```
 
