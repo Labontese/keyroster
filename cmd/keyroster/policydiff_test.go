@@ -119,6 +119,28 @@ func TestPolicyFieldsCovered(t *testing.T) {
 // policyFieldLines are the block's eight field lines, in order.
 var policyFieldLines = []string{"admin_quorum", "admins", "ca_profiles user", "ca_profiles host", "ca_profiles machine", "timelock_seconds", "webauthn", "pop"}
 
+// TestPolicyFieldLines requires policyFieldLines to name every top-level
+// policy.json field except version and prev (the block's header), in order,
+// with ca_profiles once per role that Validate pins, so a new field needs
+// its own field line, which checkBlock then requires the block to print.
+func TestPolicyFieldLines(t *testing.T) {
+	var want []string
+	typ := reflect.TypeFor[trust.Policy]()
+	for i := range typ.NumField() {
+		name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+		switch name {
+		case "version", "prev":
+		case "ca_profiles":
+			want = append(want, "ca_profiles user", "ca_profiles host", "ca_profiles machine")
+		default:
+			want = append(want, name)
+		}
+	}
+	if !slices.Equal(policyFieldLines, want) {
+		t.Errorf("policyFieldLines = %q, want %q from trust.Policy; %s", policyFieldLines, want, policyFieldNeed)
+	}
+}
+
 const oneWayLine = "    pop.hosts is one-way: no later policy may turn it off (pop_hosts_removed)"
 
 // diffBase returns the canonical bytes of the test base policy, version 1:
@@ -305,9 +327,17 @@ func normalizeSlice(v reflect.Value) any {
 // checkBlock compares the block of a single-field change with what the case
 // expects: the changed header, the warning exactly for a field root
 // successor-policy never writes, and the eight field lines, only line
-// reading CHANGED, with its sub-lines.
+// reading CHANGED, with its sub-lines. A change must name its CHANGED line,
+// and that line must be one of policyFieldLines, so no case is dropped from
+// the comparison.
 func checkBlock(t *testing.T, base, next []byte, field, line, text string, sub []string) {
 	t.Helper()
+	if field != "" && line == "" {
+		t.Fatalf("case changes %s but names no CHANGED line", field)
+	}
+	if line != "" && !slices.Contains(policyFieldLines, line) {
+		t.Fatalf("case line %q is not one of the block's field lines %q", line, policyFieldLines)
+	}
 	want := []string{
 		fmt.Sprintf("Policy in force: v1, sha256 %s", trust.SHA256Hex(base)),
 		fmt.Sprintf("Successor policy: v2, sha256 %s, chained to the policy in force; against it:", trust.SHA256Hex(next)),
