@@ -228,8 +228,9 @@ func TestRepinInstructionsKeepIdentity(t *testing.T) {
 		}
 		inFile := 0
 		for _, para := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n\n") {
-			if !(strings.Contains(para, "init") && strings.Contains(para, "--force") && strings.Contains(para, "--root-pin")) &&
-				!(strings.Contains(para, "keyroster init") && strings.Contains(para, "--force")) {
+			repin := strings.Contains(para, "--force") &&
+				(strings.Contains(para, "keyroster init") || strings.Contains(para, "init") && strings.Contains(para, "--root-pin"))
+			if !repin {
 				continue
 			}
 			found++
