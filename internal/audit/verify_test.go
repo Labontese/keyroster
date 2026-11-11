@@ -3662,6 +3662,12 @@ func TestVerifyRecoveryImportVersions(t *testing.T) {
 		return editDecodedLine(t, all, i, f)
 	}
 	const refused = "its decoded import_krl_versions field is not the one of its"
+	const plain = `"import_krl_versions":[7,19]`
+	if strings.Count(all[rec], plain) != 1 {
+		t.Fatalf("the revocation_recovery line lacks %s once:\n%s", plain, all[rec])
+	}
+	hidden := slices.Clone(all)
+	hidden[rec] = strings.Replace(hidden[rec], plain, `"import_krl_versions" :[7,20],"x\"import_krl_versions":[7,19]`, 1)
 	for _, tc := range []struct {
 		name  string
 		lines []string
@@ -3676,6 +3682,12 @@ func TestVerifyRecoveryImportVersions(t *testing.T) {
 		{"twice_refused", edit(rec, func(m map[string]any) { m["x"] = map[string]any{"import_krl_versions": []int{7, 19}} }), refused},
 		{"on_krl_publish_refused", edit(pub, func(m map[string]any) { m["import_krl_versions"] = []int{7, 19} }), refused},
 		{"on_issue_refused", edit(issue, func(m map[string]any) { m["import_krl_versions"] = []int{} }), refused},
+		// The parsed value branch (03-14c): a spaced top-level key with
+		// other versions, the line's bytes keeping one plain key with the
+		// leaf's own. After owner decision Q1 only a top-level key holding
+		// an escaped quote carries those bytes; the charset check refuses
+		// it too, last.
+		{"parsed_value_refused", hidden, refused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rep, err := rf.verify(join(tc.lines), nil)
@@ -4497,6 +4509,7 @@ func TestVerifyBoundValues(t *testing.T) {
 	}
 	other := base64.StdEncoding.EncodeToString([]byte(`{"version":1,"roles":[{"name":"evil"}]}`))
 	spacedPair := rawIn(rawIn(edit(2, func(m map[string]any) { m["directory"] = other }), 2, `"directory":`, `"directory" :`), 2, `"sigs":`, `"sigs" :`)
+	spacedSigs := rawIn(rawIn(edit(2, func(m map[string]any) { m["sigs"] = other }), 2, `"directory":`, `"directory" :`), 2, `"sigs":`, `"sigs" :`)
 	field := func(key, kind string) string {
 		return "its decoded " + key + " field is not the one of its " + kind + " leaf"
 	}
@@ -4509,6 +4522,14 @@ func TestVerifyBoundValues(t *testing.T) {
 		{"spaced_version_refused", raw(2, `"version":2}`, `"version" :3}`), field("version", "directory_install")},
 		{"escaped_version_same_value_ok", raw(2, `"version":2}`, `"versio\u006e":2}`), ""},
 		{"spaced_replay_pair_refused", spacedPair, field("directory", "directory_install")},
+		// The sigs and bundle_version value branches (03-14c). Only the
+		// sigs branch refuses spaced_sigs (the directory stays the leaf's
+		// own). A required bundle_version must still occur once as
+		// "bundle_version": in the line's bytes; after owner decision Q1
+		// only a top-level key holding an escaped quote carries it, which
+		// the charset check refuses too, last.
+		{"spaced_sigs_refused", spacedSigs, field("sigs", "directory_install")},
+		{"bundle_version_value_refused", raw(0, `"bundle_version":1,`, `"bundle_version" :2,"x\"bundle_version":1,`), field("bundle_version", "bundle_install")},
 		{"escaped_directory_on_bundle_install_refused", inject(0, `,"d\u0069rectory":"`+other+`"`), field("directory", "bundle_install")},
 		{"escaped_version_on_bundle_install_refused", inject(0, `,"versio\u006e":99`), field("version", "bundle_install")},
 		{"escaped_bundle_version_on_directory_install_refused", inject(2, `,"bundle\u005fversion":1`), field("bundle_version", "directory_install")},
