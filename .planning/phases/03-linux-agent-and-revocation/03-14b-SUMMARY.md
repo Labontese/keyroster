@@ -1,20 +1,37 @@
 ---
 phase: 03-linux-agent-and-revocation
 plan: 14b
-status: draft
+subsystem: root ceremony display (policy block, pop line, runbook checks)
+tags: [root, ceremony, policy, pop, runbooks, goldens, hardening]
+status: complete
+requirements-completed: []
+key-files:
+  created: [cmd/keyroster/policydiff.go, cmd/keyroster/policydiff_test.go, cmd/keyroster/ceremony_golden_test.go, internal/rootceremony/summary_test.go, cmd/keyroster/testdata/ceremony (10 goldens), internal/rootceremony/testdata/summary (3 goldens)]
+  modified: [internal/rootceremony/summary.go, cmd/keyroster/root.go, cmd/keyroster/trust.go, cmd/keyroster/runbook_test.go, test/e2e/audit_login_test.go, docs/runbooks/root-ceremony.md, docs/runbooks/ceremony-transcript-template.md, docs/runbooks/host-setup.md, docs/runbooks/machine-identities.md]
+decisions:
+  - "The policy block is an unexported helper in package main (policydiff.go); the pop line lives in rootceremony.Summary with its signature unchanged"
+  - "The block's base is only loadPrev's prevPolicy, printed after BuildSuccessor or VerifySuccessor bound it to the pinned bundle"
+  - "A fixed WARNING line, no new flag, for changes root successor-policy never writes (Q-B1)"
+actuals:
+  tasks: 3
+  commits: 7
+plan_head_before: b4e6b4c1c4d04427b4476b7c3a60721fa6a329e8
+plan_head_after: 5d5f14e379bc21abf2fe818b1ef713450dd7fbe4
 ---
 
 # Phase 3 Plan 14b: show what a root signs (F04, F14) Summary
 
-Draft, written from Task 1 on. Completed in Task 3.
+A custodian who signs or verifies a successor now sees the policy in force, every policy field the successor changes (with a WARNING for changes root successor-policy cannot make), and the PoP switches in every ceremony summary, pinned by goldens committed failing first, reflect gates, single-field cases and runbook checks.
 
-test-time base: cmd=248.675 rootceremony=26.123 at=1794350937
+Written from Task 1 on and completed in Task 3. Task 4 (the owner's merge) is open. `commits` counts the plan's commits before this SUMMARY's final docs commit.
 
-Measured in Task 1 before any edit, on the tree equal to origin/main b4e6b4c, with no other heavy job running. Both packages read `ok`; the new test files were not in that build.
+test-time base: cmd=232.981 rootceremony=25.149 at=1794353255
 
-## Handover (end of Task 2)
+Re-measured in place in Task 3 (the continuation is another session; Budget, "Another session"), on a detached worktree of origin/main b4e6b4c outside the repository, with no other heavy job running; the worktree was removed. Both packages read `ok`. Task 1's first measurement read cmd=248.675 rootceremony=26.123 and is replaced by this line.
 
-The first session stopped after Task 1's gates, as the Budget plans. The continuation ran Task 2 and goes on with Task 3. Task 3 must re-measure the base first, in place, on origin/main in a detached worktree: it runs in another session, and the base above was measured on 2026-11-10.
+## Handover
+
+Task 1 ran in the first session, which stopped at the planned handover point. The continuation ran Tasks 2 and 3 and stops at Task 4, the owner's merge gate (blocking-human). The pre-merge review (Task 3 step 5) is the orchestrator's and is not yet recorded here.
 
 ## Task 1: the policy block, the pop line and the goldens
 
@@ -117,10 +134,57 @@ Every mutant met the mutant rule: the unmutated command passed; `go vet` of the 
 
 Cumulative: 18 of 18 Task 1 mutants and 17 of 17 Task 2 mutant runs (16 numbered, 13 in two parts) killed.
 
+## Task 3: the runbooks, the section helper, the publish edits and the gates
+
+- **Commits.** `27d2cf4` `docs(runbooks): check the policy block, the roots and the pop line before a root signs (F04, F14)` (root-ceremony.md, ceremony-transcript-template.md, host-setup.md, machine-identities.md and runbook_test.go); `5d5f14e` `docs(03-14b): publish the plan, point 03-12 to 03-15 at it, and shift the later waves`.
+- **Stop guard.** Re-run before the publish edits: 03-11b's SUMMARY is on origin/main b4e6b4c, origin/main's 03-12 holds `wave: 29`, and 03-11b is the only plan at `wave: 28`.
+- **The runbook inventory** (`git grep -n 'root sign' origin/main -- docs/runbooks`):
+  - root-ceremony.md: "4. Sign with root A, then with root B", "Rotate the roots" steps 3 to 5, "Change the policy" (paragraph, "You need", steps 3 and 4, the "What has run" note) and "Hardware-root variant": checks added, each with a helper entry.
+  - host-setup.md, "Registering a host in the directory" (the pop.hosts paragraph): check added, entry `host_setup_pop`. "Binding an existing directory to the installation" (the 03-15 `root sign --prev ...` mention): describes, nothing added.
+  - machine-identities.md, "Renewal needs pop.machines": check added, entry `machine_identities_pop`.
+  - revoke.md ("Before you start", the installation-ID upgrade by `root sign --prev ... --installation-id new`, pointing at 03-15): defers, nothing added.
+  - signer-install.md (the vTPM custody passage): describes, nothing added; the grep finds no other passage there.
+  - ceremony-transcript-template.md: the Purpose row and the new `Agreed policy change` row, entry `transcript_template`.
+- **TestRootCeremonyPolicyChecks.** All 11 entries pass, plus its `output_prefixes` subtest (each of the 9 quoted prefixes occurs in a helper section and in a ceremony golden). TestSectionWindowRefusals refuses each of its three fixtures (duplicated_marker, missing_marker, end_before_start). TestHostSetupSignerCheck and TestHostSetupEffectiveSshdConfig still pass.
+- **The RED on origin/main's runbooks** (a detached worktree of the branch with `docs/runbooks` checked out from origin/main): every one of the 11 entries fails, and so does `output_prefixes` (8 of the 9 prefixes are quoted nowhere; `webauthn rp_id ` already was). `--- FAIL:` for genesis_step_4, rotation_step_3, rotation_step_4, change_the_policy_you_need, change_the_policy_step_3, change_the_policy_pop_item (marker `- **The PoP switches.**` occurs 0 times), change_the_policy_intro (no end line after `Before you confirm`), hardware_variant, transcript_template, host_setup_pop and machine_identities_pop. TestSectionWindowRefusals passes there. The worktree was removed.
+- **The runbook mutants** (each with the unmutated run passing, `go vet` 0, the named FAIL, no build or setup failure, restored byte for byte):
+  1. The pop item removed from "Change the policy": `--- FAIL: TestRootCeremonyPolicyChecks/change_the_policy_pop_item`. Killed.
+  2. The step-4 check removed from "Rotate the roots": `--- FAIL: TestRootCeremonyPolicyChecks/rotation_step_4`. Killed.
+  3. The independence clause removed from the transcript row and from "You need": `--- FAIL: TestRootCeremonyPolicyChecks/transcript_template` and `/change_the_policy_you_need`. Killed.
+  4. The Purpose row's edit reverted: `--- FAIL: TestRootCeremonyPolicyChecks/transcript_template`. Killed.
+- **The stale texts are gone.** root-ceremony.md no longer says that the RP is the only field you can change this way, and host-setup.md no longer says that no test runs `trust verify --prev` with a pop policy (the gate greps count 0).
+- **Pointer sentences** inserted once each, right after their anchors: 03-12, 03-13, 03-14 and the three 03-15 pointers. Numstat against origin/main: 03-12 4 4, 03-13 2 2, 03-14 2 2, 03-15 4 4, 03-16 1 1. 03-12's `depends_on` is `["03-14b"]`, and its first precondition ends with the `MSYS_NO_PATHCONV=1` clause.
+- **Totals corrected.** At b4e6b4c main held the ROADMAP's Phase 3 total `/33` against 34 plan rows and files, STATE's `total_plans: 68` against 69 PLAN files, and `Plan: 28 of 30` against 29 executed of 34. The publish edit wrote `29/35 plans executed in 34 waves`, the Progress row `29/35`, `total_plans: 70` and `Plan: 29 of 35`; after the tracking update: the Plans line `30/35 plans executed in 34 waves`, the Progress row `30/35`, `total_plans: 70`, `completed_plans: 65` and `Plan: 30 of 35`.
+- **The delta gate.** Against the re-measured base: cmd/keyroster 236.239 s (+3.258 s), internal/rootceremony 25.123 s (-0.026 s). Both are under the 90 s bound.
+- **The full gate.** The first run failed one test in a package this plan does not touch: `TestFetch/more_repolls_immediately` (internal/agent/fetch, a timing assertion of about one second, under the whole-module `-race` load). internal/agent is unchanged against origin/main, and the package then passed alone three times (`-count=3`). The full gate was run again from the start and passed: the whole-module tests under `-race`, every vet tag set, gofmt, golangci-lint (0 issues), capslock, dep-firewall, testonly-firewall and check-pinned-actions. In that run cmd/keyroster read 287.064 s and internal/rootceremony 31.874 s (pass or fail only).
+- **capslock.** No new pair. keyroster-signer reports 91 pairs against a baseline of 92 (`internal/signer CAPABILITY_RUNTIME` no longer reported; the script asks for a reviewed baseline tightening, which is out of this plan's scope). keyroster-agent and keyroster-agent-fetch match their baselines.
+
+## The PR and CI
+
+- **PR #98**, `fix(root): show the policy in force, each changed field and the PoP switches before a root signs (F04, F14)`, opened by keyroster-bot without auto-merge.
+- **Checks on 5d5f14e** (the head before this SUMMARY commit), all green: build-test, lint, capslock, cli-windows and cli-macos (run 42928187408, which also holds govulncheck, fuzz and dependency-firewall), e2e and e2e-probe (run 42928187670), e2e-distro (42928187937), e2e-pkcs11 (42928187234), e2e-tpm (42928187277), systemd-sandbox (42928187792), build-piv (42928188116), CodeQL (42928187719), pinned-actions (42928187471) and pr-title (42928187666).
+- **The house e2e gate in MODE=pr** passed for 5d5f14e: run 42928187670 is for HEAD; main lanes go test 768.538 s (9.5p1) and 803.973 s (10.5p1), both at or under 900 s; probe lanes 297.779 s and 290.418 s, with 03-11b's PASS lines.
+- **The e2e pin.** Both main lanes print `--- PASS: TestAuditLoginAcrossPolicyChange` (0.47 s on 9.5p1, 0.44 s on 10.5p1): the real binaries print the policy block and the pop line. The pin adds only assertions, so its time cost is negligible.
+- The final docs commit triggers the checks again; their result on the final head is reported with the hand-back.
+
+## Pre-merge review
+
+Not yet run: the orchestrator runs it on the green PR before Task 4 (T-03-329 to T-03-334), and its results go here.
+
+## What stays UNVERIFIED
+
+- Every runbook check in a real ceremony (CI only; 03-15's v4 ceremony is the first real use).
+- policyChange's two error returns at its call sites in runRootSign and verifySuccessorBundle: unreachable after the chain check (both documents parsed before), reasoned, not run.
+- checkBundleKeys's refusal on the successor path (tested on the genesis path only).
+- A successor built by a tool other than root sign.
+
+## Deviations from Plan
+
+- **The full gate's first run** failed `TestFetch/more_repolls_immediately` in internal/agent/fetch, a package this plan does not touch (a one-second timing assertion under whole-module `-race` load). It passed alone three times, and the whole gate was run again from the start and passed. No code changed.
+- **No 03-14b plan-head ledger existed** from Task 1; it was written at Task 3 with origin/main b4e6b4c, the branch's base, so `plan_head_before` is b4e6b4c.
+- Otherwise none: no contract fix, no golden correction, no file outside files_modified.
+
 ## Golden corrections
 
 none
 
-## Deviations from Plan
-
-None so far.
