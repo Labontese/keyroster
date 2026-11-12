@@ -1039,17 +1039,28 @@ structurally (see the warning above).
 
       Since 03-14c, recover also checks the installation and the clock
       (F06, F10). It refuses a restored export of another installation
-      than your config pins (`recovery_installation_other`: escalate, do
-      not release the hold). It refuses on a config that pins no
-      installation while the export names one
-      (`recovery_installation_not_pinned`: keep the hold, compare the ID
-      with the transcript's Installation ID line, re-run
-      `keyroster init --force --server <URL> --tls-pin <pin> --root-pin <fp> [--root-pin ...] --threshold <n> --user <name> [--admin-key <your admin key>]`,
-      then run recover again). It refuses an export dated ahead of the
-      clock (`recovery_clock_ahead`: keep the hold; if the signer's
-      journal shows a clock episode, wait until this machine's clock
-      passes the time named and run recover again; otherwise escalate).
-      (Run in CI: TestRevokeRecover. UNVERIFIED in a real restore.)
+      than your config pins, or than `--installation-id` gives, and a
+      config pin and an `--installation-id` that differ
+      (`recovery_installation_other`: escalate, do not release the hold).
+      It refuses on a config that pins no installation while the export
+      names one (`recovery_installation_not_pinned`). Then keep the hold
+      and run the same command again with `--installation-id <ID>`, the
+      ID on the ceremony transcript's Installation ID line. If that ID is
+      not the one the refusal names, escalate; do not release the hold.
+      `keyroster init` cannot pin it now, because it needs the server and
+      its signer, which the hold stops. `--installation-id` checks this
+      run only and is never written to your config, so once the hold is
+      released and the server answers, pin the installation:
+      `keyroster init --force --server <URL> --tls-pin <pin> --root-pin <fp> [--root-pin ...] --threshold <n> --user <name> [--admin-key <your admin key>]`.
+      It refuses an export dated ahead of the clock
+      (`recovery_clock_ahead`: keep the hold; if the signer's journal
+      shows a clock episode, wait until this machine's clock passes the
+      time named and run recover again; otherwise escalate). (Run in CI:
+      TestRevokeRecover, its `--installation-id` cases
+      flag_pins_unpinned_config, flag_other_installation_refused,
+      flag_conflicts_config_refused, flag_malformed_refused and
+      flag_id_less_exports_refused, and unpinned_config_refused.
+      UNVERIFIED in a real restore.)
 
    4. **Read the request back.** As root:
 
