@@ -164,6 +164,12 @@ func TestAuditVerifyInstallation(t *testing.T) {
 			t.Fatalf("no flag: exit %d, stdout %q, stderr %q; want a refusal naming %s and both flags, and no stdout", code, out, errOut, id)
 		}
 	})
+	t.Run("unbound_json_refused", func(t *testing.T) {
+		code, out, errOut := verify(export, "--json")
+		if code == 0 || out != "" || !strings.Contains(errOut, "names installation "+id+": pass --installation-id") {
+			t.Fatalf("--json and no flag: exit %d, stdout %q, stderr %q; want the refusal naming %s and no stdout", code, out, errOut, id)
+		}
+	})
 	t.Run("any_installation_prints_unchecked", func(t *testing.T) {
 		code, out, errOut := verify(export, "--any-installation")
 		want := "installation id: " + id + " (not checked: --any-installation)"
