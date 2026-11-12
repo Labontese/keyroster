@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -900,8 +901,87 @@ func TestRevokeRecover(t *testing.T) {
 		repin(t, s.e, "")
 		code, stdout, errOut := s.run(t)
 		if code == 0 || !strings.Contains(errOut, "refused (recovery_installation_not_pinned)") || !strings.Contains(errOut, "Keep the hold") ||
-			!strings.Contains(errOut, "--user") || fileExists(s.out) {
+			!strings.Contains(errOut, "names installation "+s.e.bundle.InstallationID) ||
+			!strings.Contains(errOut, "run keyroster revoke recover again with --installation-id") || fileExists(s.out) {
 			t.Fatalf("a config that pins no installation: exit %d:\n%s%s", code, stdout, errOut)
+		}
+	})
+	// --installation-id (03-14c, owner decision Q-R1, 2026-11-12): under
+	// the hold keyroster init cannot reach the server, so recover takes the
+	// ID from the ceremony transcript for this run; it never writes the
+	// config.
+	t.Run("flag_pins_unpinned_config", func(t *testing.T) {
+		s := newRecoverScenario(t)
+		if code, out, errOut := s.run(t); code != 0 {
+			t.Fatalf("a pinned config: exit %d:\n%s%s", code, out, errOut)
+		}
+		pinned := s.request(t)
+		repin(t, s.e, "")
+		s.out = filepath.Join(t.TempDir(), "recovery.req")
+		if code, out, errOut := s.run(t, "--installation-id", s.e.bundle.InstallationID); code != 0 || !fileExists(s.out) {
+			t.Fatalf("an unpinned config with --installation-id: exit %d:\n%s%s", code, out, errOut)
+		}
+		flagged := s.request(t)
+		for _, r := range []*wire.RecoveryRequest{pinned, flagged} {
+			r.RequestID, r.CreatedAt, r.Evidence = [16]byte{}, 0, nil
+		}
+		if !reflect.DeepEqual(pinned, flagged) {
+			t.Fatalf("the request under --installation-id differs from the one under a pinned config:\n%+v\n%+v", flagged, pinned)
+		}
+		if cfg, err := loadConfig(); err != nil || cfg.InstallationID != "" {
+			t.Fatalf("after recover the config pins %q (%v); want it unchanged, pinning none", cfg.InstallationID, err)
+		}
+	})
+	t.Run("flag_other_installation_refused", func(t *testing.T) {
+		s := newRecoverScenario(t)
+		repin(t, s.e, "")
+		code, stdout, errOut := s.run(t, "--installation-id", "fedcba9876543210fedcba9876543210")
+		if code == 0 || !strings.Contains(errOut, "refused (recovery_installation_other)") || !strings.Contains(errOut, "escalate") ||
+			!strings.Contains(errOut, "--installation-id") || fileExists(s.out) {
+			t.Fatalf("an unpinned config with another installation's --installation-id: exit %d:\n%s%s", code, stdout, errOut)
+		}
+	})
+	t.Run("flag_conflicts_config_refused", func(t *testing.T) {
+		const other = "fedcba9876543210fedcba9876543210"
+		for name, ids := range map[string][2]string{"config_restored_flag_other": {"", other}, "config_other_flag_restored": {other, ""}} {
+			t.Run(name, func(t *testing.T) {
+				s := newRecoverScenario(t)
+				pin, flagID := ids[0], ids[1]
+				if pin == "" {
+					pin = s.e.bundle.InstallationID
+				}
+				if flagID == "" {
+					flagID = s.e.bundle.InstallationID
+				}
+				repin(t, s.e, pin)
+				code, stdout, errOut := s.run(t, "--installation-id", flagID)
+				if code == 0 || !strings.Contains(errOut, "refused (recovery_installation_other)") || !strings.Contains(errOut, "escalate") ||
+					!strings.Contains(errOut, pin) || !strings.Contains(errOut, flagID) || fileExists(s.out) {
+					t.Fatalf("config pin %s, --installation-id %s: exit %d:\n%s%s", pin, flagID, code, stdout, errOut)
+				}
+			})
+		}
+	})
+	t.Run("flag_malformed_refused", func(t *testing.T) {
+		s := newRecoverScenario(t)
+		repin(t, s.e, "")
+		code, stdout, errOut := s.run(t, "--installation-id", strings.ToUpper(s.e.bundle.InstallationID))
+		if code != 2 || !strings.Contains(errOut, "revoke recover: --installation-id wants 32 lowercase hex digits") || fileExists(s.out) {
+			t.Fatalf("a malformed --installation-id: exit %d, want 2 and the usage error:\n%s%s", code, stdout, errOut)
+		}
+	})
+	t.Run("flag_id_less_exports_refused", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		genesis, _ := noIDBundles(t, e)
+		repin(t, e, "")
+		b := newLogBuilder(t, e, genesis)
+		b.issue(trust.RoleUser)
+		export := b.export(-1)
+		out := filepath.Join(t.TempDir(), "recovery.req")
+		code, stdout, errOut := run(t, "revoke", "recover", "--restored", export, "--saved", export, "--out", out, "--yes", "--installation-id", e.bundle.InstallationID)
+		if code == 0 || !strings.Contains(errOut, "refused (recovery_installation_other)") || !strings.Contains(errOut, "--installation-id") ||
+			strings.Contains(stdout, "nothing to recover") || fileExists(out) {
+			t.Fatalf("ID-less exports under --installation-id: exit %d:\n%s%s", code, stdout, errOut)
 		}
 	})
 	t.Run("id_less_exports_with_pin_refused", func(t *testing.T) {
