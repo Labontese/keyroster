@@ -4413,6 +4413,20 @@ func TestVerifyLeafTimeBound(t *testing.T) {
 			t.Fatalf("Verify = %+v, %v; want the no-checkpoint refusal, not ErrEntryAhead", rep, err)
 		}
 	})
+	t.Run("ahead_past_its_checkpoint_refused_as_such", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.micros = now + 3600*1_000_000
+		rf.addRefusal()
+		var buf bytes.Buffer // the checkpoint signs one entry fewer than the file holds
+		if _, err := Export(context.Background(), &buf, &memLog{leaves: rf.leaves, note: rf.checkpoint(len(rf.leaves) - 1)}); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := Verify(&buf, Options{Pins: rf.pins(), Threshold: 1, Now: now})
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "the checkpoint covers") {
+			t.Fatalf("Verify = %+v, %v; want the checkpoint-size refusal, not ErrEntryAhead", rep, err)
+		}
+	})
 	t.Run("zero_now_unbounded", func(t *testing.T) {
 		rf := newRevokeFixture(t)
 		c := rf.issue()
