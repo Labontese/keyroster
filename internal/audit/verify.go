@@ -1409,11 +1409,12 @@ var forgetOnlyKeys = map[string]bool{
 // than "index", "leaf", "decoded" and "checkpoint" written exactly so. On
 // a leaf line (leaf not nil) decoded must be an object whose "kind" is the
 // name of the leaf's kind, and on a line of another kind than host_forget
-// no key of forgetOnlyKeys may occur at any depth. No key of boundKeys may
-// occur anywhere but at the top level of decoded (checkBoundKeysBelowTop;
-// owner decision Q1, 2026-11-11). Then the parsed values of those keys
-// must be the leaf's own, or absent where the kind does not render them
-// (checkBoundValues).
+// no key of forgetOnlyKeys may occur at any depth. No key of topOnlyKeys
+// (boundKeys and "kind") may occur anywhere but at the top level of
+// decoded (checkBoundKeysBelowTop; owner decision Q1, 2026-11-11, and
+// for "kind" review item F4 under its rule). Then the parsed values of
+// boundKeys must be the leaf's own, or absent where the kind does not
+// render them (checkBoundValues).
 // Last, on every line, a key at any depth that is not lowercase ASCII
 // letters, digits and underscores, which is all Export writes, is refused,
 // in sorted key order. So a JSON reader, case-folding or not, reads each
@@ -1474,16 +1475,24 @@ func checkLineKeys(text []byte, leaf *tlog.Leaf) error {
 // kind or refuses, in the order checkBoundKeysBelowTop names them.
 var boundKeys = []string{"version", "directory", "sigs", "bundle_version", "import_krl_versions", "policy_version"}
 
-// checkBoundKeysBelowTop refuses a key of boundKeys anywhere on a leaf
+// topOnlyKeys are the keys checkBoundKeysBelowTop refuses below decoded's
+// top level, in the order it names them: boundKeys, then "kind", the
+// name a reader uses to interpret a line (03-14c, review item F4, under
+// owner decision Q1's rule). Export writes "kind" only at decoded's top
+// level: a revoke's entries name theirs entry_kind.
+var topOnlyKeys = append(slices.Clone(boundKeys), "kind")
+
+// checkBoundKeysBelowTop refuses a key of topOnlyKeys anywhere on a leaf
 // line except at the top level of decoded, after unescaping (03-14c;
 // owner decision Q1, 2026-11-11). Export writes each only there: decoded's
 // nested objects hold other names (counts the reason names, keys role,
 // alg, custody and fingerprint, a revoke's entries entry_kind, serial,
 // ca_fingerprint, valid_before, key_id and key_fingerprint). Written
-// escaped in a nested object, such a key passes the byte checks, and
-// checkBoundValues reads the top level only, but a recursive reader (jq
-// `..`) reads it. It walks every value of the line other than decoded, and
-// every value of decoded; a walk error refuses the line.
+// escaped (or, for "kind", spaced) in a nested object, such a key passes
+// the byte checks, and checkBoundValues reads the top level only, but a
+// recursive reader (jq `..`) reads it. It walks every value of the line
+// other than decoded, and every value of decoded; a walk error refuses
+// the line.
 func checkBoundKeysBelowTop(top, decoded map[string]json.RawMessage, what string) error {
 	below := map[string]bool{}
 	walk := func(raw json.RawMessage) error {
@@ -1507,7 +1516,7 @@ func checkBoundKeysBelowTop(top, decoded map[string]json.RawMessage, what string
 			return fmt.Errorf("%w (%s)", err, what)
 		}
 	}
-	for _, k := range boundKeys {
+	for _, k := range topOnlyKeys {
 		if below[k] {
 			return fmt.Errorf("its key %q is below the top level of decoded, where export never writes it (%s)", k, what)
 		}

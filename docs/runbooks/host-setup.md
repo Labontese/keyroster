@@ -2298,7 +2298,8 @@ enrolled host can (D-03); that is the leak this order accepts.
    `admin_fingerprints`). It also refuses any key that is not lowercase
    ASCII letters, digits and underscores, binds the parsed `version`,
    `policy_version` and the other bound fields to the entry, and refuses
-   those bound names below the top level of `decoded` (03-14c). So a JSON
+   those bound names and `kind` below the top level of `decoded`
+   (03-14c). So a JSON
    parser, also one that matches keys without regard to case, reads a
    `host_forget` only on a verified `host_forget` line (PR #75 review;
    03-14c). The fields say what
