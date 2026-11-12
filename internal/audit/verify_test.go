@@ -4427,6 +4427,43 @@ func TestVerifyLeafTimeBound(t *testing.T) {
 			t.Fatalf("Verify = %+v, %v; want the checkpoint-size refusal, not ErrEntryAhead", rep, err)
 		}
 	})
+	t.Run("ahead_edited_after_signing_root_mismatch", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.addRefusal()
+		signed := rf.checkpoint(len(rf.leaves)) // the log key signs the honest log
+		last := len(rf.leaves) - 1
+		l, err := tlog.DecodeLeaf(rf.leaves[last])
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.TimeMicros = now + 3600*1_000_000 // then the last entry is dated ahead
+		if rf.leaves[last], err = tlog.MarshalLeaf(l); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer // re-rendered from the edited leaf, under the honest checkpoint
+		if _, err := Export(context.Background(), &buf, &memLog{leaves: rf.leaves, note: signed}); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := Verify(&buf, Options{Pins: rf.pins(), Threshold: 1, Now: now})
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "root mismatch") {
+			t.Fatalf("Verify = %+v, %v; want the root mismatch, not ErrEntryAhead", rep, err)
+		}
+	})
+	t.Run("ahead_forked_from_previous_refused_as_such", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.addRefusal()
+		prev := rf.checkpoint(len(rf.leaves)) // bundle_install, refusal
+		rf.leaves = rf.leaves[:1]
+		rf.addRefusal() // a later time, so another entry 1: the log forks there
+		rf.micros = now + 3600*1_000_000
+		rf.addRefusal()
+		rep, err := verifyAt(rf, now, prev)
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "log rewritten") {
+			t.Fatalf("Verify = %+v, %v; want the rewrite refusal against Previous, not ErrEntryAhead", rep, err)
+		}
+	})
 	t.Run("zero_now_unbounded", func(t *testing.T) {
 		rf := newRevokeFixture(t)
 		c := rf.issue()
