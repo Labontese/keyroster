@@ -765,13 +765,17 @@ func certTypeName(t uint32) string {
 //     it is signed by the log key of the root-signed bundle
 //   - with opts.Previous, the log neither shrank nor rewrote the entries
 //     that checkpoint covered
+//   - with opts.Now, no entry is dated more than krl.PruneMargin (300 s)
+//     after the verifier's clock (03-14c, F10): leaf times never go back,
+//     so the last entry is checked, and the refusal wraps ErrEntryAhead.
+//     It is checked after the checkpoint, the root and opts.Previous
+//     (03-14c, review item F2), so the refusal means a log the log key
+//     signed, and the time it names is one the signer logged, not one a
+//     forger chose
 //   - with opts.InstallationID, the trust bundle in force at the end of
 //     the log names exactly that installation ID (03-14c, F05), checked
 //     after every other check, so this refusal means a valid log of
 //     another installation, or of one whose bundle names none
-//   - with opts.Now, no entry is dated more than krl.PruneMargin (300 s)
-//     after the verifier's clock (03-14c, F10): leaf times never go back,
-//     so the last entry is checked, and the refusal wraps ErrEntryAhead
 //
 // Login issuances are re-proven from the log, as above: a signer holding
 // the CA key and the log key cannot log a login certificate that passes
@@ -1111,17 +1115,6 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("audit: read export: %w", err)
 	}
-	// The verifier's clock (03-14c, F10). Leaf times never go back, so the
-	// last entry is the latest, and the log verifies again once this clock
-	// reaches its time minus the allowance.
-	if opts.Now != 0 && lastTime > opts.Now+maxLeafAheadMicros {
-		rfc := func(us uint64) string { return time.UnixMicro(int64(us)).UTC().Format(time.RFC3339Nano) } //nolint:gosec // G115: for display only
-		return nil, &entryAheadError{fmt.Sprintf("audit: entry %d (%s), the last, is more than %d s after this verifier's clock %s (its time is %s): "+
-			"a KRL published at that time could leave out revocations of certificates that are still valid. "+
-			"The signer never dates a later entry before an earlier one, so correcting its clock does not clear this: it clears when this clock reaches %s. "+
-			"Check the signer's journal and the log's clock_regression entries for a clock episode; without one, treat the signer as compromised",
-			lastIndex, lastKind, maxLeafAheadMicros/1_000_000, rfc(opts.Now), rfc(lastTime), rfc(lastTime-maxLeafAheadMicros))}
-	}
 	if err := revs.finish(); err != nil {
 		return nil, err
 	}
@@ -1175,6 +1168,20 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		if !bytes.Equal(oldRoot, prev.Root) {
 			return nil, fmt.Errorf("audit: log rewritten: the first %d entries do not reproduce the previous checkpoint", prev.Size)
 		}
+	}
+	// The verifier's clock (03-14c, F10), once the log is authenticated:
+	// after the checkpoint, the root and opts.Previous (review item F2), so
+	// the time it names is one the log key signed, and before the
+	// installation binding, which refuses only a valid log. Leaf times
+	// never go back, so the last entry is the latest, and the log verifies
+	// again once this clock reaches its time minus the allowance.
+	if opts.Now != 0 && lastTime > opts.Now+maxLeafAheadMicros {
+		rfc := func(us uint64) string { return time.UnixMicro(int64(us)).UTC().Format(time.RFC3339Nano) } //nolint:gosec // G115: for display only
+		return nil, &entryAheadError{fmt.Sprintf("audit: entry %d (%s), the last, is more than %d s after this verifier's clock %s (its time is %s): "+
+			"a KRL published at that time could leave out revocations of certificates that are still valid. "+
+			"The signer never dates a later entry before an earlier one, so correcting its clock does not clear this: it clears when this clock reaches %s. "+
+			"Check the signer's journal and the log's clock_regression entries for a clock episode; without one, treat the signer as compromised",
+			lastIndex, lastKind, maxLeafAheadMicros/1_000_000, rfc(opts.Now), rfc(lastTime), rfc(lastTime-maxLeafAheadMicros))}
 	}
 	// The installation binding (03-14c, F05), last, against the bundle in
 	// force: VerifySuccessor carries its installation ID unchanged once
