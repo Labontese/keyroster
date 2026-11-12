@@ -4385,6 +4385,34 @@ func TestVerifyLeafTimeBound(t *testing.T) {
 			t.Fatalf("Verify = %+v, %v; want ErrEntryAhead naming the clear time", rep, err)
 		}
 	})
+	// The bound runs only on an authenticated log (03-14c, review item
+	// F2): a file a forger dated ahead is refused for what it is, not as
+	// the signer's clock running ahead at a time the forger chose.
+	t.Run("ahead_under_foreign_pins_not_anchored", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.micros = now + 3600*1_000_000
+		rf.addRefusal()
+		foreign := []string{ssh.FingerprintSHA256(newSigner(t, "ed25519").PublicKey())}
+		rep, err := Verify(strings.NewReader(join(rf.lines())), Options{Pins: foreign, Threshold: 1, Now: now})
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "not anchored in the pinned roots") {
+			t.Fatalf("Verify = %+v, %v; want the anchor refusal, not ErrEntryAhead", rep, err)
+		}
+	})
+	t.Run("ahead_without_checkpoint_refused_as_such", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.micros = now + 3600*1_000_000
+		rf.addRefusal()
+		lines := rf.lines()
+		if !strings.Contains(lines[len(lines)-1], `"checkpoint"`) {
+			t.Fatalf("the last line is not the checkpoint line:\n%s", lines[len(lines)-1])
+		}
+		rep, err := Verify(strings.NewReader(join(lines[:len(lines)-1])), Options{Pins: rf.pins(), Threshold: 1, Now: now})
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "the export has no checkpoint line") {
+			t.Fatalf("Verify = %+v, %v; want the no-checkpoint refusal, not ErrEntryAhead", rep, err)
+		}
+	})
 	t.Run("zero_now_unbounded", func(t *testing.T) {
 		rf := newRevokeFixture(t)
 		c := rf.issue()
