@@ -2,19 +2,19 @@
 phase: 03-linux-agent-and-revocation
 plan: 14c
 status: in-progress
-plan_head_before: 3da914f08220420b5b4604d6f867f594e476e0be
+plan_head_before: 5328ff90dfd0dba50432a734270343cf40f6d2dd
 ---
 
 # Phase 3 Plan 14c: Installation binding for audit verify and the CLI (draft)
 
-test-time base: cmd=259.024 audit=89.177 serverclient=3.989 at=1794409348
+test-time base: cmd=265.349 audit=88.926 serverclient=4.048 at=1794454467
 
 ## Hand-over (session 1 stopped after Task 1)
 
 - Session 1 did Task 1 (F05) only, as the Budget plans: one continuation after Task 1.
 - That continuation (session 2) started at Task 2 and handed over again after it; see "Hand-over (session 2 stopped after Task 2)" below.
 - The plan file is in the phase directory and **untracked**: it was copied byte for byte (`cmp` clean) and is committed only by Task 4's publish edit 1. Re-copy it with `cmp` if it is missing.
-- Plan-head ledger: `.git/gsd-plan-head-before-03-14c` holds 3da914f08220420b5b4604d6f867f594e476e0be (origin/main at the start). The SUMMARY's `commits:` is `git rev-list --count 3da914f..HEAD`.
+- Plan-head ledger: `.git/gsd-plan-head-before-03-14c` held 3da914f08220420b5b4604d6f867f594e476e0be (origin/main at the start). The branch was then rebased onto 5328ff9 (#100, toolchain go1.27.4), so the ledger and `plan_head_before` now hold 5328ff90dfd0dba50432a734270343cf40f6d2dd, and the SUMMARY's `commits:` is `git rev-list --count 5328ff9..HEAD`. Every commit hash this SUMMARY cites is the rebased commit, matched by `git patch-id --stable` (see "Pre-merge review 1").
 - Test-time base: the line above was measured in session 1, in the WSL boot that was up at the time. The continuation is another session, so Task 4's delta gate must re-measure the base first. Run it on origin/main in a detached worktree outside the repository, then replace the line in place (Q-09-3).
 - Branch `p03/14c-installation-binding` is pushed. No PR is open yet; Task 4 opens it.
 
@@ -32,8 +32,8 @@ test-time base: cmd=259.024 audit=89.177 serverclient=3.989 at=1794409348
 
 ## Task 1 (F05, Q-C7): done
 
-- **R1** b21d7ca `test(audit): pin installation binding of audit verify (F05)`, signed.
-- **T1** a419d6e `fix(audit): bind audit verify to one installation and print its ID (F05)`, signed.
+- **R1** 9dae124 `test(audit): pin installation binding of audit verify (F05)`, signed.
+- **T1** c69682a `fix(audit): bind audit verify to one installation and print its ID (F05)`, signed.
 
 **Declarations R1 added (behaviour unchanged):**
 - `audit.Options.InstallationID` (documented, ignored by Verify);
@@ -76,8 +76,8 @@ test-time base: cmd=259.024 audit=89.177 serverclient=3.989 at=1794409348
 
 ## Task 2 (F06, Q-C3 A): done
 
-- **R2** 3797f4c `test(cli): pin the CLI's installation pin and trust verify's installation line (F06)`, signed.
-- **T2** 7c50a92 `fix(cli): pin the installation ID at init and refuse another installation's bundle (F06)`, signed.
+- **R2** 31c0068 `test(cli): pin the CLI's installation pin and trust verify's installation line (F06)`, signed.
+- **T2** 703de74 `fix(cli): pin the installation ID at init and refuse another installation's bundle (F06)`, signed.
 
 **Declarations R2 added (behaviour unchanged):**
 - `Config.InstallationID` (`installation_id,omitempty`);
@@ -149,8 +149,8 @@ Cumulative: 13 of 13 mutants killed (Task 1: 5, Task 2: 8).
 
 ## Task 3 (F10, Q-C4 B; PR #75 review follow-ups): done
 
-- **R3** ce47d25 `test(audit): pin the verifier-clock bound and the export-line key rules (F10)`, signed.
-- **T3** 1f8830e `fix(audit): refuse entries dated past the verifier's clock and export keys a reader would fold (F10)`, signed.
+- **R3** df0167a `test(audit): pin the verifier-clock bound and the export-line key rules (F10)`, signed.
+- **T3** f1c6b1d `fix(audit): refuse entries dated past the verifier's clock and export keys a reader would fold (F10)`, signed.
 
 **Declarations R3 added (behaviour unchanged):**
 - `audit.Options.Now` (documented, ignored by Verify);
@@ -261,8 +261,8 @@ Cumulative: 33 of 33 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20).
   - All 14 writes of the six names go to decodeLeaf's top-level `m`.
 
 **Commits:**
-- **R4** d18f25f `test(audit): pin the refusal of bound export keys below decoded's top level`, signed. It is test only and adds no declaration.
-- **T4** e8f367a `fix(audit): refuse bound export keys anywhere but at decoded's top level`, signed.
+- **R4** 10dbe98 `test(audit): pin the refusal of bound export keys below decoded's top level`, signed. It is test only and adds no declaration.
+- **T4** cc49145 `fix(audit): refuse bound export keys anywhere but at decoded's top level`, signed.
 
 **RED from a worktree of R4.** `go vet` exits 0, with no `[build failed]` or `[setup failed]`. All six cases end in `--- FAIL:`, and the export verifies with no error:
 - TestVerifyBoundKeysBelowTop/version_on_directory_install
@@ -308,7 +308,7 @@ Two of the keys are required on their kind: `bundle_version` on bundle_install (
 
 `sigs` is not required on directory_install. checkReplayFields returns nil when neither plain key occurs, so spaced keys reach the branch with no other check involved.
 
-**Cases** (commit **B** c2ffcfb, `test(audit): cover the sigs, bundle_version and import_krl_versions value checks`, signed; test only, no fix commit). Each passes on b2e8dee's code and at T4: they cover existing branches. The b2e8dee run used a throwaway worktree, which was removed.
+**Cases** (commit **B** e3b2033, `test(audit): cover the sigs, bundle_version and import_krl_versions value checks`, signed; test only, no fix commit). Each passes on 767d7e0's code and at T4: they cover existing branches. The 767d7e0 run used a throwaway worktree, which was removed.
 - TestVerifyBoundValues/spaced_sigs_refused, on line 2 (directory_install v2). Both keys are spaced, the directory keeps the leaf's own value and sigs gets another.
 - TestVerifyBoundValues/bundle_version_value_refused, on line 0 (bundle_install). It carries `"bundle_version" :2` and the top-level key `x\"bundle_version` with 1.
 - TestVerifyRecoveryImportVersions/parsed_value_refused. It carries `"import_krl_versions" :[7,20]` and the top-level key `x\"import_krl_versions` with [7,19].
@@ -335,11 +335,11 @@ Cumulative: 37 of 37 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20, session 4
 - 03-14b is the only plan at wave 29.
 
 **Commits:**
-- b560970 `docs(runbooks): name and bind the installation in audit verify and the CLI's pin, and the clock bound (F05, F06, F10)`.
-- 376718c `docs(03-14c): publish the plan, point 03-12, 03-13, 03-15 and 03-16 at it, correct the 03-08c SUMMARY, and shift the later waves`. This commit adds this plan, unchanged.
-- 81a7966 `test(cli): state the re-pin paragraph rule without a negated conjunction`. The full gate's golangci-lint (staticcheck QF1001) flagged b560970's new condition in TestRepinInstructionsKeepIdentity. The fix rewrites the condition and leaves its meaning unchanged.
+- c3d8a84 `docs(runbooks): name and bind the installation in audit verify and the CLI's pin, and the clock bound (F05, F06, F10)`.
+- 35ff908 `docs(03-14c): publish the plan, point 03-12, 03-13, 03-15 and 03-16 at it, correct the 03-08c SUMMARY, and shift the later waves`. This commit adds this plan, unchanged.
+- c1ef372 `test(cli): state the re-pin paragraph rule without a negated conjunction`. The full gate's golangci-lint (staticcheck QF1001) flagged c3d8a84's new condition in TestRepinInstructionsKeepIdentity. The fix rewrites the condition and leaves its meaning unchanged.
 
-**Runbook texts.** Each new text names its CI tests and carries an UNVERIFIED label. The line numbers are at 81a7966.
+**Runbook texts.** Each new text names its CI tests and carries an UNVERIFIED label. The line numbers are at c1ef372.
 - **Audit verify commands.** All ten audit verify command lines gain ` --installation-id <installation id>` after `--threshold 1`:
   - signer-install.md:791, 810, 844, 846, 1107, 1109, 1616 and 1618;
   - root-ceremony.md:464;
@@ -386,11 +386,11 @@ Cumulative: 37 of 37 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20, session 4
 - TestRestoreRunbookChecks (`-tags e2e`, a document check) passes locally too.
 - Verify commands 1, 4 (static part), 5 and 6, and the authorship and signature check, exit 0. The privacy, IP and title gate (command 9) exits 0 on the diff, the log and PR #99's title and body.
 
-**Delta gate** (base above, at 81a7966's tree; load average 0.19 at the start): cmd/keyroster 244.954 s (base 259.024), internal/audit 93.261 s (base 89.177, +4.1) and internal/serverclient 4.185 s (base 3.989). It exits 0.
+**Delta gate** (session 4's base, cmd 259.024 / audit 89.177 / serverclient 3.989; load average 0.19 at the start). Correction (pre-merge review 1): it ran at 8ac9f14, the first form of the publish commit, not at the re-pin rule fix's tree (81a7966 before the rebase, c1ef372 after it). The pre-push rework then remade 8ac9f14 as 376718c, which the rebase made 35ff908; 8ac9f14 itself has no rebased equivalent (its patch-id matches no commit on the branch). Readings: cmd/keyroster 244.954 s (base 259.024), internal/audit 93.261 s (base 89.177, +4.1) and internal/serverclient 4.185 s (base 3.989). It exits 0.
 
 **Full gate:**
-- The first run exits 1 on the two staticcheck QF1001 lines fixed in 81a7966. Every `go test` package was ok.
-- The second run, at 81a7966, exits 0: `go test -race ./...` (36 ok; cmd/keyroster 274.543 s, internal/audit 114.879 s, internal/serverclient 6.252 s, internal/signer 491.720 s, internal/agent/apply 694.227 s), every vet tag (e2e_pkcs11 and e2e_tpm included), gofmt, golangci-lint (0 issues), capslock, dep-firewall, testonly-firewall and check-pinned-actions.
+- The first run exits 1 on the two staticcheck QF1001 lines fixed in c1ef372. Every `go test` package was ok.
+- The second run, at c1ef372, exits 0: `go test -race ./...` (36 ok; cmd/keyroster 274.543 s, internal/audit 114.879 s, internal/serverclient 6.252 s, internal/signer 491.720 s, internal/agent/apply 694.227 s), every vet tag (e2e_pkcs11 and e2e_tpm included), gofmt, golangci-lint (0 issues), capslock, dep-firewall, testonly-firewall and check-pinned-actions.
 - capslock reports no new pair. keyroster-signer reads 91 against a baseline of 92 (`internal/signer CAPABILITY_RUNTIME` no longer reported). That stale pair predates this plan.
 
 **PR #99**, https://github.com/Labontese/keyroster/pull/99, was opened by keyroster-bot with the plan's title and no auto-merge.
@@ -398,4 +398,160 @@ Cumulative: 37 of 37 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20, session 4
 **Not done in this session:**
 - The tracking update and the gates that run after it, the publish gate (command 7) and the ROADMAP gate (command 8). Before the update they fail by design: `completed_plans` reads 65 and the 03-14c row is unchecked.
 - The final `docs(03-14c): complete installation-binding plan` commit and the pre-merge review (Task 4 step 5). Both are the orchestrator's.
+
+## Pre-merge review 1 (PR #99): the fix round
+
+The branch was rebased onto 5328ff9 (#100, toolchain go1.27.4) before the review. The review's five items are F1 to F5 below. Every commit is authored by Daniel Gustafsson, committed by keyroster-bot and signed. Each item has a RED `test(...)` commit, then a `fix(...)` commit where code changed. F3 is test only, because its code was already right.
+
+**Commits:**
+- 855b9c9 `test(cli): pin revoke recover's --installation-id for an unpinned config under the hold` (F1 RED).
+- 9b58480 `fix(cli): let revoke recover take the installation ID from --installation-id under the hold` (F1).
+- 8b610c8 `docs(runbooks): give recover's --installation-id for an unpinned config under the hold` (F1 runbook).
+- 52c39a0 `test(audit): pin that the clock bound refuses only an authenticated log` (F2 RED).
+- 67b612e `fix(audit): bound the verifier's clock only once the log is authenticated` (F2).
+- ab45137 `test(audit): pin the clock bound after the checkpoint's size check too` (F2, a further case).
+- 8b45c65 `test(cli): pin audit verify --json's refusal of an unbound installation log` (F3).
+- 9b5b58b `test(audit): pin the refusal of a kind key below decoded's top level` (F4 RED).
+- b40e72b `fix(audit): refuse a kind key below decoded's top level` (F4).
+
+### F1: recover's `--installation-id` (owner decision Q-R1, Daniel, 2026-11-12)
+
+**Problem.** `recovery_installation_not_pinned` told the admin to re-run keyroster init. Under the restore hold that cannot work: init needs the server (observeRoots, TrustUnpinned) before it saves, the hold stops keyroster-server and keyroster-signer, and the trust endpoint answers 503 without the signer.
+
+**Change** (cmd/keyroster/recover.go):
+- `--installation-id ID`. A value that is not 32 lowercase hex digits (`trust.IsInstallationID`) is a usage error (exit 2, `revoke recover: --installation-id wants 32 lowercase hex digits`). It is checked right after the required-flags check, before `--out` is looked at and before anything is read.
+- Step 4 keeps its order:
+  1. `recovery_installation_lost` first, unchanged.
+  2. Then the effective pin: the config's when it has one, otherwise the flag's. A config pin and a flag that differ are refused `recovery_installation_other` with recover's own text: "your saved config pins installation X, but --installation-id gives Y; escalate, do not release the hold".
+  3. Then `CheckInstallationPin(pin, installation, version)`, with the existing mapping. An empty pin under a bundle that names an ID stays `recovery_installation_not_pinned`. Its text is now recover's own: "the restored export's trust bundle vN names installation X, and your saved config pins no installation ID. Keep the hold and run keyroster revoke recover again with --installation-id <the ID on the ceremony transcript's Installation ID line>. If that ID is not X, escalate; do not release the hold".
+  4. A mismatch whose pin came from the flag gets recover's own `recovery_installation_other` text, which names the flag, because CheckInstallationPin's text says "your config pins". A mismatch of the config's own pin keeps the existing text.
+- The flag is never written to the config. keyroster init (init.go) is the only caller of saveConfig outside tests, so nothing saves the config after recover. flag_pins_unpinned_config asserts that the config still pins none afterwards.
+
+**Point 6, a flag under ID-less exports.** Config unpinned, `--installation-id Y`, neither export's bundle has an ID, and no `--krl`:
+- `recovery_installation_lost` does not apply, because the saved export has no ID and no `--krl` was given.
+- `CheckInstallationPin(Y, "")` is a mismatch, so the result is `recovery_installation_other` ("the restored export's trust bundle vN names no installation ID, but --installation-id gives Y; escalate, do not release the hold"), and `nothing to recover` is not printed.
+- This matches the existing id_less_exports_with_pin_refused, where a pinned config meets ID-less exports. The admin asserts an installation the exports do not name, so these exports are not that installation's log. If a lost bundle had added the ID, the saved export or a `--krl` copy would show it, and `recovery_installation_lost` would refuse first.
+- No new refusal code. Pinned by flag_id_less_exports_refused.
+
+**Tests** (TestRevokeRecover):
+- flag_pins_unpinned_config: the request equals the one a pinned config writes (RequestID, CreatedAt and Evidence zeroed), and the config still pins none afterwards.
+- flag_other_installation_refused.
+- flag_conflicts_config_refused/{config_restored_flag_other, config_other_flag_restored}: both directions, each asserting both IDs in the text.
+- flag_malformed_refused: exit 2 exactly, plus the usage message.
+- flag_id_less_exports_refused.
+- unpinned_config_refused now asserts the restored ID and `run keyroster revoke recover again with --installation-id` instead of `--user`.
+
+**RED at 855b9c9:** every new case and unpinned_config_refused fail, the flag cases with `flag provided but not defined: -installation-id`. flag_malformed_refused fails on the message: it gets exit 2, but for the undefined flag. Its real RED is mutant M-F1-3.
+
+**Mutants** (`-timeout 5m`, `go vet` exit 0, each restored and checked against HEAD's blob addb242, sha256 prefix 11a798104a23eb7d):
+- M-F1-1, the flag ignored (`if false && *installationID != ""`): killed by flag_pins_unpinned_config, flag_other_installation_refused, flag_conflicts_config_refused/config_restored_flag_other and flag_id_less_exports_refused.
+- M-F1-2, the conflict check dropped: killed by flag_conflicts_config_refused/config_other_flag_restored. With one direction only, it would have survived.
+- M-F1-3, the format check dropped: killed by flag_malformed_refused (exit 1, recovery_installation_other, instead of the usage error).
+
+**Runbook** (signer-install.md, 2b part 3, the paragraph after the first `revoke recover`):
+- Old: "It refuses a restored export of another installation than your config pins (`recovery_installation_other`: escalate, do not release the hold). It refuses on a config that pins no installation while the export names one (`recovery_installation_not_pinned`: keep the hold, compare the ID with the transcript's Installation ID line, re-run `keyroster init --force ...`, then run recover again). ... (Run in CI: TestRevokeRecover. UNVERIFIED in a real restore.)"
+- New: "It refuses a restored export of another installation than your config pins, or than `--installation-id` gives, and a config pin and an `--installation-id` that differ (`recovery_installation_other`: escalate, do not release the hold). It refuses on a config that pins no installation while the export names one (`recovery_installation_not_pinned`). Then keep the hold and run the same command again with `--installation-id <ID>`, the ID on the ceremony transcript's Installation ID line. If that ID is not the one the refusal names, escalate; do not release the hold. `keyroster init` cannot pin it now, because it needs the server and its signer, which the hold stops. `--installation-id` checks this run only and is never written to your config, so once the hold is released and the server answers, pin the installation: `keyroster init --force ... --user <name> [--admin-key <your admin key>]`. ... (Run in CI: TestRevokeRecover, its `--installation-id` cases flag_pins_unpinned_config, flag_other_installation_refused, flag_conflicts_config_refused, flag_malformed_refused and flag_id_less_exports_refused, and unpinned_config_refused. UNVERIFIED in a real restore.)"
+- The clock-ahead sentence is unchanged. The re-pin command stays in the paragraph, moved to after the hold: TestRepinInstructionsKeepIdentity requires signer-install.md to keep one re-pin paragraph with `--user` and `--admin-key`, and the publish check requires the literal `keyroster init --force --server <URL>`. No other runbook gave the init remedy for this refusal. revoke.md:530 is the general CLI's ErrInstallationNotPinned row, which needs a server anyway, so it stays (the review refuted that change).
+- No test pinned the old sentence. TestRestoreRunbookChecks' ordered strings (the recover command block included) are untouched, and it passes (`-tags e2e`), as do TestHostTrustRunbooks, TestRepinInstructionsKeepIdentity and TestRootCeremonyPolicyChecks.
+
+### F2: the clock bound only on an authenticated log
+
+**Deviation from the plan** (review item F2): the plan placed the bound "once, after the loop and the scanner's error check". There, a file under foreign roots, without a checkpoint, or edited after signing, and dated ahead, was reported as the signer's clock running ahead (recover: `recovery_clock_ahead`), at a time the forger chose. The bound now runs after the opts.Previous comparison and before the installation binding. The binding stays last, because Verify's doc says its refusal means a valid log. Verify's doc comment lists the bound before the binding and says why.
+
+**Tests** (TestVerifyLeafTimeBound):
+- ahead_under_foreign_pins_not_anchored: gets the anchor refusal, not ErrEntryAhead.
+- ahead_without_checkpoint_refused_as_such: gets the no-checkpoint refusal.
+- ahead_past_its_checkpoint_refused_as_such (ab45137): a checkpoint that signs one entry fewer gets "the checkpoint covers", which pins the bound after OpenCheckpoint too.
+- forward_dated_republish_refused and every recover and audit verify clock test pass: TestRevokeRecover, TestAuditVerifyClock and all of `./internal/audit`.
+
+**RED at 52c39a0:** both cases fail with ErrEntryAhead's text.
+
+**Mutants:**
+- M-F2-1, the bound moved back to right after `sc.Err()` (52c39a0's verify.go): killed by ahead_under_foreign_pins_not_anchored and ahead_without_checkpoint_refused_as_such.
+- M-F2-2, the bound right after the anchor check, before OpenCheckpoint: killed by ahead_past_its_checkpoint_refused_as_such.
+- Both restored, blob checked against HEAD (sha256 prefix e9011362bd9b54d0).
+
+### F3: `audit verify --json` without an installation flag
+
+unbound_json_refused (TestAuditVerifyInstallation) runs `--json` with neither flag on the installation-bound export. It asserts a non-zero exit, empty stdout, and the `--installation-id` refusal on stderr. It passes on the code as it is.
+
+**RED with mutant M-F3** (`if !*asJSON && rep.Bundle != nil && ...` at cmd/keyroster/audit.go:119, `go vet` exit 0): `--- FAIL: TestAuditVerifyInstallation/unbound_json_refused`. Restored, blob 5b50338 checked, sha256 prefix 79181b223ca235c1.
+
+### F4: a `kind` key below decoded's top level (orchestrator extension under owner decision Q1's rule)
+
+**Precondition.** Export writes `kind` only at decoded's top level:
+- export.go:124 is the only `"kind"` write;
+- a revoke's entries use `entry_kind` (:320, :325, :330);
+- no tlog reason name is `kind`.
+
+**Probe** (a throwaway test, not committed) of each kind on the login fixture:
+- a plain nested `"kind":"clock_regression"` is already refused by checkGrepFields' `Count == 1` byte check, on every kind;
+- the escaped `"kin\u0064":...` and the spaced `"kind" :...` passed every check.
+
+**Change.**
+- `topOnlyKeys` is boundKeys plus `"kind"`, and checkBoundKeysBelowTop refuses its names. boundKeys stays exactly the names checkBoundValues binds.
+- The docs of checkLineKeys, boundKeys, topOnlyKeys and checkBoundKeysBelowTop are updated.
+- host-setup.md:2301. Old: "and refuses those bound names below the top level of `decoded` (03-14c)". New: "and refuses those bound names and `kind` below the top level of `decoded` (03-14c)".
+
+**Cases** (TestVerifyBoundKeysBelowTop):
+- kind_plain_on_directory_install, the byte check's refusal, which passes before and after;
+- kind_escaped_on_directory_install;
+- kind_spaced_on_directory_install;
+- kind_escaped_on_revocation_recovery.
+
+The escapes are written as bytes in Go raw strings with perl `chr(92)`. `od -c` shows `k i n \ u 0 0 6 4`, and `grep -c '[\]u00'` counts both new lines.
+
+**RED at 9b5b58b:** the three escaped or spaced cases fail, each verifying with no error.
+
+**Mutant M-F4** (`topOnlyKeys = slices.Clone(boundKeys)`): killed by those three. Restored, blob 409de3f checked, sha256 prefix 11861b55ca5057b6.
+
+Observation, out of scope: the byte checks match `"key":` without spacing, so a spaced duplicate of another bound key also passes them. checkBoundValues and checkBoundKeysBelowTop parse the line, so they still bind or refuse such a key.
+
+### F5: this SUMMARY after the rebase
+
+- Every cited hash is mapped to its rebased commit. Each pair has the same `git patch-id --stable`:
+
+  | before | after |
+  |---|---|
+  | b21d7ca | 9dae124 |
+  | a419d6e | c69682a |
+  | 3797f4c | 31c0068 |
+  | 7c50a92 | 703de74 |
+  | ce47d25 | df0167a |
+  | 1f8830e | f1c6b1d |
+  | d18f25f | 10dbe98 |
+  | e8f367a | cc49145 |
+  | c2ffcfb | e3b2033 |
+  | b2e8dee | 767d7e0 |
+  | b560970 | c3d8a84 |
+  | 376718c | 35ff908 |
+  | 81a7966 | c1ef372 |
+
+- 8ac9f14 (the publish commit's first form) has no rebased equivalent. 3da914f stays where it names origin/main at the time.
+- `plan_head_before` and the ledger are 5328ff9, and the commit count is `git rev-list --count 5328ff9..HEAD`.
+- The delta-gate note in Task 4 is corrected: it ran at 8ac9f14, not at c1ef372's tree.
+
+### Gates of the fix round
+
+- **Test-time base, re-measured** before the delta gate, on origin/main 5328ff9 (go1.27.4) in a detached worktree outside the repository, removed afterwards. Load average 0.34 at the start. Readings: cmd 265.349 s, audit 88.926 s, serverclient 4.048 s. The `test-time base:` line was replaced in place, so there is still one.
+- **Delta gate** at b40e72b, the last code commit (load average 0.67 at the start), exits 0:
+  - cmd/keyroster 251.347 s (-14.0);
+  - internal/audit 97.584 s (+8.7);
+  - internal/serverclient 4.234 s (+0.2).
+- **Full gate** at b40e72b exits 0:
+  - `go test -race ./...`: 36 ok, no FAIL or DATA RACE. cmd/keyroster 338.597 s, internal/audit 115.188 s, internal/serverclient 6.580 s, internal/signer 508.558 s, internal/agent/apply 646.248 s.
+  - Every vet tag, gofmt, golangci-lint (0 issues), capslock, dep-firewall, testonly-firewall and check-pinned-actions. capslock reports no new pair; keyroster-signer reads 91 against 92, the same stale pair as before.
+- **Runbook gate** (Task 4's runbook command) exits 0. TestRestoreRunbookChecks (`-tags e2e`) passes.
+- **CI** at b40e72b. Run IDs:
+  - CI 43150268437, with build-test, lint, govulncheck, fuzz, capslock, cli-windows and cli-macos;
+  - E2E 43150268321;
+  - E2E distro 43150268326;
+  - E2E PKCS#11 43150268329;
+  - E2E TPM 43150268342;
+  - PIV 43150268384;
+  - Systemd 43150268511;
+  - CodeQL 43150268448;
+  - PR title 43150268335;
+  - Workflow lint 43150268330.
+  - All 29 checks passed without a rerun, govulncheck (45 s) and fuzz included. This docs-only SUMMARY commit gets its own run on PR #99.
 
