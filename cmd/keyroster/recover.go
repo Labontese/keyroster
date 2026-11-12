@@ -70,11 +70,11 @@ type lostCert struct {
 }
 
 // runRevokeRecover is keyroster revoke recover --restored FILE --saved FILE
-// [--krl FILE ...] [--revoke-lost SERIAL ...] [--yes] [--admin-key FP]
-// --out FILE (03-06b). It runs offline, as a policy admin, and prepares
-// and signs the recovery of the revocations a signer restore lost, which
-// keyroster-signer recover-revocations applies under the hold. Every input
-// is read before anything is decided:
+// [--krl FILE ...] [--revoke-lost SERIAL ...] [--installation-id ID] [--yes]
+// [--admin-key FP] --out FILE (03-06b). It runs offline, as a policy
+// admin, and prepares and signs the recovery of the revocations a signer
+// restore lost, which keyroster-signer recover-revocations applies under
+// the hold. Every input is read before anything is decided:
 //
 //  1. the restored and the saved export, and every --krl document (a
 //     KRL document keyroster-server kept, krl-served.json), each decoded
@@ -91,12 +91,16 @@ type lostCert struct {
 //     none, and the saved export's has one or any --krl document was
 //     given, refused (recovery_installation_lost), because a KRL is
 //     published only under a bundle with one and no successor drops it;
-//     then the saved config's installation pin (03-14c, F06): an unpinned
-//     config under a bundle with an ID is refused
-//     (recovery_installation_not_pinned, a re-init), any other mismatch
-//     too (recovery_installation_other, an escalation); when neither has
-//     one, no --krl document was given and the pin passes, it prints
-//     nothingToRecover and exits 0 without writing anything;
+//     then the installation pin (03-14c, F06): the saved config's, or, when
+//     it pins none, --installation-id's (owner decision Q-R1, 2026-11-12;
+//     a config pin and a flag that differ are refused
+//     recovery_installation_other). No pin under a bundle with an ID is
+//     refused (recovery_installation_not_pinned: run again with
+//     --installation-id), any other mismatch too
+//     (recovery_installation_other, an escalation); when neither export
+//     has an ID, no --krl document was given and the pin passes, it prints
+//     nothingToRecover and exits 0 without writing anything. The flag is
+//     never written to the config;
 //  5. every import (the saved export's last KRL, re-derived by audit
 //     verify, and each --krl document) verified under the restored
 //     export's trust bundle and its installation ID
@@ -122,6 +126,8 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 	outPath := fset.String("out", "", "write the signed recovery request to this new file (required)")
 	yes := fset.Bool("yes", false, "sign without asking (needed when stdin is not a terminal)")
 	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	installationID := fset.String("installation-id", "", "the installation ID to check the restored export against when your saved config pins none: "+
+		"32 lowercase hex digits, from the ceremony transcript's Installation ID line; never written to the config (03-14c, Q-R1)")
 	var krlPaths, revokeLost stringList
 	fset.Var(&krlPaths, "krl", "a KRL document keyroster-server kept (krl-served.json) to import (repeatable)")
 	fset.Var(&revokeLost, "revoke-lost", "the serial of a lost host or machine certificate to revoke as well (repeatable)")
@@ -131,6 +137,10 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 	}
 	if len(pos) != 0 || *restoredPath == "" || *savedPath == "" || *outPath == "" {
 		_, _ = fmt.Fprintln(stderr, "revoke recover: --restored, --saved and --out are required; no positional arguments")
+		return errUsage
+	}
+	if *installationID != "" && !trust.IsInstallationID(*installationID) {
+		_, _ = fmt.Fprintln(stderr, "revoke recover: --installation-id wants 32 lowercase hex digits")
 		return errUsage
 	}
 	named := map[uint64]bool{}
@@ -243,13 +253,36 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 					"Keep the hold and escalate", restored.Bundle.Version)
 		}
 	}
-	// The saved config's installation pin (03-14c, F06), on both paths,
-	// after recovery_installation_lost: an unpinned config is a re-init,
-	// any other mismatch an escalation.
-	if err := serverclient.CheckInstallationPin(cfg.InstallationID, installation, restored.Bundle.Version); err != nil {
-		if errors.Is(err, serverclient.ErrInstallationNotPinned) {
+	// The installation pin (03-14c, F06), on both paths, after
+	// recovery_installation_lost: the saved config's, or, when it pins
+	// none, --installation-id's (owner decision Q-R1, 2026-11-12), because
+	// keyroster init needs the server, which the hold stops. When both are
+	// set they must agree. An empty pin under a bundle with an ID is
+	// refused (run again with the flag), any other mismatch is an
+	// escalation. The flag is never written to the config.
+	pin, fromFlag := cfg.InstallationID, false
+	if *installationID != "" {
+		if pin != "" && pin != *installationID {
+			return recoverRefusal("recovery_installation_other",
+				"your saved config pins installation %s, but --installation-id gives %s; escalate, do not release the hold", pin, *installationID)
+		}
+		pin, fromFlag = *installationID, pin == ""
+	}
+	if err := serverclient.CheckInstallationPin(pin, installation, restored.Bundle.Version); err != nil {
+		switch {
+		case errors.Is(err, serverclient.ErrInstallationNotPinned):
 			return recoverRefusal("recovery_installation_not_pinned",
-				"the restored export's trust bundle: %v. Keep the hold, re-run keyroster init as the error says, then run keyroster revoke recover again", err)
+				"the restored export's trust bundle v%d names installation %s, and your saved config pins no installation ID. "+
+					"Keep the hold and run keyroster revoke recover again with --installation-id <the ID on the ceremony transcript's Installation ID line>. "+
+					"If that ID is not %s, escalate; do not release the hold", restored.Bundle.Version, installation, installation)
+		case fromFlag && installation == "":
+			return recoverRefusal("recovery_installation_other",
+				"the restored export's trust bundle v%d names no installation ID, but --installation-id gives %s; escalate, do not release the hold",
+				restored.Bundle.Version, pin)
+		case fromFlag:
+			return recoverRefusal("recovery_installation_other",
+				"the restored export's trust bundle v%d names installation %s, but --installation-id gives %s: these are another installation's exports; "+
+					"escalate, do not release the hold", restored.Bundle.Version, installation, pin)
 		}
 		return recoverRefusal("recovery_installation_other", "the restored export's trust bundle: %v; escalate, do not release the hold", err)
 	}
