@@ -4648,6 +4648,12 @@ func TestVerifyBoundKeysBelowTop(t *testing.T) {
 		{"bundle_version_on_bundle_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 0, `"bundle\u005fversion":1`), below("bundle_version", "bundle_install")},
 		{"import_krl_versions_on_revocation_recovery", func(s string) (*Report, error) { return rf.verify(s, nil) }, nest(recovery, rec, `"import\u005fkrl_versions":[7]`), below("import_krl_versions", "revocation_recovery")},
 		{"policy_version_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"policy_versio\u006e":1`), below("policy_version", "directory_install")},
+		// kind (03-14c, review item F4, under Q1's rule): a recursive reader would read an entry kind the log never logged.
+		// Written plain, a second "kind": fails checkGrepFields' byte count; written escaped or spaced, it does not.
+		{"kind_plain_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"kind":"clock_regression"`), "its decoded kind is not the kind of its leaf (directory_install)"},
+		{"kind_escaped_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"kin\u0064":"clock_regression","now_micros":1`), below("kind", "directory_install")},
+		{"kind_spaced_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"kind" :"clock_regression","now_micros":1`), below("kind", "directory_install")},
+		{"kind_escaped_on_revocation_recovery", func(s string) (*Report, error) { return rf.verify(s, nil) }, nest(recovery, rec, `"kin\u0064":"clock_regression"`), below("kind", "revocation_recovery")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
