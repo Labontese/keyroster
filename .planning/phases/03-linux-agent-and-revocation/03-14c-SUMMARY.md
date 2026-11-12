@@ -1,11 +1,28 @@
 ---
 phase: 03-linux-agent-and-revocation
 plan: 14c
-status: in-progress
+subsystem: installation binding (audit verify, CLI pin, clock bound, export-line keys)
+tags: [audit, trust, cli, installation-id, clock, export, runbooks, hardening]
+status: complete
+requirements-completed: []
+key-files:
+  created: [internal/audit/installation_test.go, cmd/keyroster/installpin_test.go, .planning/phases/03-linux-agent-and-revocation/03-14c-PLAN.md, .planning/phases/03-linux-agent-and-revocation/03-14c-SUMMARY.md]
+  modified: [internal/audit/verify.go, internal/audit/revoke.go, internal/audit/export.go, cmd/keyroster/audit.go, cmd/keyroster/recover.go, cmd/keyroster/init.go, cmd/keyroster/config.go, internal/serverclient/client.go, cmd/keyroster/trust.go, docs/runbooks (8 files), docs/format-registry.md, .planning/ROADMAP.md, .planning/STATE.md]
+decisions:
+  - "audit verify binds the trust bundle in force to --installation-id and refuses an installation-bound log without that flag or --any-installation (Q-C7)"
+  - "keyroster init pins the installation ID; serverclient.Trust refuses another installation's bundle, an ID-less bundle once pinned, and an unpinned config against a bundle with an ID (Q-C3 A)"
+  - "Options.Now bounds the last entry to the verifier's clock plus krl.PruneMargin, checked only once the log is authenticated (Q-C4 B, review item F2)"
+  - "Bound export keys and kind are refused below decoded's top level (owner decision Q1)"
+  - "revoke recover takes --installation-id under the restore hold for an unpinned config; init only after the hold (owner decision Q-R1, a deviation from the plan's recover truth)"
+actuals:
+  tokens: 104419
+  tasks: 4
+  commits: 30
 plan_head_before: 5328ff90dfd0dba50432a734270343cf40f6d2dd
+plan_head_after: e38d6b39e845a28a8e033d46da5d1f7cf3d3513b
 ---
 
-# Phase 3 Plan 14c: Installation binding for audit verify and the CLI (draft)
+# Phase 3 Plan 14c: Installation binding for audit verify and the CLI
 
 test-time base: cmd=265.349 audit=88.926 serverclient=4.048 at=1794454467
 
@@ -15,7 +32,7 @@ test-time base: cmd=265.349 audit=88.926 serverclient=4.048 at=1794454467
 - That continuation (session 2) started at Task 2 and handed over again after it; see "Hand-over (session 2 stopped after Task 2)" below.
 - The plan file is in the phase directory and **untracked**: it was copied byte for byte (`cmp` clean) and is committed only by Task 4's publish edit 1. Re-copy it with `cmp` if it is missing.
 - Plan-head ledger: `.git/gsd-plan-head-before-03-14c` held 3da914f08220420b5b4604d6f867f594e476e0be (origin/main at the start). The branch was then rebased onto 5328ff9 (#100, toolchain go1.27.4), so the ledger and `plan_head_before` now hold 5328ff90dfd0dba50432a734270343cf40f6d2dd, and the SUMMARY's `commits:` is `git rev-list --count 5328ff9..HEAD`. Every commit hash this SUMMARY cites is the rebased commit, matched by `git patch-id --stable` (see "Pre-merge review 1").
-- Test-time base: the line above was measured in session 1, in the WSL boot that was up at the time. The continuation is another session, so Task 4's delta gate must re-measure the base first. Run it on origin/main in a detached worktree outside the repository, then replace the line in place (Q-09-3).
+- Test-time base (history): at this hand-over the line held session 1's base, measured in the WSL boot that was up at the time, so Task 4's delta gate had to re-measure it first, on origin/main in a detached worktree outside the repository, in place (Q-09-3). Session 4 replaced it, and pre-merge review 1 replaced it again; the line above is that last base, and "Gates of the fix round" records how it was measured.
 - Branch `p03/14c-installation-binding` is pushed. No PR is open yet; Task 4 opens it.
 
 ## Preconditions (Task 1, origin/main 3da914f)
@@ -27,7 +44,7 @@ test-time base: cmd=265.349 audit=88.926 serverclient=4.048 at=1794454467
 - P5 holds: T-03-350..356 are free as register rows, so no renumbering.
 - P6: docs/format-registry.md is on origin/main (exit 0), so Task 4's registry step applies.
 - P7 holds: cmd/keyroster/audit_test.go exists on main.
-- P8: the test-time base above was measured on unchanged origin/main before any edit (WSL, go1.27.3, load average 0.00 at the start).
+- P8: session 1 measured its test-time base on unchanged origin/main before any edit (WSL, go1.27.3, load average 0.00 at the start). That base was replaced in session 4 and again in pre-merge review 1; "Gates of the fix round" is the source of the current `test-time base:` line.
 - P9 holds: the plan's open owner questions read "None open.".
 
 ## Task 1 (F05, Q-C7): done
@@ -71,7 +88,7 @@ test-time base: cmd=265.349 audit=88.926 serverclient=4.048 at=1794454467
 - Session 2 did Task 2 (F06) only and handed over at the point the Budget allows, after Task 2's gates and mutants, with about half its context used.
 - The next continuation starts at **Task 3**. It reads the plan's shared sections (frontmatter to `</context>`) and Tasks 3 to 5.
 - The plan file is still untracked in the phase directory and `cmp`-identical to the plan; Task 4 commits it.
-- The test-time base line above is still session 1's. Task 4's delta gate re-measures it first (another session), on origin/main in a detached worktree outside the repository, and replaces the line in place.
+- At this hand-over the test-time base line was still session 1's. Task 4's delta gate re-measures it first (another session), on origin/main in a detached worktree outside the repository, and replaces the line in place.
 - Branch pushed at the Task 2 SUMMARY commit; no PR yet.
 
 ## Task 2 (F06, Q-C3 A): done
@@ -144,7 +161,7 @@ Cumulative: 13 of 13 mutants killed (Task 1: 5, Task 2: 8).
 - Session 3 did Task 3 only. It stopped after Task 3's gates and mutants under the half-context rule, at a task boundary.
 - The next continuation starts at **Task 4**. It reads the plan's shared sections (frontmatter to `</context>`) and Tasks 4 and 5.
 - The plan file is still untracked in the phase directory and `cmp`-identical to the plan. Task 4 commits it.
-- The test-time base line above is still session 1's. No delta gate ran in session 3. Task 4's delta gate re-measures the base first (another session), on origin/main in a detached worktree outside the repository, and replaces the line in place.
+- At this hand-over the test-time base line was still session 1's. No delta gate ran in session 3. Task 4's delta gate re-measures the base first (another session), on origin/main in a detached worktree outside the repository, and replaces the line in place.
 - Branch pushed at the Task 3 SUMMARY commit. No PR yet.
 
 ## Task 3 (F10, Q-C4 B; PR #75 review follow-ups): done
@@ -349,7 +366,7 @@ Cumulative: 37 of 37 mutants killed (Task 1: 5, Task 2: 8, Task 3: 20, session 4
   - :306, a new paragraph after "The check that holds": `--installation-id`, `--any-installation`, the `installation id:` and `last entry time:` lines, and the ID-less form.
   - :323, a new paragraph on the 300 s clock bound, "until this machine's clock reaches the last entry's time minus 300 s".
   - :909, at the end of restore step 2, before 2b: what `<installation id>` is, the ID-less form, and the clock-ahead hold rule.
-  - :1040, at the end of 2b part 3, the first `revoke recover`: `recovery_installation_other`, `recovery_installation_not_pinned` (with the full re-pin command) and `recovery_clock_ahead`.
+  - :1040, at the end of 2b part 3, the first `revoke recover`: `recovery_installation_other`, `recovery_installation_not_pinned` (with the full re-pin command) and `recovery_clock_ahead`. **Superseded by pre-merge review 1's F1:** the `recovery_installation_not_pinned` remedy is now recover's `--installation-id` under the hold, with the re-pin by init only after the hold is released (see "F1" below).
   - :1157, after the recovered verifies' release-check paragraph: the clock-ahead hold rule.
 - **root-ceremony.md.**
   - "Record the installation id line ..." at :206 (genesis step 4), :388 (rotation step 3) and :699 (policy change step 3).
@@ -415,6 +432,8 @@ The branch was rebased onto 5328ff9 (#100, toolchain go1.27.4) before the review
 - b40e72b `fix(audit): refuse a kind key below decoded's top level` (F4).
 
 ### F1: recover's `--installation-id` (owner decision Q-R1, Daniel, 2026-11-12)
+
+**Deviation from the plan's recover truth** (owner decision Q-R1). The plan's F06 truth (must_haves, :81), its recover decision (:185), Task 2's action and case list (:470, :509), Task 4's runbook action (:730) and T-03-354 make `recovery_installation_not_pinned` a re-init: keep the hold, re-run keyroster init, then run recover again. The remedy is now recover's own `--installation-id` under the hold, and keyroster init only after the hold is released. The plan file is unchanged; this SUMMARY records the change.
 
 **Problem.** `recovery_installation_not_pinned` told the admin to re-run keyroster init. Under the restore hold that cannot work: init needs the server (observeRoots, TrustUnpinned) before it saves, the hold stops keyroster-server and keyroster-signer, and the trust endpoint answers 503 without the signer.
 
@@ -528,6 +547,7 @@ Observation, out of scope: the byte checks match `"key":` without spacing, so a 
   | 81a7966 | c1ef372 |
 
 - 8ac9f14 (the publish commit's first form) has no rebased equivalent. 3da914f stays where it names origin/main at the time.
+- The gate and RED records from before the rebase ran on the pre-rebase commits (on 3da914f, go1.27.3). The map gives their rebased equivalents for reachability; those records were not re-run on the rebased commits.
 - `plan_head_before` and the ledger are 5328ff9, and the commit count is `git rev-list --count 5328ff9..HEAD`.
 - The delta-gate note in Task 4 is corrected: it ran at 8ac9f14, not at c1ef372's tree.
 
@@ -554,4 +574,80 @@ Observation, out of scope: the byte checks match `"key":` without spacing, so a 
   - PR title 43150268335;
   - Workflow lint 43150268330.
   - All 29 checks passed without a rerun, govulncheck (45 s) and fuzz included. This docs-only SUMMARY commit gets its own run on PR #99.
+
+## Pre-merge review 1: fix round 2 (two test gaps)
+
+The fix-round check found no code defect. It found two misplacements of F2's clock bound that no test of internal/audit or cmd/keyroster killed: the bound before the root comparison, and the bound before the opts.Previous comparison. The code was already right, so the fix is tests only, and each RED is a mutant.
+
+**Commit:** e38d6b3 `test(audit): pin the clock bound after the root and the previous-checkpoint checks`, signed.
+
+**Cases** (TestVerifyLeafTimeBound):
+- ahead_edited_after_signing_root_mismatch: an honest log (bundle_install, refusal) is checkpointed by the log key. Then the last leaf is re-marshalled with TimeMicros = now + 1 h, and Export re-renders its line from the edited leaf under the original checkpoint. Verify gets "audit: root mismatch: the entries do not reproduce the signed checkpoint"; the case asserts `!errors.Is(err, ErrEntryAhead)` and "root mismatch".
+- ahead_forked_from_previous_refused_as_such: Options.Previous signs [bundle_install, refusal]. The log then replaces entry 1 by a refusal at a later time (so it forks there) and adds a refusal at now + 1 h, under a checkpoint the log key signs over the forked log. Verify gets "audit: log rewritten: the first 2 entries do not reproduce the previous checkpoint"; the case asserts `!errors.Is(err, ErrEntryAhead)` and "log rewritten".
+- Both pass at e38d6b3, as do the other eleven TestVerifyLeafTimeBound cases. gofmt and go vet are clean; `grep -c '[\]u00' internal/audit/verify_test.go` reads 15 before and after.
+
+**Mutants** (the bound's block moved, not copied, by a script; `go vet` exits 0; `go test -count=1 -timeout 5m ./internal/audit/`):
+- M-F2-3, the bound right before the root comparison (after `tree.Root()`): killed by ahead_edited_after_signing_root_mismatch and ahead_forked_from_previous_refused_as_such. No other case fails.
+- M-F2-4, the bound right before `if opts.Previous != nil`: killed by ahead_forked_from_previous_refused_as_such only, as expected (the root comparison still runs first).
+- After each one, verify.go was restored with `git checkout`, `git diff --exit-code` was clean, its sha256 read 11861b55ca5057b6 (HEAD's blob 409de3f) before and after, and `git status` showed only the planning files that stay unstaged.
+
+Cumulative: 37 of 37 mutants of Tasks 1 to 4 and session 4 killed, plus the review rounds' M-F1-1..3, M-F2-1..4, M-F3 and M-F4, all killed.
+
+**Gates at e38d6b3:**
+- Delta gate (the fix round's base, under 24 h old; load average 0.43 at the start) exits 0: cmd/keyroster 252.294 s (-13.1), internal/audit 98.728 s (+9.8), internal/serverclient 4.262 s (+0.2). This is the `-race` run of ./internal/audit and ./cmd/keyroster.
+- Full gate exits 0: `go test -race ./...` 36 ok, no FAIL or DATA RACE (cmd/keyroster 315.242 s, internal/audit 126.873 s, internal/serverclient 5.912 s, internal/signer 467.056 s, internal/agent/apply 611.132 s); every vet tag, gofmt, golangci-lint (0 issues), capslock (keyroster-signer 91 against 92, the same stale `internal/signer CAPABILITY_RUNTIME` pair, no new pair), dep-firewall, testonly-firewall and check-pinned-actions.
+
+## Pre-merge review record
+
+- **Round 1** (PR #99, after the rebase onto 5328ff9): 4 review items confirmed, 2 split, 4 refuted. The Codex lens found nothing new.
+- **Fix round:** F1 to F5, above.
+- **Fix-round check:** no code defect. Two test gaps, fixed in fix round 2 (above). One split docs item, fixed with this SUMMARY's corrections (the history of the `test-time base:` line, F1's deviation label, the hash map note and the superseded :1040 bullet).
+- **CI at e38d6b3** (fix round 2's head, the last code commit). Run IDs:
+  - CI 43160084266, with build-test, lint, govulncheck, fuzz, capslock, cli-windows and cli-macos;
+  - E2E 43160084243;
+  - E2E distro 43160084220;
+  - E2E PKCS#11 43160084142;
+  - E2E TPM 43160084195;
+  - PIV 43160084208;
+  - Systemd 43160084314;
+  - CodeQL 43160084219;
+  - PR title 43160084167;
+  - Workflow lint 43160084444.
+  - All 29 checks passed on the first attempt, with no rerun; govulncheck (46 s) and fuzz (32 min 35 s) included.
+- **Main e2e lanes at e38d6b3** (run 43160084243), against the 900 s stop: e2e (9.5p1) 780.827 s and e2e (10.5p1) 803.970 s of `go test`. Both lanes print `--- PASS: TestAuditVerifiesIssuance/binds_installation (` and `--- PASS: TestRestoreRunbookChecks (`.
+- The completing docs commit below gets its own run on PR #99; its run IDs are on the PR's checks for that head, not in this file, which cannot name its own commit's runs.
+
+## Completion
+
+**Tracking update** (Task 4, in the plan's order, with the installed GSD tools): `state.advance-plan` (Plan 30 → 31 of 36, completed_plans 66), `state.update-progress` (71 and 66, 17 %), then `roadmap.update-plan-progress 3` (31/36, the 03-14c row ticked). Totals after it:
+- the Plans line `31/36 plans executed in 35 waves`;
+- the Progress row `31/36`;
+- `total_plans: 71`, `completed_plans: 66` and `Plan: 31 of 36`.
+
+Only the 03-14c row was ticked: the ROADMAP gate compares the whole file with the one it builds from origin/main, so every other row, the 03-14 row and the 03-12 to 03-16 rows included, is byte-identical (`- [ ]`). No untick was needed. The tracking update also rewrote STATE's `last_updated` and `state_head`; its `stopped_at` line still names 03-14b, as no prescribed verb writes it.
+
+**Main moved.** origin/main is 5328ff9 (#100), and `git diff 3da914f 5328ff9 --stat` lists only go.mod, so the gates that read origin/main's .planning see 3da914f's values.
+
+**Publish gate and ROADMAP gate:** before the tracking update both exit 1, by design (STATE `completed_plans: 65` and `Plan: 30 of 36`; the ROADMAP's Plans line 30/36, the 03-14c row `- [ ]` and the Progress row 30/36 are the only three differing lines). After it both exit 0.
+
+**Threat IDs.** T-03-350 to T-03-356 were free as register rows (P5), so nothing was renumbered.
+
+**Registry.** docs/format-registry.md is on origin/main and carries the 03-14c sentence (Task 4). `recovery_installation_not_pinned`, `recovery_installation_other` and `recovery_clock_ahead` are CLI refusal names, unregistered by design.
+
+**requirements-completed** is empty: AGENT-01 is complete, and REVOKE-01 is 03-11b's (complete). This plan hardens both.
+
+**What stays UNVERIFIED:**
+- every new runbook text on a real host, and on the homelab until its bundle names an installation at 03-15;
+- the init-then-rebind sequence end to end;
+- the e2e cases locally: they run in CI only (both main lanes passed at e38d6b3, TestAuditVerifiesIssuance/binds_installation included);
+- recover's `--installation-id` in a real restore;
+- the host-side KRL clock bound, deferred (Q-C5).
+
+The Kelvin control read as the plan expected (go1.27.3 folds the Kelvin sign; Task 3), so it adds no UNVERIFIED line.
+
+## Self-Check: PASSED
+
+- The two created files (internal/audit/installation_test.go, cmd/keyroster/installpin_test.go), this plan and this SUMMARY exist.
+- Every commit this SUMMARY cites on the branch is an ancestor of HEAD: the 13 rebased commits of the hash map, the fix round's nine, 532ea52 and e38d6b3.
+- `commits: 30` is `git rev-list --count 5328ff9..e38d6b3` (plan_head_after), read from the ledger; the completing docs commit is the 31st.
 
