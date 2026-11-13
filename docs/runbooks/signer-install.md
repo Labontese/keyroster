@@ -237,9 +237,10 @@ admins pass `--installation-id` (section 2 installs both from one build).
 An older keyroster-signer refuses a request with the flag as
 `malformed_request`, and ca issue then says so (reasoned from the parser
 and TestSignerFraming's trailing_byte case). A keyroster CLI older than
-the signer cannot send the flag and is refused `issue_installation_missing`
-without a hint: upgrade it. After the upgrade, every ca issue on an
-installation that has an ID needs the flag. Run in CI:
+the signer cannot send the flag: where the signer's bundle names an
+installation ID it is refused `issue_installation_missing` without a hint,
+so upgrade it. After the upgrade, every ca issue on an installation that
+has an ID needs the flag. Run in CI:
 TestIssueInstallation, TestCAIssueInstallation and
 TestTrustRefuses/issue_names_installation (e2e). UNVERIFIED on the
 homelab signer, whose bundle names no installation until 03-15, and
