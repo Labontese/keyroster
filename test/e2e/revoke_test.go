@@ -713,7 +713,7 @@ func revokeClient(t *testing.T, env *serverEnv) (*serverclient.Client, *trust.Bu
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _, err := c.Trust(context.Background(), env.Signer.RootFingerprints, 1)
+	b, _, err := c.Trust(context.Background(), env.Signer.RootFingerprints, 1, env.Signer.InstallationID)
 	if err != nil {
 		t.Fatalf("Trust: %v", err)
 	}

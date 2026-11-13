@@ -70,17 +70,20 @@ type lostCert struct {
 }
 
 // runRevokeRecover is keyroster revoke recover --restored FILE --saved FILE
-// [--krl FILE ...] [--revoke-lost SERIAL ...] [--yes] [--admin-key FP]
-// --out FILE (03-06b). It runs offline, as a policy admin, and prepares
-// and signs the recovery of the revocations a signer restore lost, which
-// keyroster-signer recover-revocations applies under the hold. Every input
-// is read before anything is decided:
+// [--krl FILE ...] [--revoke-lost SERIAL ...] [--installation-id ID] [--yes]
+// [--admin-key FP] --out FILE (03-06b). It runs offline, as a policy
+// admin, and prepares and signs the recovery of the revocations a signer
+// restore lost, which keyroster-signer recover-revocations applies under
+// the hold. Every input is read before anything is decided:
 //
 //  1. the restored and the saved export, and every --krl document (a
 //     KRL document keyroster-server kept, krl-served.json), each decoded
 //     strictly (recovery_import_invalid otherwise);
 //  2. both exports verified on the saved config's trust pins and threshold
-//     (audit.Verify);
+//     (audit.Verify), and with this clock as Options.Now (03-14c, F10):
+//     an export whose last entry is more than 300 s ahead of it is
+//     refused (recovery_clock_ahead, keep the hold), because its last KRL
+//     could leave out revocations of certificates that are still valid;
 //  3. one export a prefix of the other (the --previous rule); otherwise
 //     they are a fork, which is refused. The lost certificates are those
 //     of the saved export at or after the restored size;
@@ -88,8 +91,16 @@ type lostCert struct {
 //     none, and the saved export's has one or any --krl document was
 //     given, refused (recovery_installation_lost), because a KRL is
 //     published only under a bundle with one and no successor drops it;
-//     when neither has one and no --krl document was given, it prints
-//     nothingToRecover and exits 0 without writing anything;
+//     then the installation pin (03-14c, F06): the saved config's, or, when
+//     it pins none, --installation-id's (owner decision Q-R1, 2026-11-12;
+//     a config pin and a flag that differ are refused
+//     recovery_installation_other). No pin under a bundle with an ID is
+//     refused (recovery_installation_not_pinned: run again with
+//     --installation-id), any other mismatch too
+//     (recovery_installation_other, an escalation); when neither export
+//     has an ID, no --krl document was given and the pin passes, it prints
+//     nothingToRecover and exits 0 without writing anything. The flag is
+//     never written to the config;
 //  5. every import (the saved export's last KRL, re-derived by audit
 //     verify, and each --krl document) verified under the restored
 //     export's trust bundle and its installation ID
@@ -115,6 +126,8 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 	outPath := fset.String("out", "", "write the signed recovery request to this new file (required)")
 	yes := fset.Bool("yes", false, "sign without asking (needed when stdin is not a terminal)")
 	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	installationID := fset.String("installation-id", "", "the installation ID to check the restored export against when your saved config pins none: "+
+		"32 lowercase hex digits, from the ceremony transcript's Installation ID line; never written to the config (03-14c, Q-R1)")
 	var krlPaths, revokeLost stringList
 	fset.Var(&krlPaths, "krl", "a KRL document keyroster-server kept (krl-served.json) to import (repeatable)")
 	fset.Var(&revokeLost, "revoke-lost", "the serial of a lost host or machine certificate to revoke as well (repeatable)")
@@ -124,6 +137,10 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 	}
 	if len(pos) != 0 || *restoredPath == "" || *savedPath == "" || *outPath == "" {
 		_, _ = fmt.Fprintln(stderr, "revoke recover: --restored, --saved and --out are required; no positional arguments")
+		return errUsage
+	}
+	if *installationID != "" && !trust.IsInstallationID(*installationID) {
+		_, _ = fmt.Fprintln(stderr, "revoke recover: --installation-id wants 32 lowercase hex digits")
 		return errUsage
 	}
 	named := map[uint64]bool{}
@@ -172,14 +189,26 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 		docs = append(docs, recoverImport{source: p, im: wire.RecoveryImport{KRL: doc.KRL, Manifest: doc.Manifest, Sig: doc.Sig}, m: m})
 	}
 
-	// 2. Both exports, each on its own.
-	opts := audit.Options{Pins: cfg.TrustPins, Threshold: cfg.TrustThreshold}
+	// 2. Both exports, each on its own, bounded by this clock (03-14c, F10,
+	// Q-C4 B): an export dated past it could import a KRL that leaves out a
+	// revocation of a certificate that is still valid.
+	opts := audit.Options{Pins: cfg.TrustPins, Threshold: cfg.TrustThreshold, Now: uint64(max(auditClock().UnixMicro(), 0))} //nolint:gosec // G115: >= 0
+	clockAhead := func(which string, err error) error {
+		return recoverRefusal("recovery_clock_ahead", "the %s export: %v. Keep the hold. If the signer's journal shows a clock episode, "+
+			"wait until this clock passes the time named and run keyroster revoke recover again; otherwise escalate", which, err)
+	}
 	zero := uint64(0)
-	restored, err := audit.Verify(bytes.NewReader(restoredData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, CertificatesFrom: &zero})
+	restored, err := audit.Verify(bytes.NewReader(restoredData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, Now: opts.Now, CertificatesFrom: &zero})
+	if errors.Is(err, audit.ErrEntryAhead) {
+		return clockAhead("restored", err)
+	}
 	if err != nil {
 		return fmt.Errorf("the restored export %s does not verify on your trust pins: %w; escalate, do not release the hold", *restoredPath, err)
 	}
 	saved, err := audit.Verify(bytes.NewReader(savedData), opts)
+	if errors.Is(err, audit.ErrEntryAhead) {
+		return clockAhead("saved", err)
+	}
 	if err != nil {
 		return fmt.Errorf("the saved export %s does not verify on your trust pins: %w; escalate, do not release the hold", *savedPath, err)
 	}
@@ -192,7 +221,10 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 			return err
 		}
 		from := restored.Size
-		ext, err := audit.Verify(bytes.NewReader(savedData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, Previous: prev, CertificatesFrom: &from})
+		ext, err := audit.Verify(bytes.NewReader(savedData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, Now: opts.Now, Previous: prev, CertificatesFrom: &from})
+		if errors.Is(err, audit.ErrEntryAhead) {
+			return clockAhead("saved", err)
+		}
 		if err != nil {
 			return recoverRefusal("recovery_fork", "the saved export does not extend the restored one (%v); the two logs are a fork: escalate, do not release the hold", err)
 		}
@@ -202,7 +234,11 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 		if err != nil {
 			return err
 		}
-		if _, err := audit.Verify(bytes.NewReader(restoredData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, Previous: prev}); err != nil {
+		_, err = audit.Verify(bytes.NewReader(restoredData), audit.Options{Pins: opts.Pins, Threshold: opts.Threshold, Now: opts.Now, Previous: prev})
+		if errors.Is(err, audit.ErrEntryAhead) {
+			return clockAhead("restored", err)
+		}
+		if err != nil {
 			return recoverRefusal("recovery_fork", "the restored export does not extend the saved one (%v); the two logs are a fork: escalate, do not release the hold", err)
 		}
 	}
@@ -216,6 +252,41 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 					"a lost trust bundle added the installation ID and revocations may have followed, which the restored signer cannot publish. "+
 					"Keep the hold and escalate", restored.Bundle.Version)
 		}
+	}
+	// The installation pin (03-14c, F06), on both paths, after
+	// recovery_installation_lost: the saved config's, or, when it pins
+	// none, --installation-id's (owner decision Q-R1, 2026-11-12), because
+	// keyroster init needs the server, which the hold stops. When both are
+	// set they must agree. An empty pin under a bundle with an ID is
+	// refused (run again with the flag), any other mismatch is an
+	// escalation. The flag is never written to the config.
+	pin, fromFlag := cfg.InstallationID, false
+	if *installationID != "" {
+		if pin != "" && pin != *installationID {
+			return recoverRefusal("recovery_installation_other",
+				"your saved config pins installation %s, but --installation-id gives %s; escalate, do not release the hold", pin, *installationID)
+		}
+		pin, fromFlag = *installationID, pin == ""
+	}
+	if err := serverclient.CheckInstallationPin(pin, installation, restored.Bundle.Version); err != nil {
+		switch {
+		case errors.Is(err, serverclient.ErrInstallationNotPinned):
+			return recoverRefusal("recovery_installation_not_pinned",
+				"the restored export's trust bundle v%d names installation %s, and your saved config pins no installation ID. "+
+					"Keep the hold and run keyroster revoke recover again with --installation-id <the ID on the ceremony transcript's Installation ID line>. "+
+					"If that ID is not %s, escalate; do not release the hold", restored.Bundle.Version, installation, installation)
+		case fromFlag && installation == "":
+			return recoverRefusal("recovery_installation_other",
+				"the restored export's trust bundle v%d names no installation ID, but --installation-id gives %s; escalate, do not release the hold",
+				restored.Bundle.Version, pin)
+		case fromFlag:
+			return recoverRefusal("recovery_installation_other",
+				"the restored export's trust bundle v%d names installation %s, but --installation-id gives %s: these are another installation's exports; "+
+					"escalate, do not release the hold", restored.Bundle.Version, installation, pin)
+		}
+		return recoverRefusal("recovery_installation_other", "the restored export's trust bundle: %v; escalate, do not release the hold", err)
+	}
+	if installation == "" {
 		_, err := fmt.Fprintln(stdout, nothingToRecover)
 		return err
 	}

@@ -514,6 +514,18 @@ a bundle that the pinned roots did not sign.
 
    An existing config is replaced only with `--force`.
 
+   Since 03-14c, init also saves the installation ID of the trust bundle
+   it verified, and prints it (`installation id: <id> (saved with your
+   pins; ...)`, or `installation id: none` while the bundle names none).
+   Compare it with the ceremony transcript's Installation ID line. Every
+   later command refuses a bundle of another installation, and refuses a
+   bundle that names an ID while the config pins none (a config saved
+   before 03-14c), until init is run again as
+   `keyroster init --force --server <URL> --tls-pin <pin> --root-pin <fp> [--root-pin ...] --threshold <n> --user <name> [--admin-key <your admin key>]`.
+   (Run in CI: TestInit, TestInstallationPinned and TestClientTrust.
+   UNVERIFIED on the homelab until its bundle names an installation at
+   03-15.)
+
 ## TLS root changed
 
 When a `keyroster` command fails with "the server's TLS certificate does

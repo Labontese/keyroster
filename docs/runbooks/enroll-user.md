@@ -64,6 +64,15 @@ trust**. The user saves the PEM as `keyroster-tls-root.pem`, the file name
 the init line reads. The PEM is public; the `--tls-pin` in the line is
 what protects it.
 
+Since 03-14c, also give each user the installation ID with the invite:
+the one on the ceremony transcript's Installation ID line. The user's
+init prints the installation ID it saves, and the user compares it with
+the one you gave. If keyroster later refuses with `your saved config
+pins no installation ID`, the user compares the printed ID with the one
+you gave, and re-runs init as
+`keyroster init --force --server <URL> --tls-pin <pin> --root-pin <fp> [--root-pin ...] --threshold <n> --user <name> [--admin-key <your admin key>]`.
+(Run in CI: TestInstallationPinned. UNVERIFIED for a real user.)
+
 ## 2. Register the passkey (user)
 
 The user opens the invite on the computer that holds the passkey and
@@ -342,7 +351,7 @@ pins you hold on paper:
 ```
 runuser -u keyroster-signer -g keyroster-signer -G tss -- \
   keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/log.jsonl
-keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 /tmp/log.jsonl
+keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> /tmp/log.jsonl
 ```
 
 Its `OK:` line must say `directory installs N`, where N is the version
@@ -353,6 +362,14 @@ that version is installed on the signer. The export and the `directory installs`
 end-to-end test `TestEnrollApproveEndToEnd`
 (`audit_verify_counts_installs`), without the `runuser` wrapper that
 [signer-install.md](signer-install.md) uses on a real host.
+
+`<installation id>` is the ID on the ceremony transcript's Installation
+ID line (03-14c). On an installation whose trust bundle names no
+installation ID (pre-D-04; the homelab until 03-15), leave out
+`--installation-id`, and audit verify prints `installation id: none`.
+(Run in CI: TestAuditVerifyInstallation and
+TestAuditVerifiesIssuance/binds_installation (e2e). UNVERIFIED on the
+homelab until 03-15.)
 
 **Run on the homelab in 02-13.**
 

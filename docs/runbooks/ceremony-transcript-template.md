@@ -59,6 +59,8 @@ Root threshold: ___ of ___
 
 Bundle SHA-256 prefix typed at each signing: `________`
 
+Installation ID (root sign's `installation id:` line): `________________________________`
+
 ## Signatures
 
 | Root | Signed bundle and policy | Time (UTC) |

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -3661,6 +3662,12 @@ func TestVerifyRecoveryImportVersions(t *testing.T) {
 		return editDecodedLine(t, all, i, f)
 	}
 	const refused = "its decoded import_krl_versions field is not the one of its"
+	const plain = `"import_krl_versions":[7,19]`
+	if strings.Count(all[rec], plain) != 1 {
+		t.Fatalf("the revocation_recovery line lacks %s once:\n%s", plain, all[rec])
+	}
+	hidden := slices.Clone(all)
+	hidden[rec] = strings.Replace(hidden[rec], plain, `"import_krl_versions" :[7,20],"x\"import_krl_versions":[7,19]`, 1)
 	for _, tc := range []struct {
 		name  string
 		lines []string
@@ -3675,6 +3682,12 @@ func TestVerifyRecoveryImportVersions(t *testing.T) {
 		{"twice_refused", edit(rec, func(m map[string]any) { m["x"] = map[string]any{"import_krl_versions": []int{7, 19}} }), refused},
 		{"on_krl_publish_refused", edit(pub, func(m map[string]any) { m["import_krl_versions"] = []int{7, 19} }), refused},
 		{"on_issue_refused", edit(issue, func(m map[string]any) { m["import_krl_versions"] = []int{} }), refused},
+		// The parsed value branch (03-14c): a spaced top-level key with
+		// other versions, the line's bytes keeping one plain key with the
+		// leaf's own. After owner decision Q1 only a top-level key holding
+		// an escaped quote carries those bytes; the charset check refuses
+		// it too, last.
+		{"parsed_value_refused", hidden, refused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rep, err := rf.verify(join(tc.lines), nil)
@@ -4345,4 +4358,346 @@ func TestVerifyRevokeHost(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestVerifyLeafTimeBound (03-14c, F10, Q-C4 B): with Options.Now, Verify
+// refuses a log whose last entry is more than krl.PruneMargin after the
+// verifier's clock, naming the time it clears, so a KRL published at a
+// forward-dated time cannot drop the revocation of a certificate still
+// valid at that clock. Now 0 bounds nothing.
+func TestVerifyLeafTimeBound(t *testing.T) {
+	rfc := func(us uint64) string { return time.UnixMicro(int64(us)).UTC().Format(time.RFC3339Nano) } //nolint:gosec // G115: test times
+	verifyAt := func(rf *revokeFixture, now uint64, previous []byte) (*Report, error) {
+		return Verify(strings.NewReader(join(rf.lines())), Options{Pins: rf.pins(), Threshold: 1, Previous: previous, Now: now})
+	}
+	t.Run("forward_dated_republish_refused", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		c := rf.issue()
+		rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+		rf.publish(nil)
+		prev := rf.checkpoint(len(rf.leaves))
+		rf.micros = (c.ValidBefore + krl.PruneMargin + 1) * 1_000_000
+		rf.publish(nil)
+		rep, err := verifyAt(rf, now, prev)
+		if !errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "is more than 300 s after this verifier's clock") ||
+			!strings.Contains(err.Error(), "it clears when this clock reaches") {
+			t.Fatalf("Verify = %+v, %v; want ErrEntryAhead naming the clear time", rep, err)
+		}
+	})
+	// The bound runs only on an authenticated log (03-14c, review item
+	// F2): a file a forger dated ahead is refused for what it is, not as
+	// the signer's clock running ahead at a time the forger chose.
+	t.Run("ahead_under_foreign_pins_not_anchored", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.micros = now + 3600*1_000_000
+		rf.addRefusal()
+		foreign := []string{ssh.FingerprintSHA256(newSigner(t, "ed25519").PublicKey())}
+		rep, err := Verify(strings.NewReader(join(rf.lines())), Options{Pins: foreign, Threshold: 1, Now: now})
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "not anchored in the pinned roots") {
+			t.Fatalf("Verify = %+v, %v; want the anchor refusal, not ErrEntryAhead", rep, err)
+		}
+	})
+	t.Run("ahead_without_checkpoint_refused_as_such", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.micros = now + 3600*1_000_000
+		rf.addRefusal()
+		lines := rf.lines()
+		if !strings.Contains(lines[len(lines)-1], `"checkpoint"`) {
+			t.Fatalf("the last line is not the checkpoint line:\n%s", lines[len(lines)-1])
+		}
+		rep, err := Verify(strings.NewReader(join(lines[:len(lines)-1])), Options{Pins: rf.pins(), Threshold: 1, Now: now})
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "the export has no checkpoint line") {
+			t.Fatalf("Verify = %+v, %v; want the no-checkpoint refusal, not ErrEntryAhead", rep, err)
+		}
+	})
+	t.Run("ahead_past_its_checkpoint_refused_as_such", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.micros = now + 3600*1_000_000
+		rf.addRefusal()
+		var buf bytes.Buffer // the checkpoint signs one entry fewer than the file holds
+		if _, err := Export(context.Background(), &buf, &memLog{leaves: rf.leaves, note: rf.checkpoint(len(rf.leaves) - 1)}); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := Verify(&buf, Options{Pins: rf.pins(), Threshold: 1, Now: now})
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "the checkpoint covers") {
+			t.Fatalf("Verify = %+v, %v; want the checkpoint-size refusal, not ErrEntryAhead", rep, err)
+		}
+	})
+	t.Run("ahead_edited_after_signing_root_mismatch", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.addRefusal()
+		signed := rf.checkpoint(len(rf.leaves)) // the log key signs the honest log
+		last := len(rf.leaves) - 1
+		l, err := tlog.DecodeLeaf(rf.leaves[last])
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.TimeMicros = now + 3600*1_000_000 // then the last entry is dated ahead
+		if rf.leaves[last], err = tlog.MarshalLeaf(l); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer // re-rendered from the edited leaf, under the honest checkpoint
+		if _, err := Export(context.Background(), &buf, &memLog{leaves: rf.leaves, note: signed}); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := Verify(&buf, Options{Pins: rf.pins(), Threshold: 1, Now: now})
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "root mismatch") {
+			t.Fatalf("Verify = %+v, %v; want the root mismatch, not ErrEntryAhead", rep, err)
+		}
+	})
+	t.Run("ahead_forked_from_previous_refused_as_such", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.addRefusal()
+		prev := rf.checkpoint(len(rf.leaves)) // bundle_install, refusal
+		rf.leaves = rf.leaves[:1]
+		rf.addRefusal() // a later time, so another entry 1: the log forks there
+		rf.micros = now + 3600*1_000_000
+		rf.addRefusal()
+		rep, err := verifyAt(rf, now, prev)
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "log rewritten") {
+			t.Fatalf("Verify = %+v, %v; want the rewrite refusal against Previous, not ErrEntryAhead", rep, err)
+		}
+	})
+	t.Run("zero_now_unbounded", func(t *testing.T) {
+		rf := newRevokeFixture(t)
+		c := rf.issue()
+		rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+		rf.publish(nil)
+		rf.micros = (c.ValidBefore + krl.PruneMargin + 1) * 1_000_000
+		rf.publish(nil)
+		if rep, err := verifyAt(rf, 0, nil); err != nil || rep.LastKRL == nil {
+			t.Fatalf("Now 0: Verify = %+v, %v; want the forward-dated log verified", rep, err)
+		}
+	})
+	t.Run("at_allowance_ok", func(t *testing.T) {
+		rf := newRevokeFixture(t)
+		rf.addRefusal()
+		if rep, err := verifyAt(rf, rf.micros-krl.PruneMargin*1_000_000, nil); err != nil {
+			t.Fatalf("last entry exactly 300 s after Now: Verify = %+v, %v; want it verified", rep, err)
+		}
+	})
+	t.Run("past_allowance_refused", func(t *testing.T) {
+		rf := newRevokeFixture(t)
+		rf.addRefusal()
+		if rep, err := verifyAt(rf, rf.micros-krl.PruneMargin*1_000_000-1, nil); !errors.Is(err, ErrEntryAhead) {
+			t.Fatalf("last entry 300 s + 1 µs after Now: Verify = %+v, %v; want ErrEntryAhead", rep, err)
+		}
+	})
+	t.Run("within_allowance_cannot_drop_valid", func(t *testing.T) {
+		rf := newRevokeFixture(t)
+		c := rf.issue()
+		rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+		now := (c.ValidBefore - 1) * 1_000_000 // c is still valid at the verifier's clock
+		rf.micros = now + krl.PruneMargin*1_000_000 - 1
+		rf.publish(func(o *publishOpts) { o.entries = nil }) // a KRL that leaves c out, at Now + 300 s
+		if rf.micros != now+krl.PruneMargin*1_000_000 {
+			t.Fatalf("the publish is at %d, want Now + 300 s (%d)", rf.micros, now+krl.PruneMargin*1_000_000)
+		}
+		rep, err := verifyAt(rf, now, nil)
+		if err == nil || errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), "re-derived from the log's revocations") {
+			t.Fatalf("Verify = %+v, %v; want the KRL re-derivation to refuse a KRL without c", rep, err)
+		}
+	})
+	t.Run("allowance_is_prune_margin", func(t *testing.T) {
+		if maxLeafAheadMicros != krl.PruneMargin*1_000_000 {
+			t.Fatalf("the allowance is %d µs, want krl.PruneMargin (%d s)", maxLeafAheadMicros, krl.PruneMargin)
+		}
+	})
+	t.Run("two_ahead_leaves_names_last", func(t *testing.T) {
+		now := uint64(time.Now().UnixMicro()) //nolint:gosec // G115: after 1970
+		rf := newRevokeFixture(t)
+		rf.micros = now + 3600*1_000_000
+		rf.addRefusal()
+		first := rf.micros
+		rf.micros += 600 * 1_000_000
+		rf.addRefusal()
+		last := rf.micros
+		rep, err := verifyAt(rf, now, nil)
+		want := "it clears when this clock reaches " + rfc(last-krl.PruneMargin*1_000_000) + "."
+		if !errors.Is(err, ErrEntryAhead) || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), rfc(first-krl.PruneMargin*1_000_000)) {
+			t.Fatalf("Verify = %+v, %v; want ErrEntryAhead with %q", rep, err, want)
+		}
+	})
+	t.Run("last_time_reported", func(t *testing.T) {
+		rf := newRevokeFixture(t)
+		rf.issue()
+		rf.addRefusal()
+		rep, err := verifyAt(rf, uint64(time.Now().UnixMicro()), nil) //nolint:gosec // G115: after 1970
+		if err != nil || rep.LastTimeMicros != rf.micros {
+			t.Fatalf("Verify = %+v, %v; want LastTimeMicros %d", rep, err, rf.micros)
+		}
+	})
+}
+
+// TestVerifyBoundValues (03-14c; PR #75 review): the decoded values the
+// byte checks bind or forbid by kind, written escaped or spaced so that
+// those checks do not see them, are bound as a JSON reader parses them;
+// and policy_version is the leaf's own on the kinds that render it, absent
+// on the others. Lines of TestVerifyGrepFields' fixture: 0 bundle_install,
+// 2 directory_install v2, 4 login_issue.
+func TestVerifyBoundValues(t *testing.T) {
+	lf := newLoginFixture(t, true)
+	for range 3 {
+		lf.addDirectory(lf.directory(nil), nil)
+	}
+	lf.addLogin(nil, nil)
+	all := lf.lines() // bundle_install v1, directory_install v1, v2, v3, login_issue, checkpoint
+	edit := func(i int, f func(m map[string]any)) []string {
+		t.Helper()
+		return editDecodedLine(t, all, i, f)
+	}
+	rawIn := func(lines []string, i int, old, repl string) []string {
+		t.Helper()
+		if !strings.Contains(lines[i], old) {
+			t.Fatalf("line %d has no %s", i, old)
+		}
+		l := slices.Clone(lines)
+		l[i] = strings.Replace(l[i], old, repl, 1)
+		return l
+	}
+	raw := func(i int, old, repl string) []string {
+		t.Helper()
+		return rawIn(all, i, old, repl)
+	}
+	inject := func(i int, frag string) []string {
+		t.Helper()
+		return raw(i, "}}", frag+"}}")
+	}
+	pv := func(i int) string { // the policy_version line i renders
+		t.Helper()
+		var line ExportLine
+		var m map[string]json.RawMessage
+		if json.Unmarshal([]byte(all[i]), &line) != nil || json.Unmarshal(line.Decoded, &m) != nil || m["policy_version"] == nil {
+			t.Fatalf("line %d renders no policy_version", i)
+		}
+		return string(m["policy_version"])
+	}
+	pv2, pv4 := pv(2), pv(4)
+	next := func(v string) string {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strconv.FormatUint(n+1, 10)
+	}
+	other := base64.StdEncoding.EncodeToString([]byte(`{"version":1,"roles":[{"name":"evil"}]}`))
+	spacedPair := rawIn(rawIn(edit(2, func(m map[string]any) { m["directory"] = other }), 2, `"directory":`, `"directory" :`), 2, `"sigs":`, `"sigs" :`)
+	spacedSigs := rawIn(rawIn(edit(2, func(m map[string]any) { m["sigs"] = other }), 2, `"directory":`, `"directory" :`), 2, `"sigs":`, `"sigs" :`)
+	field := func(key, kind string) string {
+		return "its decoded " + key + " field is not the one of its " + kind + " leaf"
+	}
+	cases := []struct {
+		name  string
+		lines []string
+		want  string // "" = must verify
+	}{
+		{"escaped_version_refused", raw(2, `"version":2}`, `"versio\u006e":3}`), field("version", "directory_install")},
+		{"spaced_version_refused", raw(2, `"version":2}`, `"version" :3}`), field("version", "directory_install")},
+		{"escaped_version_same_value_ok", raw(2, `"version":2}`, `"versio\u006e":2}`), ""},
+		{"spaced_replay_pair_refused", spacedPair, field("directory", "directory_install")},
+		// The sigs and bundle_version value branches (03-14c). Only the
+		// sigs branch refuses spaced_sigs (the directory stays the leaf's
+		// own). A required bundle_version must still occur once as
+		// "bundle_version": in the line's bytes; after owner decision Q1
+		// only a top-level key holding an escaped quote carries it, which
+		// the charset check refuses too, last.
+		{"spaced_sigs_refused", spacedSigs, field("sigs", "directory_install")},
+		{"bundle_version_value_refused", raw(0, `"bundle_version":1,`, `"bundle_version" :2,"x\"bundle_version":1,`), field("bundle_version", "bundle_install")},
+		{"escaped_directory_on_bundle_install_refused", inject(0, `,"d\u0069rectory":"`+other+`"`), field("directory", "bundle_install")},
+		{"escaped_version_on_bundle_install_refused", inject(0, `,"versio\u006e":99`), field("version", "bundle_install")},
+		{"escaped_bundle_version_on_directory_install_refused", inject(2, `,"bundle\u005fversion":1`), field("bundle_version", "directory_install")},
+		{"escaped_import_versions_on_bundle_install_refused", inject(0, `,"import\u005fkrl_versions":[1]`), field("import_krl_versions", "bundle_install")},
+		{"policy_version_edited_refused", raw(4, `"policy_version":`+pv4+`,`, `"policy_version":`+next(pv4)+`,`), field("policy_version", "login_issue")},
+		{"policy_version_escaped_refused", raw(2, `"policy_version":`+pv2+`,`, `"policy_versio\u006e":`+next(pv2)+`,`), field("policy_version", "directory_install")},
+		{"policy_version_on_bundle_install_refused", inject(0, `,"policy_version":1`), field("policy_version", "bundle_install")},
+		{"policy_version_missing_ok", edit(2, func(m map[string]any) { delete(m, "policy_version") }), ""},
+		{"number_form_refused", raw(2, `"policy_version":`+pv2+`,`, `"policy_version":`+pv2+`.0,`), field("policy_version", "directory_install")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep, err := lf.verify(join(tc.lines), nil)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Verify: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Verify = %+v, %v; want an error with %q", rep, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifyBoundKeysBelowTop (03-14c; owner decision Q1, 2026-11-11):
+// Export writes version, directory, sigs, bundle_version,
+// import_krl_versions and policy_version only at the top level of decoded,
+// so each is refused at any other depth of a leaf line, after unescaping,
+// also on a kind where the name is legal or bound at the top level.
+// Written escaped inside a nested object, such a key passes the byte
+// checks, and checkBoundValues reads the top level only; a recursive
+// reader (jq `..`) reads it. Lines: TestVerifyBoundValues' fixture (0
+// bundle_install, 2 directory_install v2) and a recovery fixture.
+func TestVerifyBoundKeysBelowTop(t *testing.T) {
+	lf := newLoginFixture(t, true)
+	for range 3 {
+		lf.addDirectory(lf.directory(nil), nil)
+	}
+	lf.addLogin(nil, nil)
+	login := lf.lines()
+	rf := newRevokeFixture(t)
+	c := rf.issue()
+	im7 := rf.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: c.SignatureKey.Marshal(), Serial: c.Serial, ValidBefore: c.ValidBefore}}, 7, nil, auditInstallationID)
+	rf.recover([]wire.RecoveryImport{im7}, nil, nil)
+	rf.publish(nil)
+	recovery := rf.lines()
+	rec := len(recovery) - 3
+	if !strings.Contains(recovery[rec], `"kind":"revocation_recovery"`) {
+		t.Fatalf("line %d is not the revocation_recovery line:\n%s", rec, recovery[rec])
+	}
+	nest := func(all []string, i int, frag string) string { // frag inside a new nested object of decoded
+		t.Helper()
+		if !strings.HasSuffix(all[i], "}}") {
+			t.Fatalf("line %d does not end with decoded's object", i)
+		}
+		l := slices.Clone(all)
+		l[i] = strings.TrimSuffix(l[i], "}}") + `,"x":{` + frag + `}}}`
+		return join(l)
+	}
+	below := func(key, kind string) string {
+		return `its key "` + key + `" is below the top level of decoded, where export never writes it (` + kind + `)`
+	}
+	cases := []struct {
+		name   string
+		verify func(string) (*Report, error)
+		export string
+		want   string
+	}{
+		{"version_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"versio\u006e":2`), below("version", "directory_install")},
+		{"directory_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"d\u0069rectory":"e30="`), below("directory", "directory_install")},
+		{"sigs_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"sig\u0073":"e30="`), below("sigs", "directory_install")},
+		{"bundle_version_on_bundle_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 0, `"bundle\u005fversion":1`), below("bundle_version", "bundle_install")},
+		{"import_krl_versions_on_revocation_recovery", func(s string) (*Report, error) { return rf.verify(s, nil) }, nest(recovery, rec, `"import\u005fkrl_versions":[7]`), below("import_krl_versions", "revocation_recovery")},
+		{"policy_version_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"policy_versio\u006e":1`), below("policy_version", "directory_install")},
+		// kind (03-14c, review item F4, under Q1's rule): a recursive reader would read an entry kind the log never logged.
+		// Written plain, a second "kind": fails checkGrepFields' byte count; written escaped or spaced, it does not.
+		{"kind_plain_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"kind":"clock_regression"`), "its decoded kind is not the kind of its leaf (directory_install)"},
+		{"kind_escaped_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"kin\u0064":"clock_regression","now_micros":1`), below("kind", "directory_install")},
+		{"kind_spaced_on_directory_install", func(s string) (*Report, error) { return lf.verify(s, nil) }, nest(login, 2, `"kind" :"clock_regression","now_micros":1`), below("kind", "directory_install")},
+		{"kind_escaped_on_revocation_recovery", func(s string) (*Report, error) { return rf.verify(s, nil) }, nest(recovery, rec, `"kin\u0064":"clock_regression"`), below("kind", "revocation_recovery")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep, err := tc.verify(tc.export)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Verify = %+v, %v; want an error with %q", rep, err, tc.want)
+			}
+		})
+	}
 }

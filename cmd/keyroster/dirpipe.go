@@ -126,7 +126,7 @@ var errBadDirectoryAnswer = errors.New("the server's directory answer does not c
 // accepted, as the signer accepts it until keyroster directory rebind
 // binds it. Each caller decides what version 0 means for it.
 func fetchVerifiedDirectory(ctx context.Context, s *adminSession) (*verifiedDirectory, error) {
-	bundle, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold)
+	bundle, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID)
 	if err != nil {
 		return nil, err
 	}

@@ -7,6 +7,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"maps"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -451,6 +454,18 @@ func TestVerifyForgetKeysOnOtherKinds(t *testing.T) {
 		}
 		return string(line.Decoded)
 	}
+	// 03-14c (PR #75 review): each forget-only key with its first letter
+	// escaped, so no byte check sees it; and keys a case-folding reader
+	// (Go's struct decoding) reads as lowercase ones, each refused by the
+	// key charset rule naming its first non-conforming key in sorted order.
+	forgetOnly := func(key string) string {
+		return "its decoded " + key + " field is not one of a host_forget leaf (bundle_install)"
+	}
+	charset := func(key string) string {
+		return fmt.Sprintf("its key %q is not lowercase ASCII letters, digits and underscores (bundle_install)", key)
+	}
+	upper := inject(0, `,"KIND":"host_forget","IDENTITY":"`+identity+`"`)
+	kelvin := inject(0, `,"\u212aind":"host_forget"`)
 	cases := []struct {
 		name  string
 		lines []string
@@ -470,6 +485,21 @@ func TestVerifyForgetKeysOnOtherKinds(t *testing.T) {
 		{"top_level_case_forged_refused", raw(0, `,"decoded":`+decodedOf(0)+`}`, `,"Decoded":`+decodedOf(0)+`,"decoded":{"\u006bind":"host_forget",`+forged+`}}`), `its key "Decoded" is not one export writes (bundle_install)`},
 		{"nested_duplicate_refused", inject(0, `,"x":[{"a":1,"\u0061":2}]`), `its key "a" occurs twice in one object (bundle_install)`},
 		{"checkpoint_key_case_refused", raw(3, `{"checkpoint":`, `{"Checkpoint":"x","checkpoint":`), `its key "Checkpoint" is not one export writes (checkpoint)`},
+		{"forget_only_identity_refused", inject(0, `,"\u0069dentity":"`+identity+`"`), forgetOnly("identity")},
+		{"forget_only_expected_name_refused", inject(0, `,"\u0065xpected_name":"web1"`), forgetOnly("expected_name")},
+		{"forget_only_enrolled_at_us_refused", inject(0, `,"\u0065nrolled_at_us":1`), forgetOnly("enrolled_at_us")},
+		{"forget_only_host_key_fingerprints_refused", inject(0, `,"\u0068ost_key_fingerprints":[`+fps+`]`), forgetOnly("host_key_fingerprints")},
+		{"forget_only_approved_once_refused", inject(0, `,"\u0061pproved_once":true`), forgetOnly("approved_once")},
+		{"forget_only_host_gone_refused", inject(0, `,"\u0068ost_gone":true`), forgetOnly("host_gone")},
+		{"forget_only_removal_version_refused", inject(0, `,"\u0072emoval_version":2`), forgetOnly("removal_version")},
+		{"forget_only_confirmed_version_refused", inject(0, `,"\u0063onfirmed_version":1`), forgetOnly("confirmed_version")},
+		{"forget_only_confirmed_sha256_refused", inject(0, `,"\u0063onfirmed_sha256":"`+strings.Repeat("0", 64)+`"`), forgetOnly("confirmed_sha256")},
+		{"forget_only_admin_fingerprints_refused", inject(0, `,"\u0061dmin_fingerprints":[`+fps+`]`), forgetOnly("admin_fingerprints")},
+		{"upper_kind_refused", upper, charset("IDENTITY")},
+		{"title_kind_refused", inject(0, `,"Kind":"host_forget"`), charset("Kind")},
+		{"kelvin_kind_refused", kelvin, charset("\u212aind")},
+		{"long_s_host_gone_refused", inject(0, `,"ho\u017ft_gone":true`), charset("ho\u017ft_gone")},
+		{"nested_upper_refused", inject(0, `,"x":{"Identity":"`+identity+`"}`), charset("Identity")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -485,4 +515,33 @@ func TestVerifyForgetKeysOnOtherKinds(t *testing.T) {
 			}
 		})
 	}
+	t.Run("forget_only_keys_pinned", func(t *testing.T) {
+		want := []string{"admin_fingerprints", "approved_once", "confirmed_sha256", "confirmed_version", "enrolled_at_us",
+			"expected_name", "host_gone", "host_key_fingerprints", "identity", "removal_version"}
+		if got := slices.Sorted(maps.Keys(forgetOnlyKeys)); !slices.Equal(got, want) {
+			t.Fatalf("forgetOnlyKeys holds %q, want %q", got, want)
+		}
+	})
+	// The premise of the charset rule: Go's struct decoding reads the
+	// upper-case key as "kind", the last one wins, so it reads that line as
+	// a host_forget.
+	t.Run("go_reader_folds_case", func(t *testing.T) {
+		read := func(l string) string {
+			var line ExportLine
+			var d struct {
+				Kind string `json:"kind"`
+			}
+			if err := json.Unmarshal([]byte(l), &line); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(line.Decoded, &d); err != nil {
+				t.Fatal(err)
+			}
+			return d.Kind
+		}
+		if got := read(upper[0]); got != "host_forget" {
+			t.Fatalf("Go reads the KIND line as kind %q, want host_forget", got)
+		}
+		t.Logf("Go %s reads the Kelvin-sign line as kind %q", runtime.Version(), read(kelvin[0]))
+	})
 }

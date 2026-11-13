@@ -442,7 +442,9 @@ func verifyRevokeAdmins(evidence []wire.Evidence, msg []byte, namespace string, 
 // re-encoded (krl.Encode) from every revoke entry before it with the
 // signer's own set builder and pruning rule at IssuedAtSeconds
 // (krl.PublishSet). So a published KRL that omits a revocation, or prunes
-// an entry early, fails.
+// an entry early, fails. Pruning early is judged at issued_at, which is
+// bounded only by the leaf time, so the claim holds for entry times
+// bounded by the verifier's clock (Options.Now; 03-14c, F10).
 func verifyKRLPublish(index uint64, body *tlog.KRLPublishBody, leafMicros uint64, a *anchor, rs *revocations) error {
 	if a.bundle == nil {
 		return errors.New("krl_publish entry before the first bundle_install: no root-signed ops key is in force")

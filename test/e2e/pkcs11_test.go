@@ -402,7 +402,7 @@ func pkcs11IssueAndLogin(t *testing.T, env *signerEnv, userCAFP string) string {
 func pkcs11AuditVerify(t *testing.T, env *signerEnv, entries, issued int) string {
 	t.Helper()
 	export := env.exportLog(t)
-	args := []string{"audit", "verify", "--threshold", "1"}
+	args := []string{"audit", "verify", "--threshold", "1", "--installation-id", env.InstallationID} // 03-14c, F05
 	for _, fp := range env.RootFingerprints {
 		args = append(args, "--pin", fp)
 	}

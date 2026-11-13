@@ -210,6 +210,8 @@ for another installation (`probe_issue_no_installation_id`,
 `machine_issue_installation_mismatch`). A new signed format adds a row
 here in the PR that adds it.
 
+Since 03-14c, `keyroster audit verify --installation-id` checks the installation ID of the trust bundle in force (and refuses an installation-bound log without that flag or --any-installation), and the CLI checks every served bundle against the installation ID its config pins (serverclient.Trust).
+
 ## Reserved names
 
 Names reserved for probe certificates (03-10). They are refused everywhere else:
