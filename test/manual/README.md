@@ -66,9 +66,11 @@ by process ID if it has not exited.
 
 - `test`: a throwaway private key. Delete it after the run.
 - `test-cert.pub` and `reject-cert.pub`: issued for that key by the user CA,
-  for example with `keyroster ca issue --ca user --pubkey test.pub --principal
-  NAME --subject u:windows-check --ttl 12h --admin-key SHA256:...`, and again
-  with `--principal keyroster-reject-test --out reject-cert.pub`.
+  for example with `keyroster ca issue --installation-id <installation id>
+  --ca user --pubkey test.pub --principal NAME --subject u:windows-check
+  --ttl 12h --admin-key SHA256:...` (the flag is needed where the signer's
+  trust bundle names an installation ID, since 03-14d), and again with
+  `--principal keyroster-reject-test --out reject-cert.pub`.
 - `user_ca.pub`: the user CA public key, the `user` entry of the signer's
   `ca-pubkeys.json`.
 

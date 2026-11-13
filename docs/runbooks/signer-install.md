@@ -211,9 +211,39 @@ Alice logs in again (for the new group), loads her admin key into her own
 ssh-agent and issues, for example:
 
 ```
-keyroster ca issue --admin-key SHA256:<alice admin key> \
+keyroster ca issue --installation-id <installation id> --admin-key SHA256:<alice admin key> \
   --pubkey ~/.ssh/id_ed25519.pub --principal alice --subject u:alice --ttl 1h
 ```
+
+`<installation id>` is the 32 hex digits on the installation id line of
+the ceremony transcript (its Installation ID line since 03-14c), of
+`keyroster init` or of `keyroster trust verify`. Never take it from the
+signer: the request names the installation Alice means to approve
+(03-14d).
+
+The signer refuses, before any CA key is used, a request that does not
+name its installation (`issue_installation_missing`), one that names
+another (`issue_installation_mismatch`), and one that names an
+installation where the signer's trust bundle has none
+(`issue_installation_unknown`). ca issue adds a hint to each and says
+that nothing was issued. A signer whose trust bundle names no
+installation (a bundle from before D-04) accepts the request without the
+flag. If ca issue says the signer's bundle names no installation ID,
+leave out the flag only after `keyroster trust verify` shows
+`installation id: none` for the installation you mean to approve.
+
+**Upgrade order:** upgrade keyroster-signer and keyroster together before
+admins pass `--installation-id` (section 2 installs both from one build).
+An older keyroster-signer refuses a request with the flag as
+`malformed_request`, and ca issue then says so (reasoned from the parser
+and TestSignerFraming's trailing_byte case). A keyroster CLI older than
+the signer cannot send the flag and is refused `issue_installation_missing`
+without a hint: upgrade it. After the upgrade, every ca issue on an
+installation that has an ID needs the flag. Run in CI:
+TestIssueInstallation, TestCAIssueInstallation and
+TestTrustRefuses/issue_names_installation (e2e). UNVERIFIED on the
+homelab signer, whose bundle names no installation until 03-15, and
+UNVERIFIED for an upgrade with a real older signer or CLI.
 
 **Connection limits.** The signer handles at most 32 connections at once,
 and at most 16 from one account (uid). No slot is reserved.
