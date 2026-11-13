@@ -200,6 +200,10 @@ grep -q 'nothing was signed' "$work/sign0.log" || {
 }
 SSH_AUTH_SOCK="$cer/root-agent.sock" "${sign[@]}" --confirm "$(sha256sum "$cer/bundle/bundle.json" | cut -c1-8)"
 kill "$root_agent_pid"
+# The genesis bundle names an installation, so ca issue passes its ID
+# (03-14d, F15).
+installation_id=$(sed -n 's/.*"installation_id": *"\([0-9a-f]\{32\}\)".*/\1/p' "$cer/bundle/bundle.json")
+[ -n "$installation_id" ] || fail "the genesis bundle names no installation ID"
 
 step "install-bundle as keyroster-signer"
 in=$work/bundle-in
@@ -220,7 +224,7 @@ start_agent kradmin /home/kradmin/agent.sock
 as_user kradmin env SSH_AUTH_SOCK=/home/kradmin/agent.sock ssh-add -q /home/kradmin/admin
 as_user kradmin ssh-keygen -q -t ed25519 -N '' -C alice -f /home/kradmin/alice
 as_user kradmin env SSH_AUTH_SOCK=/home/kradmin/agent.sock keyroster ca issue \
-	--socket "$SIGNER_SOCK" --admin-key "$admin_fp" \
+	--socket "$SIGNER_SOCK" --admin-key "$admin_fp" --installation-id "$installation_id" \
 	--pubkey /home/kradmin/alice.pub --principal alice --subject u:alice --ttl 10m
 cert=/home/kradmin/alice-cert.pub
 [ -s "$cert" ] || fail "no certificate written to $cert"
@@ -236,7 +240,7 @@ install -o outsider -g outsider -m 0600 /home/kradmin/admin /home/outsider/admin
 start_agent outsider /home/outsider/agent.sock
 as_user outsider env SSH_AUTH_SOCK=/home/outsider/agent.sock ssh-add -q /home/outsider/admin
 as_user outsider ssh-keygen -q -t ed25519 -N '' -C bob -f /home/outsider/bob
-if as_user outsider env SSH_AUTH_SOCK=/home/outsider/agent.sock keyroster ca issue --socket "$SIGNER_SOCK" --admin-key "$admin_fp" \
+if as_user outsider env SSH_AUTH_SOCK=/home/outsider/agent.sock keyroster ca issue --socket "$SIGNER_SOCK" --admin-key "$admin_fp" --installation-id "$installation_id" \
 	--pubkey /home/outsider/bob.pub --principal bob --subject u:bob --ttl 10m >"$work/outsider.log" 2>&1; then
 	cat "$work/outsider.log"
 	fail "outsider issued a certificate"
