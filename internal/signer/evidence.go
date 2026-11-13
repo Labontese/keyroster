@@ -13,10 +13,13 @@ import (
 
 // verifyAdminEvidence authorizes req under the installed policy (D-13).
 // Every evidence item must be of type admin-sshsig/v1: an armored SSHSIG
-// under the namespace keyroster/issue-request/v1 over req.SigningBytes(),
-// made by a key the root-signed policy lists as an admin. Any other type,
-// a signature that does not parse or verify, a wrong namespace and a
-// non-admin signer each refuse the whole request (default deny). At least
+// under the request's own namespace, req.Namespace() (03-14d, F15:
+// keyroster/issue-request/v2 for a request that names its installation,
+// keyroster/issue-request/v1 for one that does not), over
+// req.SigningBytes(), made by a key the root-signed policy lists as an
+// admin. Any other type, a signature that does not parse or verify, a
+// wrong namespace and a non-admin signer each refuse the whole request
+// (default deny). At least
 // the policy's admin quorum of distinct admins must have signed; an admin
 // who signed twice counts once. It returns the sorted names of the admins
 // who signed.
@@ -24,7 +27,7 @@ func verifyAdminEvidence(req *wire.IssueRequest, pol *trust.Policy) ([]string, e
 	if pol == nil || pol.AdminQuorum < 1 {
 		return nil, refusalErr(wire.CodeRefused, "no_policy", nil)
 	}
-	return verifyAdminSignatures(req.Evidence, req.SigningBytes(), wire.AdminSSHSIGNamespace, int(pol.AdminQuorum), pol)
+	return verifyAdminSignatures(req.Evidence, req.SigningBytes(), req.Namespace(), int(pol.AdminQuorum), pol)
 }
 
 // verifyAdminSignatures checks evidence over msg under namespace against

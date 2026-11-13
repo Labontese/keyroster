@@ -20,6 +20,7 @@ import (
 	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/signerclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
+	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -76,6 +77,12 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 		_, _ = fmt.Fprintln(stderr, "ca issue: --pubkey, --subject, at least one --principal and at least one --admin-key are required")
 		return errUsage
 	}
+	// The installation comes only from the flag, never from the signer or
+	// a CLI config (03-14d, F15; owner decision OQ-1 = A).
+	if *installationID != "" && !trust.IsInstallationID(*installationID) {
+		_, _ = fmt.Fprintln(stderr, "ca issue: --installation-id wants 32 lowercase hex digits")
+		return errUsage
+	}
 	role, err := parseCARole(*caName)
 	if err != nil {
 		return err
@@ -106,7 +113,7 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		return fmt.Errorf("request id: %w", err)
 	}
-	evidence, err := adminEvidence(req.SigningBytes(), wire.AdminSSHSIGNamespace, adminKeys)
+	evidence, err := adminEvidence(req.SigningBytes(), req.Namespace(), adminKeys)
 	if err != nil {
 		return err
 	}
@@ -114,7 +121,7 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 
 	resp, err := signerclient.Issue(ctx, *socket, req)
 	if err != nil {
-		return err
+		return issueInstallationHint(err, *installationID != "")
 	}
 	pk, err := ssh.ParsePublicKey(resp.Cert)
 	if err != nil {
@@ -143,6 +150,42 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	}
 	_, _ = fmt.Fprintf(stderr, "serial: %d\nkey id: %s\nlog leaf: %d\ncertificate: %s\n", c.Serial, c.KeyId, resp.LeafIndex, dest)
 	return nil
+}
+
+// issueInstallationHints are ca issue's hints on the signer's installation
+// refusals (03-14d, F15).
+var issueInstallationHints = map[string]string{
+	"issue_installation_missing":  "the signer's trust bundle names an installation ID, so the request must name it: pass --installation-id",
+	"issue_installation_mismatch": "--installation-id names another installation than the signer at --socket serves",
+	"issue_installation_unknown": "this signer says its trust bundle names no installation ID; " +
+		"leave out --installation-id only after keyroster trust verify shows installation id: none for the installation you mean to approve",
+}
+
+// issueOlderSignerHint is ca issue's hint on malformed_request when
+// --installation-id was set: a signer older than 03-14d refuses any byte
+// after the evidence, so it refuses a v2 body that way (reasoned from its
+// parser; UNVERIFIED against a real older signer).
+const issueOlderSignerHint = "a signer older than this keyroster does not read the installation ID: " +
+	"upgrade the signer, or leave out --installation-id only if its trust bundle names no installation"
+
+// issueInstallationHint returns err with a hint when it is one of the
+// signer's installation refusals, or malformed_request while flagSet
+// (--installation-id was given). It keeps the signer's own text, which is
+// a reason code (wire.ValidMessage), and ends with "nothing was issued".
+// Any other error is returned unchanged (03-14d, F15).
+func issueInstallationHint(err error, flagSet bool) error {
+	var er *wire.ErrorResponse
+	if !errors.As(err, &er) {
+		return err
+	}
+	hint, ok := issueInstallationHints[er.Message]
+	if er.Message == "malformed_request" && flagSet {
+		hint, ok = issueOlderSignerHint, true
+	}
+	if !ok {
+		return err
+	}
+	return fmt.Errorf("%w: %s; nothing was issued", err, hint)
 }
 
 // ownWordsError states a failure only in the CLI's own words: its Error
@@ -177,7 +220,9 @@ func warnCustody(ctx context.Context, socket string, stderr io.Writer) error {
 
 // adminEvidence signs msg, a request's signing bytes, with each named admin
 // key from the ssh-agent at SSH_AUTH_SOCK, as admin-sshsig/v1 evidence
-// under namespace: keyroster/issue-request/v1 for ca issue (D-13),
+// under namespace: the request's own for ca issue (D-13; 03-14d, F15:
+// keyroster/issue-request/v2 with --installation-id,
+// keyroster/issue-request/v1 without),
 // keyroster/host-forget-request/v1 for host forget (03-08c). The signer
 // checks the signatures against the admins in its root-signed policy.
 func adminEvidence(msg []byte, namespace string, fingerprints []string) ([]wire.Evidence, error) {

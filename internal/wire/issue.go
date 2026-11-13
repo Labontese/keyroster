@@ -6,20 +6,28 @@ import (
 	"fmt"
 
 	"golang.org/x/crypto/cryptobyte"
+
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // IssueRequestDomain separates the signing bytes of an IssueRequest from
-// every other signed format (D-01, D-13).
+// every other signed format (D-01, D-13). It is the v1 form, which names
+// no installation: a signer accepts a v1 request only while its trust
+// bundle names none (03-14d, F15).
 const IssueRequestDomain = "keyroster/issue-request/v1"
 
 // EvidenceAdminSSHSIG is the evidence type of an admin's detached SSHSIG
 // signature (armored, as ssh-keygen -Y sign writes it) over a request's
-// SigningBytes, made under the SSHSIG namespace AdminSSHSIGNamespace (D-13).
+// SigningBytes, made under the request's own SSHSIG namespace (D-13):
+// AdminSSHSIGNamespace for a v1 issue request, AdminSSHSIGNamespaceV2 for
+// a v2 one, which names its installation (03-14d, F15).
 const EvidenceAdminSSHSIG = "admin-sshsig/v1"
 
 // AdminSSHSIGNamespace is the SSHSIG namespace of admin-sshsig/v1 evidence.
 // It equals IssueRequestDomain, so a signature over a request can never be
-// mistaken for a signature under any other keyroster namespace.
+// mistaken for a signature under any other keyroster namespace. It is the
+// v1 form, which names no installation: a signer accepts it only while its
+// trust bundle names none (03-14d, F15).
 const AdminSSHSIGNamespace = IssueRequestDomain
 
 // IssueRequestDomainV2 separates the signing bytes of an IssueRequest
@@ -88,6 +96,9 @@ type Evidence struct {
 // CreatedAt is the client's clock in Unix seconds. Extensions names
 // certificate extensions requested on top of the role's defaults; the
 // signer grants only those the role's policy profile allows.
+// InstallationID is the installation ID of the trust bundle the admins
+// approve the request for (32 lowercase hex digits); empty makes the
+// request v1, which names no installation (03-14d, F15).
 type IssueRequest struct {
 	InstallationID  string
 	CARole          CARole
@@ -103,6 +114,8 @@ type IssueRequest struct {
 
 func (r *IssueRequest) check() error {
 	switch {
+	case r.InstallationID != "" && !trust.IsInstallationID(r.InstallationID):
+		return fmt.Errorf("%w: the installation ID is not 32 lowercase hex digits", ErrMalformed)
 	case !r.CARole.valid():
 		return fmt.Errorf("%w: unknown CA role", ErrMalformed)
 	case len(r.SubjectKey) == 0 || len(r.SubjectKey) > MaxSubjectKeyLen:
@@ -154,8 +167,10 @@ func (r *IssueRequest) addFields(b *cryptobyte.Builder) {
 	})
 }
 
-// Marshal encodes the request body. It refuses a request that violates the
-// field limits.
+// Marshal encodes the request body: every field except InstallationID,
+// then the evidence, then, for a v2 request, the installation ID
+// uint16-length-prefixed (03-14d, F15), so a v1 body is unchanged. It
+// refuses a request that violates the field limits.
 func (r *IssueRequest) Marshal() ([]byte, error) {
 	if err := r.check(); err != nil {
 		return nil, err
@@ -168,15 +183,24 @@ func (r *IssueRequest) Marshal() ([]byte, error) {
 			addBytes16(b, e.Blob)
 		}
 	})
+	if r.InstallationID != "" {
+		addBytes16(&b, []byte(r.InstallationID))
+	}
 	return b.Bytes()
 }
 
-// SigningBytes returns the domain tag IssueRequestDomain, as raw bytes,
-// followed by every field except Evidence. Evidence items sign (a digest of)
-// these bytes, so they cannot be part of them.
+// SigningBytes returns the domain tag (IssueRequestDomainV2, or
+// IssueRequestDomain for a v1 request), as raw bytes, then, for v2, the
+// installation ID uint16-length-prefixed, signed first as in revoke,
+// forget and recovery requests (03-14d, F15), then every field except
+// Evidence. Evidence items sign (a digest of) these bytes, so they cannot
+// be part of them.
 func (r *IssueRequest) SigningBytes() []byte {
 	var b cryptobyte.Builder
-	b.AddBytes([]byte(IssueRequestDomain))
+	b.AddBytes([]byte(r.domain()))
+	if r.InstallationID != "" {
+		addBytes16(&b, []byte(r.InstallationID))
+	}
 	r.addFields(&b)
 	// The builder fails only when a field exceeds 65535 bytes. Every
 	// request that went through ParseIssueRequest or Marshal is far below
@@ -188,8 +212,19 @@ func (r *IssueRequest) SigningBytes() []byte {
 	return out
 }
 
-// Namespace is the SSHSIG namespace of the request's admin evidence.
-func (r *IssueRequest) Namespace() string { return AdminSSHSIGNamespace }
+// domain is the request's domain tag: v1 without an installation ID
+// (03-14d, F15).
+func (r *IssueRequest) domain() string {
+	if r.InstallationID == "" {
+		return IssueRequestDomain
+	}
+	return IssueRequestDomainV2
+}
+
+// Namespace is the SSHSIG namespace of the request's admin evidence:
+// AdminSSHSIGNamespaceV2, or AdminSSHSIGNamespace for a v1 request
+// (03-14d, F15).
+func (r *IssueRequest) Namespace() string { return r.domain() }
 
 // Digest returns the SHA-256 of SigningBytes.
 func (r *IssueRequest) Digest() [32]byte {
@@ -197,7 +232,10 @@ func (r *IssueRequest) Digest() [32]byte {
 }
 
 // ParseIssueRequest decodes a request body strictly: every limit is
-// enforced and trailing bytes are refused.
+// enforced and trailing bytes are refused. Bytes after the evidence are
+// the installation ID of a v2 request (03-14d, F15): an empty ID field,
+// bytes after the ID and an ID that is not 32 lowercase hex digits are
+// refused, and a v1 body parses as before.
 func ParseIssueRequest(body []byte) (*IssueRequest, error) {
 	s := cryptobyte.String(body)
 	var (
@@ -218,9 +256,21 @@ func ParseIssueRequest(body []byte) (*IssueRequest, error) {
 		!s.ReadBytes(&reqID, len(r.RequestID)) ||
 		!s.ReadUint64(&r.CreatedAt) ||
 		!s.ReadUint16LengthPrefixed(&extensions) ||
-		!s.ReadUint16LengthPrefixed(&evidence) ||
-		!s.Empty() {
+		!s.ReadUint16LengthPrefixed(&evidence) {
 		return nil, ErrMalformed
+	}
+	if !s.Empty() {
+		var id []byte
+		if !readBytes16(&s, &id, maxRevokeInstallationID) {
+			return nil, ErrMalformed
+		}
+		if len(id) == 0 {
+			return nil, fmt.Errorf("%w: an empty installation ID field", ErrMalformed)
+		}
+		if !s.Empty() {
+			return nil, fmt.Errorf("%w: bytes after the installation ID", ErrMalformed)
+		}
+		r.InstallationID = string(id)
 	}
 	r.CARole = CARole(role)
 	r.SubjectKey = subjectKey

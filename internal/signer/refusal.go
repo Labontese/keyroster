@@ -370,6 +370,8 @@ func classify(detail string) uint8 {
 		"principal_reserved", "account_reserved",
 		// Revocation installation binding (03-03, the T-03-20 rule).
 		"revoke_installation_missing", "revoke_installation_mismatch",
+		// Issue installation binding (03-14d, F15; the T-03-20 rule).
+		"issue_installation_missing", "issue_installation_mismatch", "issue_installation_unknown",
 		// Directory installation binding (03-04, D-04, the same rule).
 		"directory_installation_missing", "directory_installation_mismatch", "directory_installation_unknown",
 		// Forget (03-08c): the installation binding, the server's statement
