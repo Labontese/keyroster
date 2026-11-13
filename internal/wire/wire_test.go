@@ -44,8 +44,10 @@ func validRequest() *IssueRequest {
 	return r
 }
 
-// marshalUnchecked encodes r exactly like Marshal but without the limit
-// checks, so tests can produce over-limit bodies.
+// marshalUnchecked encodes r as a v1 body (its fields and its evidence,
+// never an installation ID) without the limit checks, so tests can
+// produce over-limit bodies. v2Body appends the installation ID (03-14d,
+// F15).
 func marshalUnchecked(r *IssueRequest) []byte {
 	var b cryptobyte.Builder
 	r.addFields(&b)
@@ -56,6 +58,16 @@ func marshalUnchecked(r *IssueRequest) []byte {
 		}
 	})
 	return b.BytesOrPanic()
+}
+
+// v2Body appends id, uint16-length-prefixed and raw, to the v1 body v1:
+// the v2 body of the same request when id is an installation ID (03-14d,
+// F15). Every v2, trailing-ID, truncated-ID and malformed-ID body and fuzz
+// seed is built with it.
+func v2Body(v1 []byte, id string) []byte {
+	out := append([]byte(nil), v1...)
+	out = binary.BigEndian.AppendUint16(out, uint16(len(id))) //nolint:gosec // G115: test IDs are short
+	return append(out, id...)
 }
 
 func TestIssueRequestRoundTrip(t *testing.T) {
@@ -647,6 +659,183 @@ func TestIssueRequestBytesUnchanged(t *testing.T) {
 	if TypeIssueRequest != 0x01 || AdminSSHSIGNamespace != "keyroster/issue-request/v1" || EvidenceAdminSSHSIG != "admin-sshsig/v1" {
 		t.Fatal("an admin-path constant changed")
 	}
+}
+
+// testIssueInstallationID is the installation ID of the v2 issue vector
+// (03-14d, F15).
+const testIssueInstallationID = "00112233445566778899aabbccddeeff"
+
+// issueVector is the admin issue request of
+// test/vectors/issue_request_signing_v1.hex: the SSH encoding of the
+// Ed25519 key with seed 0x00..0x1f, the user CA, subject u:alice,
+// principal alice, 600 s, request ID 0x00..0x0f, created 1700000000, no
+// extensions (03-14d, F15).
+func issueVector(t testing.TB) *IssueRequest {
+	t.Helper()
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	pub, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(seed).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &IssueRequest{
+		CARole:          CARoleUser,
+		SubjectKey:      pub.Marshal(),
+		Subject:         "u:alice",
+		Principals:      []string{"alice"},
+		ValidForSeconds: 600,
+		CreatedAt:       1700000000,
+	}
+	for i := range r.RequestID {
+		r.RequestID[i] = byte(i)
+	}
+	return r
+}
+
+// readVector reads the hex golden file name from test/vectors.
+func readVector(t *testing.T, name string) []byte {
+	t.Helper()
+	file, err := os.ReadFile(filepath.Join(vectorDir, name)) //nolint:gosec // G304: fixed test vector path
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := hex.DecodeString(strings.TrimSpace(string(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestIssueRequestSigningVector (03-14d, F15) pins the admin issue
+// request's signing bytes: v1 (no installation, the bytes of 03-01) and
+// v2 (the installation ID signed first). The v2 file is derived from the
+// v1 file by a fixed rule, which v2_derived_from_v1 checks on the two
+// files themselves, independently of SigningBytes: the domain's v1
+// becomes v2, and 0020 and the 32 ASCII bytes of the ID follow it.
+func TestIssueRequestSigningVector(t *testing.T) {
+	t.Run("v1_bytes", func(t *testing.T) {
+		r := issueVector(t)
+		if *update {
+			// Only the v1 file is ever written from SigningBytes; the v2
+			// file is derived from it (v2_derived_from_v1).
+			path := filepath.Join(vectorDir, "issue_request_signing_v1.hex")
+			if err := os.WriteFile(path, []byte(hex.EncodeToString(r.SigningBytes())+"\n"), 0o644); err != nil { //nolint:gosec // G306: public test vector
+				t.Fatal(err)
+			}
+		}
+		want := readVector(t, "issue_request_signing_v1.hex")
+		if got := r.SigningBytes(); !bytes.Equal(got, want) {
+			t.Fatalf("v1 issue request signing bytes differ from the vector\ngot:  %x\nwant: %x", got, want)
+		}
+		if !bytes.HasPrefix(want, []byte("keyroster/issue-request/v1")) || r.Digest() != sha256.Sum256(want) {
+			t.Fatal("the v1 vector does not start with the raw v1 domain, or Digest is not its SHA-256")
+		}
+	})
+	t.Run("v2_bytes", func(t *testing.T) {
+		r := issueVector(t)
+		r.InstallationID = testIssueInstallationID
+		want := readVector(t, "issue_request_signing_v2.hex")
+		if got := r.SigningBytes(); !bytes.Equal(got, want) {
+			t.Fatalf("v2 issue request signing bytes differ from the vector\ngot:  %x\nwant: %x", got, want)
+		}
+		if !bytes.HasPrefix(want, []byte("keyroster/issue-request/v2")) || r.Digest() != sha256.Sum256(want) {
+			t.Fatal("the v2 vector does not start with the raw v2 domain, or Digest is not its SHA-256")
+		}
+	})
+	t.Run("v2_derived_from_v1", func(t *testing.T) {
+		v1, v2 := readVector(t, "issue_request_signing_v1.hex"), readVector(t, "issue_request_signing_v2.hex")
+		rest, ok := bytes.CutPrefix(v1, []byte("keyroster/issue-request/v1"))
+		if !ok {
+			t.Fatal("the v1 vector does not start with the raw v1 domain")
+		}
+		derived := append([]byte("keyroster/issue-request/v2"), 0x00, 0x20)
+		derived = append(append(derived, "00112233445566778899aabbccddeeff"...), rest...)
+		if !bytes.Equal(v2, derived) {
+			t.Fatalf("the v2 vector is not the v1 vector with the v2 domain and the ID\ngot:  %x\nwant: %x", v2, derived)
+		}
+	})
+}
+
+// TestIssueRequestV2 (03-14d, F15): a request with an installation ID is
+// v2. Its body is the v1 body followed by the ID, uint16-length-prefixed;
+// a v1 body parses exactly as before; the parser refuses an empty ID
+// field, bytes after the ID, a truncated ID and an ID that is not 32
+// lowercase hex digits, and Marshal refuses the last; and the v1 and v2
+// signing bytes and namespaces of the same fields differ.
+func TestIssueRequestV2(t *testing.T) {
+	const id = testIssueInstallationID
+	v1 := marshalUnchecked(validRequest())
+	t.Run("round_trip_v2", func(t *testing.T) {
+		r := validRequest()
+		r.InstallationID = id
+		body, err := r.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(body, v2Body(v1, id)) {
+			t.Fatalf("v2 body = %x, want the v1 body and the ID", body)
+		}
+		got, err := ParseIssueRequest(body)
+		if err != nil {
+			t.Fatalf("ParseIssueRequest: %v", err)
+		}
+		if !reflect.DeepEqual(got, r) {
+			t.Fatalf("round trip = %+v, want %+v", got, r)
+		}
+	})
+	t.Run("v1_body_parses_as_today", func(t *testing.T) {
+		got, err := ParseIssueRequest(v1)
+		if err != nil {
+			t.Fatalf("ParseIssueRequest: %v", err)
+		}
+		if !reflect.DeepEqual(got, validRequest()) || got.InstallationID != "" || got.Namespace() != AdminSSHSIGNamespace {
+			t.Fatalf("v1 body parsed as %+v under %s", got, got.Namespace())
+		}
+	})
+	t.Run("v2_body_helper_parses", func(t *testing.T) {
+		got, err := ParseIssueRequest(v2Body(v1, id))
+		if err != nil {
+			t.Fatalf("ParseIssueRequest: %v", err)
+		}
+		if got.InstallationID != id || got.Namespace() != AdminSSHSIGNamespaceV2 {
+			t.Fatalf("installation %q under %s, want %s under %s", got.InstallationID, got.Namespace(), id, AdminSSHSIGNamespaceV2)
+		}
+	})
+	refused := func(t *testing.T, body []byte, msg string) {
+		t.Helper()
+		_, err := ParseIssueRequest(body)
+		if !errors.Is(err, ErrMalformed) || (msg != "" && !strings.Contains(err.Error(), msg)) {
+			t.Fatalf("ParseIssueRequest error = %v, want ErrMalformed with %q", err, msg)
+		}
+	}
+	t.Run("trailing_empty_id_refused", func(t *testing.T) {
+		refused(t, v2Body(v1, ""), "an empty installation ID field")
+	})
+	t.Run("trailing_bytes_after_id_refused", func(t *testing.T) {
+		refused(t, append(v2Body(v1, id), 0), "bytes after the installation ID")
+	})
+	t.Run("truncated_id_refused", func(t *testing.T) {
+		refused(t, append(append(append([]byte(nil), v1...), 0x00, 0x20), id[:10]...), "")
+	})
+	t.Run("malformed_id_refused", func(t *testing.T) {
+		for _, bad := range []string{id[:31], id + "0", strings.ToUpper(id)} {
+			refused(t, v2Body(v1, bad), "the installation ID is not 32 lowercase hex digits")
+			r := validRequest()
+			r.InstallationID = bad
+			if _, err := r.Marshal(); !errors.Is(err, ErrMalformed) || !strings.Contains(err.Error(), "the installation ID is not 32 lowercase hex digits") {
+				t.Errorf("Marshal of installation ID %q: %v, want the installation ID refusal", bad, err)
+			}
+		}
+	})
+	t.Run("domains_differ", func(t *testing.T) {
+		r1, r2 := validRequest(), validRequest()
+		r2.InstallationID = id
+		if bytes.Equal(r1.SigningBytes(), r2.SigningBytes()) || r1.Namespace() == r2.Namespace() {
+			t.Fatalf("v1 and v2 signing bytes or namespaces (%s, %s) are equal", r1.Namespace(), r2.Namespace())
+		}
+	})
 }
 
 // loginVector is the login request of
@@ -1793,7 +1982,7 @@ func TestForgetRequest(t *testing.T) {
 		if ForgetSSHSIGNamespace != ForgetRequestDomain || ForgetRequestDomain != "keyroster/host-forget-request/v1" {
 			t.Fatalf("ForgetSSHSIGNamespace %q", ForgetSSHSIGNamespace)
 		}
-		for _, other := range []string{AdminSSHSIGNamespace, RevokeSSHSIGNamespace, RevokeSSHSIGNamespaceV1, RecoverySSHSIGNamespace, LoginRequestDomain} {
+		for _, other := range []string{AdminSSHSIGNamespace, AdminSSHSIGNamespaceV2, RevokeSSHSIGNamespace, RevokeSSHSIGNamespaceV1, RecoverySSHSIGNamespace, LoginRequestDomain} { // with the v2 issue namespace (03-14d, F15)
 			if ForgetSSHSIGNamespace == other || strings.HasPrefix(other, ForgetSSHSIGNamespace) || strings.HasPrefix(ForgetSSHSIGNamespace, other) {
 				t.Errorf("the forget namespace %q overlaps %q", ForgetSSHSIGNamespace, other)
 			}

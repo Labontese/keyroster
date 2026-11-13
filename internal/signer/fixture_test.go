@@ -206,7 +206,7 @@ func SignRequest(t testing.TB, req *wire.IssueRequest, signers ...ssh.Signer) []
 	t.Helper()
 	var ev []wire.Evidence
 	for _, s := range signers {
-		sig, err := sshsig.Sign(rand.Reader, s, wire.AdminSSHSIGNamespace, req.SigningBytes())
+		sig, err := sshsig.Sign(rand.Reader, s, req.Namespace(), req.SigningBytes()) // v1 or v2 (03-14d, F15)
 		if err != nil {
 			t.Fatal(err)
 		}

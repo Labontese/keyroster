@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/cryptobyte"
@@ -26,6 +27,15 @@ func FuzzParseIssueRequest(f *testing.F) {
 	f.Add(append(append([]byte(nil), valid...), 0))
 	f.Add(valid[:len(valid)/2])
 	f.Add([]byte{})
+	// v2 bodies and the installation ID's refusals (03-14d, F15).
+	const id = testIssueInstallationID
+	f.Add(v2Body(valid, id))
+	f.Add(v2Body(valid, ""))
+	f.Add(append(v2Body(valid, id), 0))
+	f.Add(append(append(append([]byte(nil), valid...), 0x00, 0x20), id[:10]...))
+	f.Add(v2Body(valid, id[:31]))
+	f.Add(v2Body(valid, id+"0"))
+	f.Add(v2Body(valid, strings.ToUpper(id)))
 	f.Fuzz(func(t *testing.T, body []byte) {
 		r, err := ParseIssueRequest(body)
 		if err != nil {
@@ -33,6 +43,13 @@ func FuzzParseIssueRequest(f *testing.F) {
 				t.Fatalf("ParseIssueRequest error = %v, want ErrMalformed", err)
 			}
 			return
+		}
+		if r.InstallationID != "" {
+			prefix := append([]byte(IssueRequestDomainV2), 0x00, 0x20)
+			prefix = append(prefix, r.InstallationID...)
+			if r.Namespace() != AdminSSHSIGNamespaceV2 || !bytes.HasPrefix(r.SigningBytes(), prefix) {
+				t.Fatalf("a request for installation %q is not v2: namespace %s, signing bytes %x", r.InstallationID, r.Namespace(), r.SigningBytes())
+			}
 		}
 		out, err := r.Marshal()
 		if err != nil {

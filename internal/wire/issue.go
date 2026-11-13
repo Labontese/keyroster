@@ -22,6 +22,14 @@ const EvidenceAdminSSHSIG = "admin-sshsig/v1"
 // mistaken for a signature under any other keyroster namespace.
 const AdminSSHSIGNamespace = IssueRequestDomain
 
+// IssueRequestDomainV2 separates the signing bytes of an IssueRequest
+// that names its installation (03-14d, F15).
+const IssueRequestDomainV2 = "keyroster/issue-request/v2"
+
+// AdminSSHSIGNamespaceV2 is the SSHSIG namespace of the admin-sshsig/v1
+// evidence of an IssueRequest that names its installation (03-14d, F15).
+const AdminSSHSIGNamespaceV2 = IssueRequestDomainV2
+
 // Field limits of an IssueRequest. ParseIssueRequest and Marshal both
 // enforce them.
 const (
@@ -81,6 +89,7 @@ type Evidence struct {
 // certificate extensions requested on top of the role's defaults; the
 // signer grants only those the role's policy profile allows.
 type IssueRequest struct {
+	InstallationID  string
 	CARole          CARole
 	SubjectKey      []byte
 	Subject         string
@@ -178,6 +187,9 @@ func (r *IssueRequest) SigningBytes() []byte {
 	}
 	return out
 }
+
+// Namespace is the SSHSIG namespace of the request's admin evidence.
+func (r *IssueRequest) Namespace() string { return AdminSSHSIGNamespace }
 
 // Digest returns the SHA-256 of SigningBytes.
 func (r *IssueRequest) Digest() [32]byte {

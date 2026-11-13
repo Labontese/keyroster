@@ -64,6 +64,7 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	subject := fs.String("subject", "", "subject recorded in the key ID, e.g. u:alice (required)")
 	ttl := fs.Duration("ttl", time.Hour, "certificate validity")
 	out := fs.String("out", "", "certificate output file (default: {pubkey without .pub}-cert.pub)")
+	installationID := fs.String("installation-id", "", "the installation ID the request is for: 32 lowercase hex digits from the installation id line of your ceremony transcript, keyroster init or keyroster trust verify; required when the signer's trust bundle names one, and never copied from the signer")
 	var principals, adminKeys, extensions stringList
 	fs.Var(&principals, "principal", "principal to certify (repeatable, at least one)")
 	fs.Var(&adminKeys, "admin-key", "SHA256 fingerprint of an admin key in ssh-agent (SSH_AUTH_SOCK) that signs the request (repeatable, at least one; the policy's admin quorum decides how many)")
@@ -93,6 +94,7 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 		return err
 	}
 	req := &wire.IssueRequest{
+		InstallationID:  *installationID,
 		CARole:          role,
 		SubjectKey:      pub.Marshal(),
 		Subject:         *subject,

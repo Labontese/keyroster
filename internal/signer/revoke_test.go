@@ -1010,6 +1010,7 @@ func TestSubjectResolutionTime(t *testing.T) {
 		e := &subjectEnv{logEnv: newLogEnvClock(t, fx, clock.Now), clock: clock}
 		req := &wire.IssueRequest{CARole: wire.CARoleUser, SubjectKey: newEd25519(t).PublicKey().Marshal(), Subject: "alice",
 			Principals: []string{"alice"}, ValidForSeconds: 24 * 3600, CreatedAt: uint64(clock.Now().Unix())} //nolint:gosec // G115: after 1970
+		req.InstallationID = fx.InstallationID // (03-14d, F15)
 		if _, err := rand.Read(req.RequestID[:]); err != nil {
 			t.Fatal(err)
 		}

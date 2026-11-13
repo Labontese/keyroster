@@ -40,12 +40,15 @@ func (b *lockedBuffer) String() string {
 
 // fakeSigner answers Status with a fixed reply and answers every
 // IssueRequest with a fixed IssueResponse body, or refuses it when that
-// body is nil. It records the type of every request frame and the CLI's
-// stderr at the moment an IssueRequest arrived.
+// body is nil, or with a chosen ErrorResponse when one is set
+// (fakeSignerOpts.issueErr). It records the type of every request frame,
+// the CLI's stderr at the moment an IssueRequest arrived and the last
+// IssueRequest body.
 type fakeSigner struct {
 	mu            sync.Mutex
 	types         []byte
 	stderrAtIssue string
+	issueBody     []byte
 }
 
 func (f *fakeSigner) seen() []byte {
@@ -54,11 +57,37 @@ func (f *fakeSigner) seen() []byte {
 	return append([]byte(nil), f.types...)
 }
 
-// startFakeSigner listens on a Unix socket in a short temporary directory
-// (t.TempDir can exceed macOS's 104-byte socket path limit) and serves
-// one request per connection.
+// lastIssue returns the body of the last IssueRequest the fake received,
+// or nil (03-14d, F15).
+func (f *fakeSigner) lastIssue() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]byte(nil), f.issueBody...)
+}
+
+// startFakeSigner is startFakeSignerOpts without a chosen issue refusal.
 func startFakeSigner(t *testing.T, statusType byte, statusBody, issueBody []byte, stderr *lockedBuffer) (string, *fakeSigner) {
 	t.Helper()
+	return startFakeSignerOpts(t, fakeSignerOpts{statusType: statusType, statusBody: statusBody, issueBody: issueBody, stderr: stderr})
+}
+
+// fakeSignerOpts is what startFakeSignerOpts serves: the Status reply,
+// the IssueResponse body (nil refuses), the CLI's stderr, and issueErr,
+// answered to every IssueRequest when set (03-14d, F15).
+type fakeSignerOpts struct {
+	statusType byte
+	statusBody []byte
+	issueBody  []byte
+	stderr     *lockedBuffer
+	issueErr   *wire.ErrorResponse
+}
+
+// startFakeSignerOpts listens on a Unix socket in a short temporary
+// directory (t.TempDir can exceed macOS's 104-byte socket path limit) and
+// serves one request per connection.
+func startFakeSignerOpts(t *testing.T, o fakeSignerOpts) (string, *fakeSigner) {
+	t.Helper()
+	statusType, statusBody, issueBody, stderr := o.statusType, o.statusBody, o.issueBody, o.stderr
 	dir, err := os.MkdirTemp("", "kr")
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +99,11 @@ func startFakeSigner(t *testing.T, statusType byte, statusBody, issueBody []byte
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = l.Close() })
-	refusal, err := (&wire.ErrorResponse{Code: wire.CodeRefused, Message: "fake_signer_refuses_issue"}).Marshal()
+	issueRefusal := &wire.ErrorResponse{Code: wire.CodeRefused, Message: "fake_signer_refuses_issue"}
+	if o.issueErr != nil {
+		issueRefusal = o.issueErr
+	}
+	refusal, err := issueRefusal.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +116,7 @@ func startFakeSigner(t *testing.T, statusType byte, statusBody, issueBody []byte
 			}
 			go func() {
 				defer func() { _ = conn.Close() }()
-				msgType, _, err := wire.ReadMessage(conn, wire.RequestCaps)
+				msgType, body, err := wire.ReadMessage(conn, wire.RequestCaps)
 				if err != nil {
 					return
 				}
@@ -91,13 +124,14 @@ func startFakeSigner(t *testing.T, statusType byte, statusBody, issueBody []byte
 				f.types = append(f.types, msgType)
 				if msgType == wire.TypeIssueRequest {
 					f.stderrAtIssue = stderr.String()
+					f.issueBody = append([]byte(nil), body...)
 				}
 				f.mu.Unlock()
 				switch msgType {
 				case wire.TypeStatus:
 					_ = wire.WriteMessage(conn, statusType, statusBody)
 				case wire.TypeIssueRequest:
-					if issueBody != nil {
+					if issueBody != nil && o.issueErr == nil {
 						_ = wire.WriteMessage(conn, wire.TypeIssueResponse, issueBody)
 						return
 					}
@@ -109,6 +143,21 @@ func startFakeSigner(t *testing.T, statusType byte, statusBody, issueBody []byte
 		}
 	}()
 	return socket, f
+}
+
+// statusWith is a StatusResponse body whose five keys all have custody
+// custody.
+func statusWith(t *testing.T, custody string) []byte {
+	t.Helper()
+	st := &wire.StatusResponse{BundleVersion: 1}
+	for _, role := range []string{"user", "host", "machine", "ops", "log"} {
+		st.Keys = append(st.Keys, wire.KeyStatus{Role: role, Alg: ssh.KeyAlgoED25519, Custody: custody, Fingerprint: "SHA256:fake-" + role})
+	}
+	body, err := st.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 // TestCAIssueStatusGate proves that ca issue asks the signer for its
@@ -141,18 +190,6 @@ func TestCAIssueStatusGate(t *testing.T) {
 	}
 	certFile := strings.TrimSuffix(keyFile, ".pub") + "-cert.pub"
 
-	statusWith := func(t *testing.T, custody string) []byte {
-		t.Helper()
-		st := &wire.StatusResponse{BundleVersion: 1}
-		for _, role := range []string{"user", "host", "machine", "ops", "log"} {
-			st.Keys = append(st.Keys, wire.KeyStatus{Role: role, Alg: ssh.KeyAlgoED25519, Custody: custody, Fingerprint: "SHA256:fake-" + role})
-		}
-		body, err := st.Marshal()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return body
-	}
 	statusError := func(t *testing.T, code wire.ErrorCode, msg string) []byte {
 		t.Helper()
 		body, err := (&wire.ErrorResponse{Code: code, Message: msg}).Marshal()
