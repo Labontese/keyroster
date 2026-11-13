@@ -358,8 +358,11 @@ func TestSignerRefuses(t *testing.T) {
 // TestTrustRefuses (KEY-07, D-13) checks the trust boundary at the
 // binaries: install-bundle refuses a genesis bundle whose root is not
 // pinned and leaves the signer unable to start, and ca issue is refused
-// without an admin key (by the CLI) and with a key the policy does not
-// list (by the signer), writing no certificate either way.
+// without an admin key (by the CLI), with a key the policy does not list
+// (by the signer), and without or with another installation's ID
+// (issue_installation_missing, issue_installation_mismatch, by the signer,
+// 03-14d, F15), writing no certificate in any of these cases; a request
+// that names the bundle's installation issues.
 func TestTrustRefuses(t *testing.T) {
 	login := currentUser(t)
 
@@ -398,6 +401,7 @@ func TestTrustRefuses(t *testing.T) {
 	}
 	t.Run("ca_issue_without_admin_key", func(t *testing.T) {
 		code, out := keyrosterWithAgent(t, env.AdminAgent, "ca", "issue", "--socket", env.Socket,
+			"--installation-id", env.InstallationID, // (03-14d, F15)
 			"--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
 		if code != 2 || !strings.Contains(out, "--admin-key") {
 			t.Fatalf("ca issue without --admin-key exited %d, want 2 naming --admin-key:\n%s", code, out)
@@ -408,6 +412,7 @@ func TestTrustRefuses(t *testing.T) {
 		outsider := newUserKey(t, "outsider")
 		sshAdd(t, env.AdminAgent, outsider)
 		code, out := keyrosterWithAgent(t, env.AdminAgent, "ca", "issue", "--socket", env.Socket,
+			"--installation-id", env.InstallationID, // (03-14d, F15)
 			"--admin-key", fingerprint(t, outsider+".pub"),
 			"--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
 		if code != 1 || !strings.Contains(out, "evidence_not_admin") {
@@ -420,5 +425,42 @@ func TestTrustRefuses(t *testing.T) {
 		if _, err := os.Stat(certFile); err != nil {
 			t.Fatalf("admin-authorized request: %v", err)
 		}
+	})
+	t.Run("issue_names_installation", func(t *testing.T) {
+		// The signer refuses an admin issue request that does not name its
+		// bundle's installation, or names another, before any CA key is used
+		// (03-14d, F15). Its own user key keeps the no-certificate checks
+		// independent of the other subtests.
+		key := newUserKey(t, "id_installation")
+		certFile := key + "-cert.pub"
+		noCert := func(t *testing.T) {
+			t.Helper()
+			if _, err := os.Stat(certFile); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("certificate %s exists after a refusal (stat: %v)", certFile, err)
+			}
+		}
+		t.Run("without_flag_refused", func(t *testing.T) {
+			code, out := keyrosterWithAgent(t, env.AdminAgent, "ca", "issue", "--socket", env.Socket, "--admin-key", env.AdminFingerprint, // no --installation-id on purpose (03-14d)
+				"--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+			if code != 1 || !strings.Contains(out, "issue_installation_missing: the signer's trust bundle names an installation ID, so the request must name it: pass --installation-id; nothing was issued") {
+				t.Fatalf("ca issue without --installation-id exited %d, want 1 with issue_installation_missing and its hint:\n%s", code, out)
+			}
+			noCert(t)
+		})
+		t.Run("other_installation_refused", func(t *testing.T) {
+			code, out := keyrosterWithAgent(t, env.AdminAgent, "ca", "issue", "--socket", env.Socket, "--admin-key", env.AdminFingerprint,
+				"--installation-id", "ffffffffffffffffffffffffffffffff",
+				"--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+			if code != 1 || !strings.Contains(out, "issue_installation_mismatch: --installation-id names another installation than the signer at --socket serves; nothing was issued") {
+				t.Fatalf("ca issue for another installation exited %d, want 1 with issue_installation_mismatch and its hint:\n%s", code, out)
+			}
+			noCert(t)
+		})
+		t.Run("own_installation_issues", func(t *testing.T) {
+			env.issue(t, "--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+			if _, err := os.Stat(certFile); err != nil {
+				t.Fatalf("request for the bundle's installation: %v", err)
+			}
+		})
 	})
 }

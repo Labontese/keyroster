@@ -628,7 +628,8 @@ func TestPKCS11ConcurrentIssue(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, keyrosterBin, "ca", "issue", "--socket", env.Socket, //nolint:gosec // G204: the binary under test
-				"--admin-key", env.AdminFingerprint, "--pubkey", keys[i]+".pub",
+				"--admin-key", env.AdminFingerprint, "--installation-id", env.InstallationID, // (03-14d, F15)
+				"--pubkey", keys[i]+".pub",
 				"--principal", login, "--subject", "u:"+login, "--ttl", "10m")
 			cmd.Env = append(envWithout("SSH_AUTH_SOCK"), "SSH_AUTH_SOCK="+env.AdminAgent)
 			out, err := cmd.CombinedOutput()
