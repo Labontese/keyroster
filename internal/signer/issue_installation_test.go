@@ -5,6 +5,8 @@ import (
 	"context"
 	"testing"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/Labontese/keyroster/internal/keystore"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -51,7 +53,16 @@ func (e *logEnv) issuesUnder(t *testing.T, req *wire.IssueRequest) {
 	if er != nil {
 		t.Fatalf("refused %s: %s, want it issued", er.Code, er.Message)
 	}
-	c := certOf(t, resp)
+	// Parsed here, not with recovery_test.go's certOf, which builds on
+	// linux only (03-14d, F15).
+	pub, err := ssh.ParsePublicKey(resp.Cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, ok := pub.(*ssh.Certificate)
+	if !ok {
+		t.Fatal("not a certificate")
+	}
 	if !bytes.Equal(c.SignatureKey.Marshal(), e.fx.Roles[keystore.RoleUser].PublicKey().Marshal()) {
 		t.Fatal("the certificate is not signed by this installation's user CA")
 	}
