@@ -174,6 +174,8 @@ func (e *logEnv) request() *wire.IssueRequest {
 		ValidForSeconds: 600,
 		CreatedAt:       uint64(time.Now().Unix()), //nolint:gosec // G115: after 1970
 	}
+	// The fixture's installation, if it names one (03-14d, F15).
+	req.InstallationID = e.fx.InstallationID
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		e.t.Fatal(err)
 	}

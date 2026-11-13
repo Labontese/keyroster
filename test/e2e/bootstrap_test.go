@@ -336,11 +336,11 @@ func (e *signerEnv) signerCmd(t *testing.T, args ...string) (int, string) {
 }
 
 // runIssue runs keyroster ca issue against the signer, authorized by the
-// first admin key from the admin agent, and returns its exit code and
-// output.
+// first admin key from the admin agent, for the bundle's installation
+// (--installation-id, 03-14d, F15), and returns its exit code and output.
 func (e *signerEnv) runIssue(t *testing.T, args ...string) (int, string) {
 	t.Helper()
-	full := append([]string{"ca", "issue", "--socket", e.Socket, "--admin-key", e.AdminFingerprint}, args...)
+	full := append([]string{"ca", "issue", "--socket", e.Socket, "--admin-key", e.AdminFingerprint, "--installation-id", e.InstallationID}, args...)
 	return keyrosterWithAgent(t, e.AdminAgent, full...)
 }
 

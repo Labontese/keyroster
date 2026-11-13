@@ -206,6 +206,7 @@ func TestDeliveryDuringHeldSignature(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, keyrosterBin, "ca", "issue", "--socket", env.Signer.Socket, "--admin-key", env.Signer.AdminFingerprint, //nolint:gosec // G204: the binary under test
+			"--installation-id", env.Signer.InstallationID, // (03-14d, F15)
 			"--pubkey", userKey+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
 		cmd.Env = append(envWithout("SSH_AUTH_SOCK"), "SSH_AUTH_SOCK="+env.Signer.AdminAgent)
 		out, err := cmd.CombinedOutput()

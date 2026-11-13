@@ -22,6 +22,7 @@ func (e *hostEnv) issueKR1(t *testing.T, role wire.CARole, subject string, valid
 	e.clock.set(e.clock.Now().Add(time.Millisecond))
 	req := &wire.IssueRequest{CARole: role, SubjectKey: newEd25519(t).PublicKey().Marshal(), Subject: subject, Principals: []string{"web1"},
 		ValidForSeconds: validFor, CreatedAt: uint64(e.clock.Now().Unix())} //nolint:gosec // G115: after 1970
+	req.InstallationID = e.fx.InstallationID // (03-14d, F15)
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		t.Fatal(err)
 	}

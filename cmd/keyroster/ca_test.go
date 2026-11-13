@@ -159,3 +159,137 @@ func TestCAIssueAdminEvidence(t *testing.T) {
 		}
 	})
 }
+
+// The hints ca issue adds to the signer's installation refusals (03-14d,
+// F15), byte for byte the plan's output contract.
+const (
+	hintIssueMissing      = "the signer's trust bundle names an installation ID, so the request must name it: pass --installation-id"
+	hintIssueMismatch     = "--installation-id names another installation than the signer at --socket serves"
+	hintIssueUnknown      = "this signer says its trust bundle names no installation ID; leave out --installation-id only after keyroster trust verify shows installation id: none for the installation you mean to approve"
+	hintIssueOlderSigner  = "a signer older than this keyroster does not read the installation ID: upgrade the signer, or leave out --installation-id only if its trust bundle names no installation"
+	testCAInstallationID  = "00112233445566778899aabbccddeeff"
+	nothingWasIssuedTrail = "nothing was issued"
+)
+
+// TestCAIssueInstallation (03-14d, F15): ca issue refuses a malformed
+// --installation-id as a usage error before it contacts the socket, sends
+// the ID it was given in a v2 request signed under
+// keyroster/issue-request/v2, and adds a hint to the signer's three
+// installation refusals and, when the flag was set, to malformed_request
+// (an older signer), keeping the signer's own text.
+func TestCAIssueInstallation(t *testing.T) {
+	_, subject, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subjectPub, err := ssh.NewPublicKey(subject.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, admin, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminSigner, err := ssh.NewSignerFromKey(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	useKeyring(t, admin)
+	keyFile := filepath.Join(t.TempDir(), "id.pub")
+	if err := os.WriteFile(keyFile, ssh.MarshalAuthorizedKey(subjectPub), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(t *testing.T, socket string, stderr *lockedBuffer, extra ...string) int {
+		t.Helper()
+		var stdout bytes.Buffer
+		args := append([]string{
+			"ca", "issue",
+			"--socket", socket,
+			"--pubkey", keyFile,
+			"--subject", "u:alice",
+			"--principal", "alice",
+			"--admin-key", ssh.FingerprintSHA256(adminSigner.PublicKey()),
+		}, extra...)
+		return dispatch(context.Background(), args, &stdout, stderr)
+	}
+	start := func(t *testing.T, stderr *lockedBuffer, issueErr *wire.ErrorResponse) (string, *fakeSigner) {
+		t.Helper()
+		return startFakeSignerOpts(t, fakeSignerOpts{statusType: wire.TypeStatusResponse, statusBody: statusWith(t, "agent"), stderr: stderr, issueErr: issueErr})
+	}
+
+	t.Run("flag_malformed_usage", func(t *testing.T) {
+		for _, bad := range []string{"ABC", strings.ToUpper(testCAInstallationID), testCAInstallationID[:31]} {
+			stderr := &lockedBuffer{}
+			socket, f := start(t, stderr, nil)
+			if code := run(t, socket, stderr, "--installation-id", bad); code != 2 {
+				t.Fatalf("--installation-id %q: exit status %d, want 2 (stderr %q)", bad, code, stderr.String())
+			}
+			if got := f.seen(); len(got) != 0 {
+				t.Fatalf("--installation-id %q: the signer received request types %x, want nothing", bad, got)
+			}
+		}
+	})
+	t.Run("request_signed_under_v2", func(t *testing.T) {
+		stderr := &lockedBuffer{}
+		socket, f := start(t, stderr, nil)
+		if code := run(t, socket, stderr, "--installation-id", testCAInstallationID); code != 1 {
+			t.Fatalf("exit status %d, want 1 from the fake refusal (stderr %q)", code, stderr.String())
+		}
+		req, err := wire.ParseIssueRequest(f.lastIssue())
+		if err != nil {
+			t.Fatalf("the IssueRequest body does not parse: %v", err)
+		}
+		if req.InstallationID != testCAInstallationID || len(req.Evidence) != 1 {
+			t.Fatalf("the request names installation %q with %d evidence items, want %s with 1", req.InstallationID, len(req.Evidence), testCAInstallationID)
+		}
+		sig, err := sshsig.Parse(req.Evidence[0].Blob)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sig.Verify(wire.AdminSSHSIGNamespaceV2, req.SigningBytes()); err != nil {
+			t.Fatalf("the evidence does not verify under %s: %v", wire.AdminSSHSIGNamespaceV2, err)
+		}
+	})
+	allHints := []string{hintIssueMissing, hintIssueMismatch, hintIssueUnknown, hintIssueOlderSigner}
+	for _, tc := range []struct {
+		name string
+		code wire.ErrorCode
+		msg  string
+		flag bool
+		hint string // "" for none
+	}{
+		{"hint_missing", wire.CodeRefused, "issue_installation_missing", false, hintIssueMissing},
+		{"hint_mismatch", wire.CodeRefused, "issue_installation_mismatch", true, hintIssueMismatch},
+		{"hint_unknown", wire.CodeRefused, "issue_installation_unknown", true, hintIssueUnknown},
+		{"hint_malformed_with_flag", wire.CodeMalformed, "malformed_request", true, hintIssueOlderSigner},
+		{"no_hint_malformed_without_flag", wire.CodeMalformed, "malformed_request", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr := &lockedBuffer{}
+			er := &wire.ErrorResponse{Code: tc.code, Message: tc.msg}
+			socket, _ := start(t, stderr, er)
+			var extra []string
+			if tc.flag {
+				extra = []string{"--installation-id", testCAInstallationID}
+			}
+			if code := run(t, socket, stderr, extra...); code != 1 {
+				t.Fatalf("exit status %d, want 1 (stderr %q)", code, stderr.String())
+			}
+			s := stderr.String()
+			if !strings.Contains(s, er.Error()) {
+				t.Fatalf("stderr = %q, want the signer's own text %q", s, er.Error())
+			}
+			if tc.hint == "" {
+				for _, h := range allHints {
+					if strings.Contains(s, h) {
+						t.Fatalf("stderr = %q carries the hint %q, want none", s, h)
+					}
+				}
+				return
+			}
+			if !strings.Contains(s, tc.hint) || !strings.Contains(s, nothingWasIssuedTrail) {
+				t.Fatalf("stderr = %q, want the hint %q and %q", s, tc.hint, nothingWasIssuedTrail)
+			}
+		})
+	}
+}

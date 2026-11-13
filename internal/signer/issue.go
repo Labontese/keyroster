@@ -40,8 +40,14 @@ func refusalErr(code wire.ErrorCode, reason string, cause error) error {
 
 // Issue decides on one request and, if it passes, issues the certificate.
 // The peer-credential allowlist was checked before the request was read.
-// Then: freshness (CreatedAt within ±300 s), admin-sshsig/v1 evidence from
-// the installed policy's admins over the request's exact signing bytes
+// Then: freshness (CreatedAt within ±300 s), the installation the request
+// names (03-14d, F15; the D-04 rule of directories, as revoke and forget
+// requests have it): where the installed bundle names an installation, a
+// request without one is refused issue_installation_missing and one for
+// another issue_installation_mismatch, and where it names none, a request
+// that names one is refused issue_installation_unknown; then
+// admin-sshsig/v1 evidence from the installed policy's admins over the
+// request's exact signing bytes under the request's namespace, v1 or v2
 // (D-13), the CA key of the requested role from the installed bundle, that
 // role's policy profile (validity cap and extensions, CA-04, CA-05), the
 // installed bundle still being the one loaded at start, a request id not
@@ -58,6 +64,19 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 	created := time.Unix(int64(min(req.CreatedAt, uint64(1)<<62)), 0) //nolint:gosec // G115: clamped below 2^63
 	if d := now.Sub(created); d > maxClockSkew || d < -maxClockSkew {
 		return nil, refusalErr(wire.CodeRefused, "request_time_skew", nil)
+	}
+	// The installation the request names (03-14d, F15), before the
+	// evidence and before any CA key: the D-04 rule of directories.
+	switch {
+	case s.installationID != "" && req.InstallationID == "":
+		// A keyroster/issue-request/v1 request names no installation, so
+		// its admin signature would be valid in every one; a
+		// keyroster/issue-request/v2 request names it.
+		return nil, refusalErr(wire.CodeRefused, "issue_installation_missing", nil)
+	case s.installationID != "" && req.InstallationID != s.installationID:
+		return nil, refusalErr(wire.CodeRefused, "issue_installation_mismatch", nil)
+	case s.installationID == "" && req.InstallationID != "":
+		return nil, refusalErr(wire.CodeRefused, "issue_installation_unknown", nil)
 	}
 	admins, err := verifyAdminEvidence(req, s.policy)
 	if err != nil {

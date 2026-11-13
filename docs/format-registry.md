@@ -131,7 +131,8 @@ both.
 
 | Tag | Use | Constant |
 |---|---|---|
-| `keyroster/issue-request/v1` | domain and SSHSIG, admin issue request | `wire.IssueRequestDomain`, `wire.AdminSSHSIGNamespace` |
+| `keyroster/issue-request/v1` | domain and SSHSIG, admin issue request without an installation ID; accepted only where the signer's bundle names none (03-14d) | `wire.IssueRequestDomain`, `wire.AdminSSHSIGNamespace` |
+| `keyroster/issue-request/v2` | domain and SSHSIG, admin issue request that names its installation (03-14d) | `wire.IssueRequestDomainV2`, `wire.AdminSSHSIGNamespaceV2` |
 | `keyroster/login-request/v1` | domain, login issue request | `wire.LoginRequestDomain` |
 | `keyroster/revoke-request/v2` | domain and SSHSIG, revoke request | `wire.RevokeRequestDomain`, `wire.RevokeSSHSIGNamespace` |
 | `keyroster/revoke-request/v1` | domain and SSHSIG, 03-01 revoke request; refused since 03-03, still read by audit | `wire.RevokeRequestDomainV1`, `wire.RevokeSSHSIGNamespaceV1` |
@@ -195,6 +196,7 @@ hex digits). Formats that carry it today include:
 | Host issue request (`wire.HostIssueRequest`, internal/wire/hostissue.go) | `InstallationID` | the requested host key (SSHSIG) |
 | Probe issue request (`wire.ProbeIssueRequest`, internal/wire/probeissue.go) | `InstallationID` | the host key and the probe key (SSHSIG each) |
 | Machine issue request (`wire.MachineIssueRequest`, internal/wire/machineissue.go) | `InstallationID` | the machine key (SSHSIG) |
+| Issue request v2 (`wire.IssueRequest`, internal/wire/issue.go) | `InstallationID` | policy admins (SSHSIG) |
 
 The join token (`join.JoinToken`) also names the installation, but it is
 not signed.
@@ -211,6 +213,8 @@ for another installation (`probe_issue_no_installation_id`,
 here in the PR that adds it.
 
 Since 03-14c, `keyroster audit verify --installation-id` checks the installation ID of the trust bundle in force (and refuses an installation-bound log without that flag or --any-installation), and the CLI checks every served bundle against the installation ID its config pins (serverclient.Trust).
+
+Recorded exceptions (03-14d): an issue request v1 is accepted only where the signer's bundle names no installation ID. LoginIssueRequest names none (an owner-recorded residual, Q-C8, which assumes each installation has its own RP hostname). adminauth.Message is bound to an exact origin taken from the root-verified policy, which assumes each installation has its own hostname, the same assumption as Q-C8; and the agent-identity rotation message is accepted only over mTLS, from the same old identity that signs it, and that identity is bound to the installation at enrollment (both owner-approved, Q-D1 = A). TestSignedRequestsBindInstallation (internal/wire/installation_test.go) classifies every keyroster/ string literal in the module's non-test code under internal/ and cmd/, and every signed request type in internal/wire; a tag without the keyroster/ prefix is outside it.
 
 ## Reserved names
 

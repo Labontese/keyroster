@@ -242,7 +242,7 @@ func TestMachineIssueRequest(t *testing.T) {
 			EvidenceMachinePoP != "machine-pop/v1" || TypeMachineIssueRequest != 0x0C {
 			t.Fatal("the machine request constants changed")
 		}
-		for _, other := range []string{AdminSSHSIGNamespace, RevokeSSHSIGNamespace, RevokeSSHSIGNamespaceV1, RecoverySSHSIGNamespace,
+		for _, other := range []string{AdminSSHSIGNamespace, AdminSSHSIGNamespaceV2, RevokeSSHSIGNamespace, RevokeSSHSIGNamespaceV1, RecoverySSHSIGNamespace, // with the v2 issue namespace (03-14d, F15)
 			LoginRequestDomain, ForgetSSHSIGNamespace, HostPoPNamespace, ProbePoPNamespace} {
 			if MachinePoPNamespace == other || strings.HasPrefix(other, MachinePoPNamespace) || strings.HasPrefix(MachinePoPNamespace, other) {
 				t.Errorf("the machine namespace %q overlaps %q", MachinePoPNamespace, other)
