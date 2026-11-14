@@ -196,6 +196,9 @@ func (d *DB) ReadLogWithHashes(ctx context.Context, fn func(idx uint64, leaf, ha
 	if snap.Bundle, err = latestBundle(ctx, tx); err != nil && !errors.Is(err, ErrNoBundle) {
 		return nil, err
 	}
+	if snap.CAGenerations, err = caGenerations(ctx, tx); err != nil {
+		return nil, err
+	}
 	if snap.KRL, err = krlState(ctx, tx); err != nil {
 		return nil, err
 	}
