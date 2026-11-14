@@ -235,6 +235,12 @@ func decodeLeaf(data []byte) map[string]any {
 			return map[string]any{"error": err.Error()}
 		}
 		decodeMachineIssue(m, b)
+	case tlog.KindCAGeneration:
+		b, err := tlog.DecodeCAGenerationBody(l.Body)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		decodeCAGeneration(m, b)
 	case tlog.KindRevoke:
 		b, err := tlog.DecodeRevokeBody(l.Body)
 		if err != nil {
@@ -619,3 +625,16 @@ func parseCert(raw []byte) (*ssh.Certificate, error) {
 
 // errNotCertificate is a log leaf's certificate field holding a plain key.
 var errNotCertificate = errors.New("not a certificate")
+
+// decodeCAGeneration renders a ca_generation body (03-12): the role, the
+// generation, the key's SHA-256 fingerprint, the algorithm and the
+// custody. It renders no policy_version and none of the bound names.
+func decodeCAGeneration(m map[string]any, b *tlog.CAGenerationBody) {
+	m["role"] = b.Role
+	m["generation"] = b.Generation
+	if pk, err := ssh.ParsePublicKey(b.PublicKey); err == nil {
+		m["fingerprint"] = ssh.FingerprintSHA256(pk)
+	}
+	m["alg"] = b.Alg
+	m["custody"] = b.Custody
+}
