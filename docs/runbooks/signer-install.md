@@ -85,6 +85,26 @@ install -m 0755 -o root -g root keyroster-signer keyroster /usr/local/bin/
 keyroster-signer version
 ```
 
+**Upgrading to a build with CA key generations (03-12).** The first
+writable open of `signer.db` by this build (`serve`, `install-bundle`,
+`ca-init`, `ca-rotate prepare` or `recover-revocations`) migrates it from
+schema 5 to schema 6 and seeds one generation row per role from the
+ca-init keys; until then `doctor` and `export-log` on a schema-5 database
+refuse with `has schema version 5, this binary reads 6`. Under a restore
+marker only `recover-revocations` opens `signer.db`, so a backup taken
+before the upgrade and restored after it is migrated there
+(`--migrate-only`, in the restore section below). There is no binary
+downgrade after the migration, because an older binary refuses schema 6:
+take a `signer.db` backup first. An installed bundle whose active CA entry
+carries a generation number other than 1 makes `serve` refuse after the
+upgrade, because the signer now reads that field; `keyroster root sign`
+always writes 1, so only a hand-made bundle can be affected, and the fix
+is a successor with generation 1. (Run in CI:
+TestMigrations/upgrade_from_v5,
+TestOpenReadOnlyRefuses/schema_5_refused_with_schema_line and
+TestCheckBundleKeysGenerations/generation_field_mismatch_refused.
+UNVERIFIED on the homelab signer.)
+
 ## 3. Install the system user, the units and the TPM drop-in
 
 From the repository checkout:
@@ -322,6 +342,13 @@ socket and runs no program.
 | `WARN custody_mismatch` | the TPM now maps to another custody than the one recorded | The VM may run on another TPM than the bundle claims. Investigate before issuing. |
 | `INFO pkcs11_custody_declared` | the online keys are recorded as custody `pkcs11-agent`, which the operator declared at `ca-init` and nothing verifies | Expected with the PKCS#11 backend. Check on the HSM that the keys in `ca-pubkeys.json` are HSM keys ([pkcs11.md](../backends/pkcs11.md)). |
 | `WARN tpm_unavailable` | doctor could not read the TPM, or keys are recorded with TPM custody but the TPM was not inspected | Check `/dev/tpmrm0` and group `tss`, and that the recorded backend is `tpm`. Until then the TPM custody is unconfirmed. |
+| `FAIL restore_recovery_pending` | the marker `restore-recovery-pending` exists in the state directory: a restore was not recovered or ruled out | Follow the restore section (step 2b). `serve`, `ca-init`, `install-bundle` and `ca-rotate prepare` refuse until then. |
+| `WARN installed_issued_at_after_now` | the installed bundle is dated after this clock | It blocks every later successor until real time catches up. Check the clock. |
+| `WARN unrecorded_generation_file` | a `<role>-g<N>.age` file in the state directory's `software` directory that no generation row names | See [Prepare a CA key generation](#prepare-a-ca-key-generation). |
+
+`OK generations` lists each role's active and prepared CA key
+generations with their fingerprints (03-12). (Run in CI: the doctor tests
+of cmd/keyroster-signer and internal/doctor.)
 
 On the homelab VM the expected result is no FAIL, `WARN vtpm_custody` and
 one `WARN software_root` per root.
@@ -360,6 +387,59 @@ signer's journal and the log's clock_regression entries; without a clock
 episode, treat the signer as compromised. (Run in CI:
 TestVerifyLeafTimeBound and TestAuditVerifyClock. UNVERIFIED on a real
 signer.)
+
+## Prepare a CA key generation
+
+When a CA key is to be rotated (03-12, D-14), its next generation is
+prepared first, with the signer stopped and the state lock free, as the
+signer's user:
+
+```
+systemctl stop keyroster-signer.service
+runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+  keyroster-signer ca-rotate prepare --state-dir /var/lib/keyroster-signer \
+  --role user --key SHA256:... --out /var/lib/keyroster-signer/incoming/user-g2.json
+systemctl start keyroster-signer.service
+```
+
+`--key` names the new key with the agent backend; the software backend
+creates the key itself and takes no `--key`. `prepare` records the new
+generation as a row and a `ca_generation` audit-log entry in one
+transaction, writes the prepare file (the new public key, its generation,
+algorithm and custody) for the root ceremony that 03-12b adds, and prints
+`role <role> generation <N> <fingerprint> <alg> <custody>`. Read that
+fingerprint aloud from the signer console to the second person. It
+changes nothing that a host or a client trusts: the bundle in force still
+names the old key, and the ceremony and the rest of the rotation are in
+`docs/runbooks/ca-rotation.md` (added by 03-12b).
+
+The refusals, by name, and what to do:
+
+- `rotation_role_not_supported`: the ops and log keys rotate in 03-13.
+- `rotation_not_supported_on_backend`: the tpm and piv backends get CA key
+  generations in 03-12f.
+- `rotation_custody_mismatch`: the new key's custody is not the one the
+  role's first generation records; a rotation never changes custody.
+- a key equal to a stored generation of any role, to a root of any bundle
+  the log records (a rotated-out root included), to a key of the
+  installed bundle or to an admin of the installed policy: select another
+  key.
+- `restore_recovery_pending`: the state directory was restored; follow
+  the restore section first.
+- `generations_not_logged`, at start and in doctor: the generation rows
+  and the audit log disagree. Stop, do not edit `signer.db`, restore from
+  a backup and follow the restore section.
+
+With the software backend, `prepare` writes `<role>-g<N>.age` in the state
+directory's `software` directory (mode 0600; generation 1 stays
+`<role>.age`). After a restore, a file of that name that no generation row
+names (doctor warns `unrecorded_generation_file`) is, when no prepare is
+running and no `--key` prepare of yours is waiting for it, a key from a
+prepare that the restore lost: destroy it unless you placed it for a
+`--key` prepare, and never record a lost key with `--key`. (Run in CI:
+TestCARotatePrepareTracer, TestPrepareGeneration, TestGenerationsLogged,
+TestSignerRestartMixedBundle and TestDoctorUnrecordedGenerationFile.
+UNVERIFIED on the homelab TPM signer until 03-12f.)
 
 ## Install a successor bundle: stop, install, start
 
@@ -409,6 +489,16 @@ is restarted; it never issues under the superseded policy.
 > sandbox). On the homelab signer, the sandboxed `serve` of the current
 > build created it (plan 01-20); the refusal while it is held was not
 > exercised there.
+
+`install-bundle` refuses `bundle_issued_in_future` (03-12): a bundle,
+genesis or successor, whose `issued_at` is later than the signer's clock
+plus 300 s. The usual cause is a ceremony machine whose clock runs ahead.
+Set that clock right, repeat the ceremony from a fresh output directory
+and destroy the refused files; nothing was written on the signer. Always
+take a `signer.db` backup and an export right after every bundle install: the
+restore section explains what a restore that brings back an older bundle
+costs. (Run in CI: TestInstallIssuedAtAhead. UNVERIFIED on the homelab
+signer.)
 
 ## Snapshot restore: check the clock first
 
@@ -744,6 +834,45 @@ echo "restored signer.db from $1"
 EOF
 ```
 
+The file-restore block also writes the marker `restore-recovery-pending`
+in the state directory (03-12), after the lock check and before
+`signer.db` is replaced. From then on `serve`, `ca-init`, `install-bundle`
+and `ca-rotate prepare` refuse `restore_recovery_pending`, doctor reports
+it as a FAIL, and `export-log` still works. A VM-snapshot restore that
+never runs the block carries no marker, and nothing can detect that
+locally: the hold-first rule above is the control there. After a restore,
+a `<role>-g<N>.age` file in the state directory's `software` directory
+that no generation row names (doctor warns `unrecorded_generation_file`)
+is, when no prepare is running, normally a key from a prepare that the
+restore lost: destroy it unless you placed it for a `--key` prepare, and
+never record a lost key with `--key`. (Run in CI: TestRestoreMarker,
+TestRestoreRunbookChecks and the `systemd-sandbox` job, where smoke.sh
+runs the block and the marker's lifecycle under the real units.)
+
+**A backup older than this build.** This applies after the file-restore
+block on every path: a file backup, a disk-only snapshot or a fresh VM. A
+`signer.db` taken before the upgrade to 03-12 is at schema 5, and after
+the file-restore block `export-log` and `doctor` refuse it (`has schema
+version 5, this binary reads 6`), while every command that could migrate
+it is refused by the marker: under the marker only `recover-revocations`
+opens `signer.db`. So, after the file-restore block, run this as the
+signer's user:
+
+```
+runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+  keyroster-signer recover-revocations --state-dir /var/lib/keyroster-signer --migrate-only
+```
+
+It takes the one lock the marker does not refuse, applies the migration,
+writes nothing else and keeps the marker. Then take the export of step 1
+below and go on with the steps in their order. Never release the marker
+to get past the schema refusal: that releases the hold without the
+recovery, and the revocations that the restore lost come back. (Run in
+CI: TestRestoreMarker/schema5_restore_migrates_under_marker and
+TestRestoreMarker/migrate_only_writes_nothing_else; smoke.sh runs the
+flag on the restored, already current, database under the real units.
+UNVERIFIED: the migration of a real schema-5 backup on a signer host.)
+
 **From a disk-only VM snapshot (Proxmox): never boot the snapshot.** A
 signer VM booted from a rolled-back disk starts the signer and
 keyroster-server before you can hold them. So do not roll back the
@@ -799,6 +928,12 @@ taken from the snapshot's disk with the three files. Keys in a TPM
 cannot leave the old VM's TPM, so for the TPM backend it is not
 possible. If it is not possible, or `serve` or
 step 2 refuses, escalate. (UNVERIFIED: no part of this has run.)
+
+A `signer.db` from a snapshot or a backup older than this build is at
+schema 5, so on the snapshot and fresh-VM paths too, after the file
+restore and before step 1, run the `--migrate-only` command of the
+paragraph "A backup older than this build" above. (UNVERIFIED on the
+homelab signer.)
 
 **A VM snapshot with RAM is not supported for the signer VM.** Never
 resume one: the signer process would run on from the snapshot's memory
@@ -975,6 +1110,13 @@ structurally (see the warning above).
       Go on only when `timedatectl` reports a synchronized clock and
       `doctor` shows `OK clock`, as in [Snapshot restore: check the clock
       first](#snapshot-restore-check-the-clock-first).
+
+      With the restore marker present (03-12), `doctor` prints
+      `FAIL restore_recovery_pending` and exits 1 here, and that is
+      expected until the recovery or the release; the line this step
+      reads is `OK clock`, and a FAIL for any other reason is not
+      expected. (Run in CI: TestRestoreRunbookChecks. UNVERIFIED on the
+      homelab signer.)
 
    2. **Copy the inputs to the admin.** An admin account (section 8, for
       example `alice`, with her own ssh-agent and `keyroster` config) signs
@@ -1204,6 +1346,34 @@ structurally (see the warning above).
       shows a clock episode. (Run in CI: TestAuditVerifyClock.
       UNVERIFIED in a real restore.)
 
+   **The restore marker's release (03-12).** A successful
+   `recover-revocations` removes the marker and says so, with a
+   `restore-recovery-pending removed:` line on stderr and the same line in
+   the journal; a refusal leaves it. After `nothing to recover`, release
+   the marker with this command, run as the signer's user:
+
+   ```
+   runuser -u keyroster-signer -g keyroster-signer -- \
+     keyroster-signer recover-revocations --state-dir /var/lib/keyroster-signer --no-recovery-needed
+   ```
+
+   Clear the marker before the hold is released: a start under it is
+   refused, and the unit then restarts in a loop. A release is recorded on
+   stderr and in the journal, and in no audit-log entry. Read the journal
+   with `journalctl -t keyroster-signer _UID=<the signer user's uid>`:
+   the identifier is set by the sender and any local user can write to the
+   journal socket, so an entry from another `_UID` is not a release.
+   `--no-recovery-needed` is a local release that nothing authenticates: it
+   does not check this step's precondition (no server KRL copy), anyone
+   who can run commands as the signer's user or as root can run it, and a
+   release without a recovery is visible only in the journal. The marker
+   guards against operator error, not against a local actor. (Run in CI:
+   TestRestoreMarker, the journal entry included,
+   TestRestoreRecoversLostRevocations, a real recovery under the marker in
+   the e2e lanes, and smoke.sh. UNVERIFIED on the homelab signer: a real
+   recovery that carries a certificate in this flow, and the journal
+   entry.)
+
    **The refusals and outcomes of step 2b, and what to do.** Both commands
    exit 1 on a refusal and write nothing. `keyroster revoke recover`
    prints `keyroster revoke: refused (<name>): <reason>`, and
@@ -1235,8 +1405,12 @@ structurally (see the warning above).
      the capture block kept. If it is, escalate. An import signed under
      another ops key is possible only after 03-13 rotates the ops key, and
      a certificate that only a lost bundle's CA generation names
-     (`recovery_certificate_invalid`) is possible only after 03-12. 03-12
-     and 03-13 own making those cases recoverable (UNVERIFIED).
+     (`recovery_certificate_invalid`) is possible only after a CA rotation
+     (03-12b to 03-12e) has installed a bundle that the restored database
+     lacks. The lost-bundle and lost-generation cases are 03-13's, with a
+     scoped exception to the restore marker; a lost installation ID is
+     the remedy of `recovery_installation_not_pinned` above
+     (`--installation-id`), not a re-init (UNVERIFIED).
    - `recovery_revoke_lost_unknown`: `--revoke-lost` named a serial that
      is not a lost host or machine certificate. Correct the serial from
      the summary.
