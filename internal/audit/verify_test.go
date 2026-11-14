@@ -4701,3 +4701,234 @@ func TestVerifyBoundKeysBelowTop(t *testing.T) {
 		})
 	}
 }
+
+// caGenBody is the ca_generation body of generation gen of role with key
+// pub, custody agent (03-12).
+func caGenBody(t testing.TB, role string, gen uint32, pub ssh.PublicKey) []byte {
+	t.Helper()
+	b, err := (&tlog.CAGenerationBody{Role: role, Generation: gen, PublicKey: pub.Marshal(), Alg: pub.Type(), Custody: "agent"}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// caInitBody is the ca_init body of the fixture's five keys, as the signer
+// writes it before its first bundle_install (custody agent, as genesis).
+func (f *fixture) caInitBody() []byte {
+	f.t.Helper()
+	body := &tlog.CAInitBody{}
+	for _, k := range []struct {
+		role string
+		s    ssh.Signer
+	}{{"user", f.ca}, {"host", f.hostCA}, {"machine", f.machineCA}, {"ops", f.ops}, {"log", f.logKey}} {
+		body.Keys = append(body.Keys, tlog.CAInitKey{Role: k.role, PublicKey: k.s.PublicKey().Marshal(), Alg: k.s.PublicKey().Type(), Custody: "agent"})
+	}
+	b, err := body.Encode()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return b
+}
+
+// initFixture is a log that starts as a signer's does: a ca_init entry with
+// the fixture's keys, then the genesis bundle_install (03-12). It returns
+// the genesis documents.
+func initFixture(t testing.TB, root ssh.Signer) (*fixture, docs) {
+	t.Helper()
+	f := newBareFixture(t, "ed25519")
+	if root != nil {
+		f.root = root
+	}
+	f.add(tlog.KindCAInit, f.caInitBody())
+	g := f.signDocs(f.genesis(), f.policy(), f.root)
+	f.addBundle(g)
+	return f, g
+}
+
+// withNext returns an edit that adds generation gen of the user CA with key
+// pub in state next, after the active user entry.
+func withNext(pub ssh.PublicKey, gen uint32) func(*trust.Bundle) {
+	return func(b *trust.Bundle) {
+		e := trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(pub), Alg: pub.Type(), Custody: "agent", State: "next", Generation: gen}
+		b.CAs = append([]trust.CAEntry{b.CAs[0], e}, b.CAs[1:]...)
+	}
+}
+
+// TestVerifyCAGeneration (03-12): audit verify records each ca_init key as
+// generation 1 of its role and checks every ca_generation entry: one of
+// the five roles, after the first bundle_install, the role's previous
+// generation plus 1, and a key equal to no earlier generation, no root of
+// any accepted bundle, no key of the bundle in force and no admin of the
+// policy in force. At each bundle_install every next entry must be a
+// logged generation, and, once a ca_init entry came before, so must every
+// active CA entry; a log with no ca_init entry still verifies.
+func TestVerifyCAGeneration(t *testing.T) {
+	ok := func(t *testing.T, f *fixture) *Report {
+		t.Helper()
+		rep, err := f.verify(join(f.lines()), nil)
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		return rep
+	}
+	refused := func(t *testing.T, f *fixture) {
+		t.Helper()
+		if _, err := f.verify(join(f.lines()), nil); err == nil {
+			t.Fatal("Verify accepted the log")
+		} else {
+			t.Logf("refused: %v", err)
+		}
+	}
+	key := func(t *testing.T) ssh.PublicKey { return newSigner(t, "ed25519").PublicKey() }
+	t.Run("ca_generation_ok", func(t *testing.T) {
+		f := standard(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, key(t)))
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 3, key(t)))
+		f.add(tlog.KindCAGeneration, caGenBody(t, "host", 2, key(t)))
+		if rep := ok(t, f); rep.Counts[tlog.KindCAGeneration] != 3 {
+			t.Fatalf("the report counts %d ca_generation entries, want 3", rep.Counts[tlog.KindCAGeneration])
+		}
+	})
+	t.Run("genesis_ca_init_is_generation_1", func(t *testing.T) {
+		f, _ := initFixture(t, nil)
+		f.addIssue()
+		ok(t, f)
+	})
+	t.Run("ca_init_recorded_without_refusal", func(t *testing.T) {
+		f := standard(t, "ed25519")
+		f.add(tlog.KindCAInit, encodeBody(t, &tlog.CAInitBody{Keys: []tlog.CAInitKey{{Role: "log", PublicKey: []byte{1}, Alg: "ssh-ed25519", Custody: "agent"}}}))
+		ok(t, f)
+	})
+	t.Run("log_without_ca_init_still_verifies", func(t *testing.T) {
+		ok(t, standard(t, "ed25519"))
+	})
+	t.Run("ca_generation_not_increasing_refused", func(t *testing.T) {
+		f := standard(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, key(t)))
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, key(t)))
+		refused(t, f)
+	})
+	t.Run("ca_generation_skips_a_number_refused", func(t *testing.T) {
+		f := standard(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 3, key(t)))
+		refused(t, f)
+	})
+	t.Run("ca_generation_key_reused_refused", func(t *testing.T) {
+		// The key of a ca_init entry, here one no bundle names.
+		f := standard(t, "ed25519")
+		k := key(t)
+		f.add(tlog.KindCAInit, encodeBody(t, &tlog.CAInitBody{Keys: []tlog.CAInitKey{{Role: "log", PublicKey: k.Marshal(), Alg: k.Type(), Custody: "agent"}}}))
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, k))
+		refused(t, f)
+		// The key of an earlier generation of another role.
+		f = standard(t, "ed25519")
+		k = key(t)
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, k))
+		f.add(tlog.KindCAGeneration, caGenBody(t, "host", 2, k))
+		refused(t, f)
+	})
+	t.Run("ca_generation_key_equals_root_refused", func(t *testing.T) {
+		f := standard(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, f.root.PublicKey()))
+		refused(t, f)
+	})
+	t.Run("ca_generation_key_equals_admin_refused", func(t *testing.T) {
+		f := standard(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, f.admin.PublicKey()))
+		refused(t, f)
+	})
+	t.Run("ca_generation_key_equals_earlier_root_refused", func(t *testing.T) {
+		f := newBareFixture(t, "ed25519")
+		g := f.signDocs(f.genesis(), f.policy(), f.root)
+		f.addBundle(g)
+		r2 := newSigner(t, "ed25519")
+		// v2 replaces the root R with R2; R and R2 both sign it.
+		f.addBundle(f.signDocs(f.successor(g, func(b *trust.Bundle) {
+			b.Root.Keys = []trust.RootKey{{Key: trust.FormatKey(r2.PublicKey()), Custody: "software"}}
+		}), f.policy(), f.root, r2))
+		if _, err := f.verify(join(f.lines()), nil); err != nil {
+			t.Fatalf("the root rotation does not verify: %v", err)
+		}
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, f.root.PublicKey()))
+		refused(t, f)
+	})
+	t.Run("ca_generation_key_equals_bundle_key_refused", func(t *testing.T) {
+		f := standard(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, f.ops.PublicKey()))
+		refused(t, f)
+	})
+	t.Run("unknown_role_refused", func(t *testing.T) {
+		f := standard(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "foo", 2, key(t)))
+		refused(t, f)
+	})
+	t.Run("before_first_bundle_refused", func(t *testing.T) {
+		f := newBareFixture(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, key(t)))
+		f.addBundle(f.signDocs(f.genesis(), f.policy(), f.root))
+		refused(t, f)
+	})
+	t.Run("bundle_next_not_logged_refused", func(t *testing.T) {
+		f := newBareFixture(t, "ed25519")
+		g := f.signDocs(f.genesis(), f.policy(), f.root)
+		f.addBundle(g)
+		f.addBundle(f.signDocs(f.successor(g, withNext(key(t), 2)), f.policy(), f.root))
+		refused(t, f)
+	})
+	t.Run("next_logged_ok", func(t *testing.T) {
+		f := newBareFixture(t, "ed25519")
+		g := f.signDocs(f.genesis(), f.policy(), f.root)
+		f.addBundle(g)
+		k := key(t)
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, k))
+		f.addBundle(f.signDocs(f.successor(g, withNext(k, 2)), f.policy(), f.root))
+		ok(t, f)
+	})
+	t.Run("active_not_logged_refused_when_ca_init_precedes", func(t *testing.T) {
+		f, g := initFixture(t, nil)
+		other := key(t)
+		f.addBundle(f.signDocs(f.successor(g, func(b *trust.Bundle) {
+			b.CAs[0].Key, b.CAs[0].Alg = trust.FormatKey(other), other.Type()
+		}), f.policy(), f.root))
+		refused(t, f)
+	})
+	t.Run("ca_init_then_unchanged_successor_ok", func(t *testing.T) {
+		f, g := initFixture(t, nil)
+		f.addBundle(f.signDocs(f.successor(g, nil), f.policy(), f.root))
+		f.addIssue()
+		ok(t, f)
+	})
+	t.Run("genesis_active_not_ca_init_refused", func(t *testing.T) {
+		f := newBareFixture(t, "ed25519")
+		ca := f.ca
+		f.ca = newSigner(t, "ed25519") // the ca_init entry names another user CA key
+		f.add(tlog.KindCAInit, f.caInitBody())
+		f.ca = ca
+		f.addBundle(f.signDocs(f.genesis(), f.policy(), f.root))
+		refused(t, f)
+	})
+	t.Run("line_with_policy_version_refused", func(t *testing.T) {
+		f := standard(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, key(t)))
+		lines := f.lines()
+		i := len(lines) - 2 // the ca_generation line, before the checkpoint
+		if !strings.Contains(lines[i], `"kind":"ca_generation"`) {
+			t.Fatalf("line %d is not the ca_generation line: %s", i, lines[i])
+		}
+		lines[i] = strings.Replace(lines[i], `"decoded":{`, `"decoded":{"policy_version":1,`, 1)
+		if _, err := f.verify(join(lines), nil); err == nil {
+			t.Fatal("Verify accepted a ca_generation line with a policy_version")
+		}
+	})
+}
+
+// encodeBody encodes a leaf body for a test.
+func encodeBody(t testing.TB, b interface{ Encode() ([]byte, error) }) []byte {
+	t.Helper()
+	enc, err := b.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return enc
+}
