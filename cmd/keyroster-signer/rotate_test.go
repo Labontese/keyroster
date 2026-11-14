@@ -1,0 +1,371 @@
+//go:build linux
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
+
+	"github.com/Labontese/keyroster/internal/audit"
+	"github.com/Labontese/keyroster/internal/signer"
+	"github.com/Labontese/keyroster/internal/signerdb"
+	"github.com/Labontese/keyroster/internal/sshsig"
+	"github.com/Labontese/keyroster/internal/tlog"
+	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
+)
+
+// rotateState is a state directory initialised by ca-init with the agent
+// backend (03-12): five generated role keys held by an in-process
+// ssh-agent, whose keyring stays reachable so that a test can add the key
+// of a later CA generation.
+type rotateState struct {
+	dir     string
+	db      string
+	sock    string
+	keyring agent.Agent
+}
+
+// startTestAgent serves an in-process ssh-agent on a Unix socket in a short
+// temporary directory (socket paths are limited to 108 bytes).
+func startTestAgent(t *testing.T) (string, agent.Agent) {
+	t.Helper()
+	sockDir, err := os.MkdirTemp("", "krrot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "agent.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	keyring := agent.NewKeyring()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				_ = agent.ServeAgent(keyring, c)
+			}()
+		}
+	}()
+	return sock, keyring
+}
+
+// newRotateState runs ca-init (in process) with the agent backend and five
+// generated Ed25519 keys. No bundle is installed.
+func newRotateState(t *testing.T) *rotateState {
+	t.Helper()
+	if os.Getuid() == 0 {
+		t.Skip("doctor refuses to run as root; run the tests as a normal user")
+	}
+	sock, keyring := startTestAgent(t)
+	st := &rotateState{sock: sock, keyring: keyring}
+	args := []string{"ca-init", "--backend", "agent", "--backend-opt", "socket=" + sock}
+	for _, role := range []string{"user", "host", "machine", "ops", "log"} {
+		args = append(args, "--key", role+"="+st.addKey(t))
+	}
+	st.dir = filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(st.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st.db = filepath.Join(st.dir, "signer.db")
+	args = append(args, "--state-dir", st.dir)
+	if code, out := runSigner(t, args...); code != 0 {
+		t.Fatalf("ca-init exited %d:\n%s", code, out)
+	}
+	return st
+}
+
+// addKey adds one generated Ed25519 key to the agent and returns its
+// fingerprint.
+func (st *rotateState) addKey(t *testing.T) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.keyring.Add(agent.AddedKey{PrivateKey: priv}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ssh.FingerprintSHA256(s.PublicKey())
+}
+
+// caPubKeys reads the ca-pubkeys.json that ca-init wrote.
+func (st *rotateState) caPubKeys(t *testing.T) *trust.CAPubKeys {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(st.dir, "ca-pubkeys.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cas, err := trust.ParseCAPubKeys(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cas
+}
+
+// count runs one SELECT count(*) on the state database.
+func (st *rotateState) count(t *testing.T, query string, args ...any) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", st.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.QueryRow(query, args...).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// genesisDocs is a root-signed genesis bundle and policy written to a
+// temporary directory, with the in-memory root that signed them.
+type genesisDocs struct {
+	bundle, policy string // paths; the signatures are FILE.sigs
+	rootFP         string
+	root           ssh.Signer
+	admin          ssh.Signer
+	b              *trust.Bundle
+	p              *trust.Policy
+}
+
+// genesisFiles builds, as internal/signer's fixture does (GenesisBundle and
+// SignDocs, which this package cannot import), a genesis bundle and policy
+// for st's keys: one generated Ed25519 root at threshold 1 that is never
+// written to disk, one generated admin, the profiles user 43200 s, host
+// 2592000 s and machine 86400 s, issued now.
+func genesisFiles(t *testing.T, st *rotateState) genesisDocs {
+	t.Helper()
+	g := genesisDocs{root: newTestSigner(t), admin: newTestSigner(t)}
+	g.rootFP = ssh.FingerprintSHA256(g.root.PublicKey())
+	g.p = &trust.Policy{Version: 1, Prev: trust.GenesisPrev, AdminQuorum: 1,
+		Admins: []trust.AdminKey{{Name: "admina", Key: trust.FormatKey(g.admin.PublicKey())}}}
+	for _, prof := range []struct {
+		role string
+		ttl  uint64
+		ext  []string
+	}{{trust.RoleUser, 43200, []string{"permit-pty"}}, {trust.RoleHost, 2592000, []string{}}, {trust.RoleMachine, 86400, []string{"permit-pty"}}} {
+		g.p.CAProfiles = append(g.p.CAProfiles, trust.CAProfile{Role: prof.role, MaxTTLSeconds: prof.ttl,
+			DefaultExtensions: prof.ext, AllowedExtensions: []string{}, AllowedCriticalOptions: []string{}})
+	}
+	polDoc, err := g.p.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cas := st.caPubKeys(t)
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		t.Fatal(err)
+	}
+	g.b = &trust.Bundle{
+		Version: 1, Prev: trust.GenesisPrev, IssuedAt: time.Now().UTC().Truncate(time.Second).Format(trust.TimeFormat),
+		Root:           trust.RootSet{Keys: []trust.RootKey{{Key: trust.FormatKey(g.root.PublicKey()), Custody: "software"}}, Threshold: 1},
+		CAs:            []trust.CAEntry{},
+		PolicySHA256:   trust.SHA256Hex(polDoc),
+		InstallationID: hex.EncodeToString(id),
+	}
+	for _, role := range []string{trust.RoleUser, trust.RoleHost, trust.RoleMachine} {
+		k, _ := cas.Key(role)
+		g.b.CAs = append(g.b.CAs, trust.CAEntry{Role: role, Key: k.Key, Alg: k.Alg, Custody: k.Custody, State: "active", Generation: 1})
+	}
+	ops, _ := cas.Key("ops")
+	g.b.OpsKey = trust.KeyEntry{Key: ops.Key, Alg: ops.Alg, Custody: ops.Custody}
+	lg, _ := cas.Key("log")
+	logPub, err := trust.ParseKey(lg.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.b.Log = trust.LogEntry{Key: lg.Key, Alg: lg.Alg, Custody: lg.Custody, Origin: tlog.Origin(logPub)}
+	g.bundle, g.policy = writeSignedDocs(t, g.b, g.p, g.root)
+	return g
+}
+
+// writeSignedDocs writes b and p, each with its detached signatures by
+// signers, to a new temporary directory and returns the two paths.
+func writeSignedDocs(t *testing.T, b *trust.Bundle, p *trust.Policy, signers ...ssh.Signer) (string, string) {
+	t.Helper()
+	bundle, err := b.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := p.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundleSigs, policySigs []byte
+	for _, s := range signers {
+		bs, err := sshsig.Sign(rand.Reader, s, trust.NamespaceBundle, bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ps, err := sshsig.Sign(rand.Reader, s, trust.NamespacePolicy, policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bundleSigs, policySigs = append(bundleSigs, bs...), append(policySigs, ps...)
+	}
+	dir := t.TempDir()
+	bp, pp := filepath.Join(dir, "bundle.json"), filepath.Join(dir, "policy.json")
+	for path, data := range map[string][]byte{bp: bundle, bp + ".sigs": bundleSigs, pp: policy, pp + ".sigs": policySigs} {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return bp, pp
+}
+
+func newTestSigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// install runs install-bundle for g's genesis documents, which must succeed.
+func install(t *testing.T, st *rotateState, g genesisDocs) {
+	t.Helper()
+	if code, out := runSigner(t, "install-bundle", "--state-dir", st.dir, "--bundle", g.bundle, "--policy", g.policy,
+		"--pin", g.rootFP, "--threshold", "1"); code != 0 {
+		t.Fatalf("install-bundle exited %d:\n%s", code, out)
+	}
+}
+
+// startSigner opens the database and the stored backend as serve does and
+// starts a signer on them, which is the restart. It takes no state lock,
+// because nothing else runs.
+func startSigner(t *testing.T, st *rotateState) *signer.Signer {
+	t.Helper()
+	ctx := context.Background()
+	db, err := signerdb.Open(st.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	_, be, err := openStoredBackend(ctx, db, nil, st.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = be.Close() })
+	s, err := signer.New(signer.Config{Backend: be, DB: db, AllowUIDs: []uint32{uint32(os.Getuid())}}) //nolint:gosec // G115: a uid
+	if err != nil {
+		t.Fatalf("signer.New: %v", err)
+	}
+	return s
+}
+
+// exportAndVerify runs export-log and verifies the export under rootFP at
+// threshold 1. It returns the report, the export's text and Verify's error.
+func exportAndVerify(t *testing.T, st *rotateState, rootFP string) (*audit.Report, string, error) {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "export.jsonl")
+	if code, msg := runSigner(t, "export-log", "--state-dir", st.dir, "--out", out); code != 0 {
+		t.Fatalf("export-log exited %d:\n%s", code, msg)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := audit.Verify(bytes.NewReader(data), audit.Options{Pins: []string{rootFP}, Threshold: 1})
+	return rep, string(data), err
+}
+
+// TestCARotatePrepareTracer (03-12): ca-rotate prepare on the agent backend
+// records generation 2 of the user CA as a row and a ca_generation entry,
+// the signer restarts on generation 1, doctor and audit verify accept the
+// state, and the same key is refused a second time.
+func TestCARotatePrepareTracer(t *testing.T) {
+	st := newRotateState(t)
+	g := genesisFiles(t, st)
+	install(t, st, g)
+
+	fp := st.addKey(t)
+	outFile := filepath.Join(t.TempDir(), "user-g2.json")
+	code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--key", fp, "--out", outFile)
+	if code != 0 {
+		t.Fatalf("ca-rotate prepare exited %d:\n%s", code, out)
+	}
+	if !strings.Contains(out, "role user generation 2 "+fp) {
+		t.Fatalf("prepare output lacks the generation line:\n%s", out)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pf struct {
+		Role       string `json:"role"`
+		Generation uint32 `json:"generation"`
+		Key        string `json:"key"`
+		Alg        string `json:"alg"`
+		Custody    string `json:"custody"`
+	}
+	if err := trust.DecodeStrict(data, &pf); err != nil {
+		t.Fatalf("prepare file %q: %v", data, err)
+	}
+	pub, err := trust.ParseKey(pf.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pf.Role != "user" || pf.Generation != 2 || ssh.FingerprintSHA256(pub) != fp || pf.Alg != ssh.KeyAlgoED25519 || pf.Custody != "agent" {
+		t.Fatalf("prepare file = %+v, want user generation 2 %s ssh-ed25519 agent", pf, fp)
+	}
+
+	if code, out := runSigner(t, "doctor", "--state-dir", st.dir); code != 0 {
+		t.Fatalf("doctor after prepare exited %d:\n%s", code, out)
+	}
+
+	s := startSigner(t, st)
+	userCA, _ := st.caPubKeys(t).Key(trust.RoleUser)
+	if got := trust.FormatKey(s.CAPublicKey(wire.CARoleUser)); got != userCA.Key {
+		t.Fatalf("the restarted signer serves user CA %s, want generation 1 %s", got, userCA.Key)
+	}
+
+	rep, export, err := exportAndVerify(t, st, g.rootFP)
+	if err != nil {
+		t.Fatalf("audit verify of the export: %v", err)
+	}
+	if rep.Counts[tlog.Kind(14)] != 1 {
+		t.Fatalf("the report counts %d entries of kind 14, want 1", rep.Counts[tlog.Kind(14)])
+	}
+	if n := strings.Count(export, `"kind":"ca_generation"`); n != 1 {
+		t.Fatalf("%d export lines carry kind ca_generation, want 1", n)
+	}
+
+	code, out = runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--key", fp,
+		"--out", filepath.Join(t.TempDir(), "again.json"))
+	if code != 1 || !strings.Contains(out, "stored generation") {
+		t.Fatalf("a second prepare with the same key exited %d:\n%s", code, out)
+	}
+	if n := st.count(t, "SELECT count(*) FROM ca_key_generations WHERE role='user'"); n != 2 {
+		t.Fatalf("ca_key_generations holds %d user rows, want 2", n)
+	}
+}

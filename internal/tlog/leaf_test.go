@@ -710,13 +710,9 @@ func TestRecoveryBody(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for k := Kind(14); k <= 14; k++ { // 12 is in use since 03-10, 13 since 03-11
-			if _, err := MarshalLeaf(Leaf{Kind: k, Body: refusal}); !errors.Is(err, ErrMalformedLeaf) {
-				t.Fatalf("MarshalLeaf accepted kind %d", k)
-			}
-			if _, err := DecodeLeaf(rawKindLeaf(t, Leaf{Kind: k, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
-				t.Fatalf("DecodeLeaf accepted kind %d", k)
-			}
+		// 12 is in use since 03-10, 13 since 03-11 and 14 since 03-12.
+		if !Kind(14).valid() {
+			t.Fatal("kind 14 is not valid; it is in use since 03-12")
 		}
 		for _, k := range []Kind{0, 17, 255} {
 			if _, err := MarshalLeaf(Leaf{Kind: k, Body: refusal}); !errors.Is(err, ErrMalformedLeaf) {
@@ -838,7 +834,7 @@ func TestHostForgetBody(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, k := range []Kind{14, 17} { // 12 is in use since 03-10, 13 since 03-11
+		for _, k := range []Kind{17} { // 12 is in use since 03-10, 13 since 03-11, 14 since 03-12
 			if _, err := DecodeLeaf(rawKindLeaf(t, Leaf{Kind: k, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
 				t.Fatalf("DecodeLeaf accepted kind %d", k)
 			}
@@ -1240,8 +1236,8 @@ func TestMachineIssueBody(t *testing.T) {
 		}
 	})
 	t.Run("kind_constants", func(t *testing.T) {
-		if KindMachineIssue != 13 || KindMachineIssue.String() != "machine_issue" || !KindMachineIssue.valid() || Kind(14).valid() {
-			t.Fatalf("KindMachineIssue = %d %q valid %t; 14 valid %t", KindMachineIssue, KindMachineIssue, KindMachineIssue.valid(), Kind(14).valid())
+		if KindMachineIssue != 13 || KindMachineIssue.String() != "machine_issue" || !KindMachineIssue.valid() || !Kind(14).valid() || Kind(14).String() != "ca_generation" {
+			t.Fatalf("KindMachineIssue = %d %q valid %t; 14 valid %t %q, expected valid ca_generation", KindMachineIssue, KindMachineIssue, KindMachineIssue.valid(), Kind(14).valid(), Kind(14))
 		}
 	})
 }
