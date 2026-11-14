@@ -732,6 +732,8 @@ if ! flock -n 9; then
   exit 1
 fi
 test -s "$1/signer.db"
+touch "$S/restore-recovery-pending"
+chown keyroster-signer:keyroster-signer "$S/restore-recovery-pending"
 rm -f "$S/signer.db" "$S/signer.db-wal" "$S/signer.db-shm"
 for f in signer.db signer.db-wal signer.db-shm; do
   if [ -e "$1/$f" ]; then

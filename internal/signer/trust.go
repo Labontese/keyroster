@@ -15,6 +15,7 @@ import (
 	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/keystore"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serial"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/tlog"
@@ -204,6 +205,9 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if clock == nil {
 		clock = time.Now
 	}
+	// The one clock read of an install: the issued_at bound, InstalledAt
+	// and the leaf time (03-12).
+	now := clock()
 	caKeys, err := db.CAKeys(ctx)
 	if errors.Is(err, signerdb.ErrNotInitialised) {
 		return nil, ErrNotInitialised
@@ -266,6 +270,9 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if err != nil {
 		return nil, err
 	}
+	if err := checkIssuedNotAhead(b, now); err != nil {
+		return nil, err
+	}
 	if err := checkBundleKeys(b, caKeys, gens); err != nil {
 		return nil, err
 	}
@@ -286,7 +293,6 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if err != nil {
 		return nil, err
 	}
-	now := clock()
 	err = lw.logTx(ctx, func(tx *sql.Tx) error {
 		if err := db.InsertBundle(tx, signerdb.StoredBundle{
 			Version: b.Version, Bundle: bundle, BundleSigs: bundleSigs, Policy: policy, PolicySigs: policySigs, InstalledAt: now,
@@ -300,6 +306,24 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 		return nil, err
 	}
 	return b, nil
+}
+
+// checkIssuedNotAhead refuses bundle_issued_in_future (03-12): a bundle,
+// genesis or successor, whose issued_at is later than the signer's clock
+// now plus krl.PruneMargin seconds, compared at full clock resolution, so
+// that exactly the margin ahead is accepted. The ceremony machine's clock
+// is offline and nothing else bounds it; a bundle dated far ahead would
+// block every later successor.
+func checkIssuedNotAhead(b *trust.Bundle, now time.Time) error {
+	issued, err := time.Parse(trust.TimeFormat, b.IssuedAt)
+	if err != nil {
+		return fmt.Errorf("%w: issued_at %q: %w", ErrBundleInstall, b.IssuedAt, err)
+	}
+	if limit := now.Add(krl.PruneMargin * time.Second); issued.After(limit) {
+		return fmt.Errorf("%w: bundle_issued_in_future: trust bundle v%d is issued at %s, the signer's clock reads %s, and the latest accepted issued_at is %s; the usual cause is a ceremony machine whose clock runs ahead",
+			ErrBundleInstall, b.Version, b.IssuedAt, now.UTC().Format(time.RFC3339Nano), limit.UTC().Format(time.RFC3339Nano))
+	}
+	return nil
 }
 
 // checkBundleKeys requires the bundle to list exactly one active CA entry

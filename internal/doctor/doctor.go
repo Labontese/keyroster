@@ -108,6 +108,8 @@ const (
 	codeRoots     = "roots"
 	codeCustody   = "custody"
 	codeTPM       = "tpm"
+	// codeGenerations lists the CA key generations (03-12).
+	codeGenerations = "generations"
 )
 
 // Result is one finding.
@@ -235,6 +237,9 @@ func Run(f Facts) []Result {
 
 	if f.DBError != "" {
 		add(FAIL, CodeDBIntegrity, "cannot read signer.db: %s; nothing in it was checked", f.DBError)
+		if f.RestoreMarker != "" {
+			rs = append(rs, restoreMarkerResult(f.RestoreMarker))
+		}
 		return rs
 	}
 	if f.DBMode.Perm()&0o177 != 0 {
@@ -267,6 +272,53 @@ func Run(f Facts) []Result {
 		add(OK, codeTrust, "the installed trust bundle lists the recorded keys and is the one the log's last bundle_install entry records, and the stored directory is the one its last directory_install entry records (the root signatures are checked by install-bundle and audit verify, the admin signatures by the signer at install and at start, not here)")
 	}
 	rs = append(rs, custodyResults(f)...)
+	rs = append(rs, generationResults(f)...)
+	if f.RestoreMarker != "" {
+		rs = append(rs, restoreMarkerResult(f.RestoreMarker))
+	}
+	return rs
+}
+
+// restoreMarkerResult is the FAIL for a restore-recovery-pending marker
+// (03-12): every writer of the signer state refuses until the recovery is
+// applied or ruled out.
+func restoreMarkerResult(marker string) Result {
+	return Result{Level: FAIL, Code: CodeRestorePending, Message: fmt.Sprintf(
+		"%s exists: this state directory was restored and no recovery has been applied or ruled out; serve, ca-init, install-bundle and ca-rotate prepare refuse until keyroster-signer recover-revocations applies the recovery, or its --no-recovery-needed rules it out (docs/runbooks/signer-install.md, restore step 2b)", marker)}
+}
+
+// generationResults lists the CA key generations, warns about a software
+// key file of a later generation that no row names, and warns about an
+// installed bundle dated after this clock (03-12).
+func generationResults(f Facts) []Result {
+	var rs []Result
+	if len(f.Generations) > 0 {
+		var roles []string
+		byRole := map[string][]string{}
+		for _, g := range f.Generations {
+			if _, seen := byRole[g.Role]; !seen {
+				roles = append(roles, g.Role)
+			}
+			byRole[g.Role] = append(byRole[g.Role], fmt.Sprintf("%s g%d %s", g.State, g.Generation, g.Fingerprint))
+		}
+		parts := make([]string, 0, len(roles))
+		for _, r := range roles {
+			parts = append(parts, r+" "+strings.Join(byRole[r], ", "))
+		}
+		rs = append(rs, Result{Level: OK, Code: codeGenerations, Message: strings.Join(parts, "; ")})
+	}
+	if len(f.UnrecordedGenerationFiles) > 0 {
+		rs = append(rs, Result{Level: WARN, Code: CodeUnrecordedGenerationFile, Message: fmt.Sprintf(
+			"%s: no generation row names this file; if no prepare is running and a restore preceded it, it is a key from a lost prepare: destroy it unless you placed it for a --key prepare, and never record it again with --key",
+			strings.Join(f.UnrecordedGenerationFiles, ", "))})
+	}
+	if f.Bundle != nil {
+		if at, err := time.Parse(trust.TimeFormat, f.Bundle.IssuedAt); err == nil && at.After(time.UnixMicro(int64(f.NowMicros))) { //nolint:gosec // G115: the clock is after 1970
+			rs = append(rs, Result{Level: WARN, Code: CodeInstalledIssuedAfterNow, Message: fmt.Sprintf(
+				"the installed trust bundle is issued at %s, after this clock: no successor can be installed until real time catches up, because a bundle is never issued before its predecessor; check the clock (a signer clock that moved back, or a bundle installed by an older signer that did not bound issued_at)",
+				f.Bundle.IssuedAt)})
+		}
+	}
 	return rs
 }
 

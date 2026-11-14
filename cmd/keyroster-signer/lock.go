@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -25,7 +26,38 @@ var errStateLocked = errors.New("the state directory is in use by another keyros
 // service stopped, and serve loads it when it starts again. The lock is
 // released by calling the returned function, or by the kernel when the
 // process exits.
+//
+// It is also the restore gate (03-12): after the flock is taken it refuses
+// restore_recovery_pending, and releases the flock, while a directory entry
+// named restore-recovery-pending exists in the state directory (of any
+// type, read with lstat; a stat error other than not-exist refuses too).
+// The runbook's file-restore block writes that marker before signer.db is
+// replaced, so serve, ca-init, install-bundle and ca-rotate prepare cannot
+// write a restored state before its revocations are recovered or the
+// recovery is ruled out. recover-revocations (its recovery,
+// --no-recovery-needed and --migrate-only) is the one caller of the exempt
+// variant, lockStateDirForRecovery: it is how the marker is cleared, and
+// under the marker it is the only command that opens signer.db for
+// writing.
 func lockStateDir(stateDir string) (func(), error) {
+	return lockState(stateDir, true)
+}
+
+// lockStateDirForRecovery is lockStateDir without the restore gate, for
+// recover-revocations only (03-12).
+func lockStateDirForRecovery(stateDir string) (func(), error) {
+	return lockState(stateDir, false)
+}
+
+// restoreMarkerName is the restore marker in the state directory (03-12):
+// the runbook's file-restore block writes it before signer.db is replaced.
+const restoreMarkerName = "restore-recovery-pending"
+
+// errRestorePending is the restore_recovery_pending refusal of the state
+// lock (03-12).
+var errRestorePending = errors.New("restore_recovery_pending")
+
+func lockState(stateDir string, gate bool) (func(), error) {
 	path := filepath.Join(stateDir, lockFileName)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600) //nolint:gosec // G304: the path is the operator's state directory
 	if err != nil {
@@ -38,18 +70,16 @@ func lockStateDir(stateDir string) (func(), error) {
 		}
 		return nil, fmt.Errorf("state dir lock %s: %w", path, err)
 	}
+	if gate {
+		marker := filepath.Join(stateDir, restoreMarkerName)
+		switch _, err := os.Lstat(marker); {
+		case err == nil:
+			_ = f.Close()
+			return nil, fmt.Errorf("%w: %s exists: this state directory was restored and no recovery has been applied or ruled out; run keyroster-signer recover-revocations (docs/runbooks/signer-install.md, restore step 2b)", errRestorePending, marker)
+		case !errors.Is(err, fs.ErrNotExist):
+			_ = f.Close()
+			return nil, fmt.Errorf("%w: cannot read %s: %w", errRestorePending, marker, err)
+		}
+	}
 	return func() { _ = f.Close() }, nil
-}
-
-// restoreMarkerName is the restore marker in the state directory (03-12):
-// the runbook's file-restore block writes it before signer.db is replaced.
-const restoreMarkerName = "restore-recovery-pending"
-
-// errRestorePending is the restore_recovery_pending refusal of the state
-// lock (03-12).
-var errRestorePending = errors.New("restore_recovery_pending")
-
-// lockStateDirForRecovery is the state lock of recover-revocations (03-12).
-func lockStateDirForRecovery(stateDir string) (func(), error) {
-	return lockStateDir(stateDir)
 }
