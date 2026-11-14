@@ -295,7 +295,7 @@ func exportAndVerify(t *testing.T, st *rotateState, rootFP string) (*audit.Repor
 	if code, msg := runSigner(t, "export-log", "--state-dir", st.dir, "--out", out); code != 0 {
 		t.Fatalf("export-log exited %d:\n%s", code, msg)
 	}
-	data, err := os.ReadFile(out)
+	data, err := os.ReadFile(out) //nolint:gosec // G304: the test's own export file
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestCARotatePrepareTracer(t *testing.T) {
 	if !strings.Contains(out, "role user generation 2 "+fp) {
 		t.Fatalf("prepare output lacks the generation line:\n%s", out)
 	}
-	data, err := os.ReadFile(outFile)
+	data, err := os.ReadFile(outFile) //nolint:gosec // G304: the test's own prepare file
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestSignerRestartMixedBundle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		data, err := os.ReadFile(outFile)
+		data, err := os.ReadFile(outFile) //nolint:gosec // G304: the test's own prepare file
 		if err != nil {
 			t.Fatal(err)
 		}

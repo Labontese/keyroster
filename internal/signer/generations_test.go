@@ -64,7 +64,7 @@ func (b *genBackend) KeyAt(role keystore.Role, _ uint32, fp, location string) (k
 	b.mu.Lock()
 	b.locations = append(b.locations, location)
 	b.mu.Unlock()
-	return b.memBackend.Key(role, fp)
+	return b.Key(role, fp)
 }
 
 func (b *genBackend) provisionCount() int {

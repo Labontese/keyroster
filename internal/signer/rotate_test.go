@@ -184,7 +184,7 @@ func TestPrepareGeneration(t *testing.T) {
 			t.Fatal("prepareGeneration succeeded although the checkpoint was not signed")
 		}
 		unchanged(t, e, leaves, rows)
-		if lw.broken != nil || lw.tree.Size() != uint64(leaves) {
+		if lw.broken != nil || lw.tree.Size() != uint64(leaves) { //nolint:gosec // G115: a leaf count
 			t.Fatalf("the writer did not reload: broken %v, size %d, want %d", lw.broken, lw.tree.Size(), leaves)
 		}
 	})

@@ -611,7 +611,7 @@ func TestProvisionGeneration(t *testing.T) {
 		before := map[string][]byte{}
 		for _, role := range allRoles {
 			p := filepath.Join(dir, "software", string(role)+".age")
-			data, err := os.ReadFile(p)
+			data, err := os.ReadFile(p) //nolint:gosec // G304: a file of the test's own state directory
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -621,7 +621,7 @@ func TestProvisionGeneration(t *testing.T) {
 			t.Fatal(err)
 		}
 		for p, data := range before {
-			if got, err := os.ReadFile(p); err != nil || !bytes.Equal(got, data) {
+			if got, err := os.ReadFile(p); err != nil || !bytes.Equal(got, data) { //nolint:gosec // G304: a file of the test's own state directory
 				t.Fatalf("%s changed (%v)", p, err)
 			}
 		}
@@ -639,7 +639,7 @@ func TestProvisionGeneration(t *testing.T) {
 		if !errors.Is(err, ErrKeyFilesExist) || !strings.Contains(err.Error(), p) {
 			t.Fatalf("ProvisionGeneration over an existing file = %v, want ErrKeyFilesExist naming %s", err, p)
 		}
-		if data, _ := os.ReadFile(p); string(data) != "x" {
+		if data, _ := os.ReadFile(p); string(data) != "x" { //nolint:gosec // G304: a file of the test's own state directory
 			t.Fatal("ProvisionGeneration overwrote the existing file")
 		}
 	})
@@ -656,7 +656,7 @@ func TestProvisionGeneration(t *testing.T) {
 	})
 	t.Run("private_directory_required", func(t *testing.T) {
 		dir, be, _ := setup(t)
-		if err := os.Chmod(filepath.Join(dir, "software"), 0o750); err != nil {
+		if err := os.Chmod(filepath.Join(dir, "software"), 0o750); err != nil { //nolint:gosec // G302: the test widens the mode on purpose
 			t.Fatal(err)
 		}
 		if _, _, err := gp(t, be).ProvisionGeneration(keystore.RoleUser, 2, nil); err == nil {
@@ -696,7 +696,7 @@ func TestProvisionGeneration(t *testing.T) {
 			t.Fatal("generation 3 opened generation 2's key")
 		}
 		g1, g2 := filepath.Join(dir, "software", "user.age"), filepath.Join(dir, "software", "user-g2.age")
-		d1, err := os.ReadFile(g1)
+		d1, err := os.ReadFile(g1) //nolint:gosec // G304: a file of the test's own state directory
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -706,7 +706,7 @@ func TestProvisionGeneration(t *testing.T) {
 		if k, err := g.KeyAt(keystore.RoleUser, 2, fp2, ""); err != nil || ssh.FingerprintSHA256(k.PublicKey()) != fp2 {
 			t.Fatalf("generation 2 without user.age: %v", err)
 		}
-		if err := os.WriteFile(g1, d1, 0o600); err != nil {
+		if err := os.WriteFile(g1, d1, 0o600); err != nil { //nolint:gosec // G703: a file of the test's own state directory
 			t.Fatal(err)
 		}
 		if err := os.Remove(g2); err != nil {

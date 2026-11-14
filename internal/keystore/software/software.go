@@ -225,10 +225,10 @@ func (b *backend) keyPathAt(role keystore.Role, generation uint32) (string, erro
 	default:
 		return "", fmt.Errorf("keystore software: unknown role %q", role)
 	}
-	switch {
-	case generation == 0:
+	switch generation {
+	case 0:
 		return "", fmt.Errorf("keystore software: no generation 0 of role %s", role)
-	case generation == 1:
+	case 1:
 		return filepath.Join(b.dir, string(role)+".age"), nil
 	default:
 		return filepath.Join(b.dir, fmt.Sprintf("%s-g%d.age", role, generation)), nil

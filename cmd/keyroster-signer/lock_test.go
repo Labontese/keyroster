@@ -239,7 +239,7 @@ func exportBytes(t *testing.T, st *rotateState) []byte {
 	if code, msg := runSigner(t, "export-log", "--state-dir", st.dir, "--out", out); code != 0 {
 		t.Fatalf("export-log exited %d:\n%s", code, msg)
 	}
-	data, err := os.ReadFile(out)
+	data, err := os.ReadFile(out) //nolint:gosec // G304: the test's own export file
 	if err != nil {
 		t.Fatal(err)
 	}
