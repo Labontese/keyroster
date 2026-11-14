@@ -83,7 +83,7 @@ func recoverRevocations(ctx context.Context, in io.Reader, stateDir string, back
 	if err != nil {
 		return err
 	}
-	res, err := s.RecoverRevocations(ctx, data)
+	res, err := applyRecovery(ctx, s, data)
 	if err != nil {
 		// A refusal's error names it ("refused: recovery_log_mismatch");
 		// its cause is the reason.
@@ -96,3 +96,15 @@ func recoverRevocations(ctx context.Context, in io.Reader, stateDir string, back
 		res.Entries, res.Imports, res.Revoked, res.Kept, res.KRLVersion, res.RecoveryLeaf, res.PublishLeaf)
 	return err
 }
+
+// applyRecovery applies a recovery request through the signer; tests
+// replace it (03-12).
+var applyRecovery = func(ctx context.Context, s *signer.Signer, data []byte) (*signer.RecoveryResult, error) {
+	return s.RecoverRevocations(ctx, data)
+}
+
+// journalSocketPath is the native journal socket (03-12).
+var journalSocketPath = "/run/systemd/journal/socket"
+
+// journalNotice writes text to the journal (03-12).
+func journalNotice(text string) {}

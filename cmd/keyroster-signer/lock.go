@@ -40,3 +40,16 @@ func lockStateDir(stateDir string) (func(), error) {
 	}
 	return func() { _ = f.Close() }, nil
 }
+
+// restoreMarkerName is the restore marker in the state directory (03-12):
+// the runbook's file-restore block writes it before signer.db is replaced.
+const restoreMarkerName = "restore-recovery-pending"
+
+// errRestorePending is the restore_recovery_pending refusal of the state
+// lock (03-12).
+var errRestorePending = errors.New("restore_recovery_pending")
+
+// lockStateDirForRecovery is the state lock of recover-revocations (03-12).
+func lockStateDirForRecovery(stateDir string) (func(), error) {
+	return lockStateDir(stateDir)
+}

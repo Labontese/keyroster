@@ -88,6 +88,11 @@ const (
 	CodeTPMUnavailable        = "tpm_unavailable"
 	CodePKCS11CustodyDeclared = "pkcs11_custody_declared"
 	CodePIVCustodyReported    = "piv_custody_reported"
+	// The restore gate, a future-dated installed bundle and a software
+	// key file of a later generation that no row names (03-12).
+	CodeRestorePending           = "restore_recovery_pending"
+	CodeInstalledIssuedAfterNow  = "installed_issued_at_after_now"
+	CodeUnrecordedGenerationFile = "unrecorded_generation_file"
 )
 
 // Codes of OK results. Each names the check that passed.
@@ -175,6 +180,26 @@ type Facts struct {
 	TPMManufacturer string
 	TPMCustody      string
 	TPMError        string
+
+	// Generations are the stored CA key generations with their state in
+	// the installed bundle (03-12).
+	Generations []GenerationFact
+	// RestoreMarker is the path of the restore-recovery-pending marker in
+	// the state directory, empty when there is none (03-12).
+	RestoreMarker string
+	// UnrecordedGenerationFiles are the {state-dir}/software/<role>-g<N>.age
+	// files that no generation row names (03-12).
+	UnrecordedGenerationFiles []string
+}
+
+// GenerationFact is one stored CA key generation (03-12): State is the
+// state of the installed bundle's entry with the same key (active for the
+// ops or log key the bundle names), or prepared when the bundle names no
+// such entry.
+type GenerationFact struct {
+	Role                             string
+	Generation                       uint32
+	Fingerprint, Alg, Custody, State string
 }
 
 // hardwareCustody are the online custodies whose keys cannot be copied off

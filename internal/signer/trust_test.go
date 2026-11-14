@@ -999,3 +999,74 @@ func editedSuccessor(t *testing.T, db *signerdb.DB, editBundle func(*trust.Bundl
 	}
 	return docs4(t, next, pol, signers...)
 }
+
+// TestInstallIssuedAtAhead (03-12): install-bundle refuses a bundle, genesis
+// or successor, whose issued_at is later than the signer's clock plus
+// krl.PruneMargin (300 s), compared at full clock resolution, and writes
+// nothing; exactly 300 s ahead is accepted.
+func TestInstallIssuedAtAhead(t *testing.T) {
+	ctx := context.Background()
+	// issued is a whole second an hour ahead of the real clock, so that
+	// every fake clock below is still after the ca_init entry.
+	issued := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	// genesisAt installs a genesis bundle issued at issued with the
+	// signer's clock ahead behind it.
+	genesisAt := func(t *testing.T, ahead time.Duration) (*installEnv, error) {
+		t.Helper()
+		e := newInstallEnv(t, NewFixture(t, 1, 1))
+		b := e.fx.GenesisBundle(t, e.cas, e.fx.Policy())
+		b.IssuedAt = issued.Format(trust.TimeFormat)
+		d := docs4(t, b, e.fx.Policy(), e.fx.Root)
+		clock := func() time.Time { return issued.Add(-ahead) }
+		_, err := InstallBundle(ctx, e.db, e.be, []string{e.fx.RootPin()}, 1, d[0], d[1], d[2], d[3], clock)
+		return e, err
+	}
+	refused := func(t *testing.T, e *installEnv, err error, leaves int, genesis bool) {
+		t.Helper()
+		if !errors.Is(err, ErrBundleInstall) || !strings.Contains(err.Error(), "bundle_issued_in_future") {
+			t.Fatalf("install = %v, want bundle_issued_in_future", err)
+		}
+		if n := leafCount(t, e.db); n != leaves {
+			t.Fatalf("%d leaves after the refusal, want %d", n, leaves)
+		}
+		if genesis {
+			if _, err := e.db.LatestBundle(ctx); !errors.Is(err, signerdb.ErrNoBundle) {
+				t.Fatalf("LatestBundle after the refusal: %v, want ErrNoBundle", err)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		ahead time.Duration // how far issued_at is after the signer's clock
+		ok    bool
+	}{
+		{"issued_at_ahead_refused", 301 * time.Second, false},
+		{"issued_at_at_margin_ok", 300 * time.Second, true},
+		{"issued_at_sub_second_ahead_refused", 300*time.Second + time.Nanosecond, false},
+		{"issued_at_sub_second_at_margin_ok", 300*time.Second - time.Nanosecond, true},
+		{"genesis_issued_at_ahead_refused", time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, err := genesisAt(t, tc.ahead)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("install %s: %v", tc.name, err)
+				}
+				return
+			}
+			refused(t, e, err, 1, true)
+		})
+	}
+	t.Run("successor_issued_at_ahead_refused", func(t *testing.T) {
+		e := newInstallEnv(t, NewFixture(t, 1, 1))
+		e.installGenesis(t)
+		leaves := leafCount(t, e.db)
+		d := editedSuccessor(t, e.db, func(b *trust.Bundle) { b.IssuedAt = issued.Format(trust.TimeFormat) }, nil, e.fx.Root)
+		clock := func() time.Time { return issued.Add(-301 * time.Second) }
+		_, err := InstallBundle(ctx, e.db, e.be, nil, 0, d[0], d[1], d[2], d[3], clock)
+		refused(t, e, err, leaves, false)
+		if v, _ := e.db.LatestBundleVersion(ctx); v != 1 {
+			t.Fatalf("bundle version %d after the refusal, want 1", v)
+		}
+	})
+}

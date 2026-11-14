@@ -477,6 +477,18 @@ func TestRestoreRecoversLostRevocations(t *testing.T) {
 	serverCopy := filepath.Join(recovery, "server-krl.json")
 	copyFile(t, filepath.Join(state, "krl-served.json"), serverCopy, 0o600)
 	restoreDB(t, backup, sg.StateDir)
+	// The runbook's file-restore block writes the restore marker right
+	// before signer.db is replaced (03-12); export-log still works under it.
+	marker := filepath.Join(sg.StateDir, "restore-recovery-pending")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	markerPresent := func(what string) {
+		t.Helper()
+		if _, err := os.Lstat(marker); err != nil {
+			t.Fatalf("the restore marker is gone after %s: %v", what, err)
+		}
+	}
 	restored := sg.exportLog(t)
 
 	// Step 2: the restored export on its own, the saved export on its own,
@@ -555,6 +567,7 @@ func TestRestoreRecoversLostRevocations(t *testing.T) {
 		t.Fatalf("recover-revocations while another process holds signer.lock exited %d, want the lock refusal:\n%s", code, recOut)
 	}
 	unchanged("recover-revocations refused for the lock")
+	markerPresent("the lock refusal")
 	req, err := wire.ParseRecoveryRequest(readFile(t, reqFile))
 	if err != nil {
 		t.Fatal(err)
@@ -588,6 +601,7 @@ func TestRestoreRecoversLostRevocations(t *testing.T) {
 		t.Fatalf("recover-revocations with the evidence of a key that is no admin exited %d, want recovery_evidence_invalid:\n%s", code, out)
 	}
 	unchanged("recover-revocations refused for the evidence")
+	markerPresent("the evidence refusal")
 	code, recOut = runRecoverRevocations(t, sg, reqFile)
 	size := len(exportKinds(t, restored))
 	rm := regexp.MustCompile(`(?m)^recovered: [0-9]+ entries from 2 imported KRLs, 1 lost certificates revoked, 2 kept; KRL v([0-9]+) \(log entries ` +
@@ -596,6 +610,14 @@ func TestRestoreRecoversLostRevocations(t *testing.T) {
 		t.Fatalf("keyroster-signer recover-revocations exited %d:\n%s", code, recOut)
 	}
 	t.Logf("keyroster-signer recover-revocations: %s", strings.TrimSpace(recOut))
+	// A successful recovery removes the marker and says so (03-12); the
+	// signer started below would refuse under it.
+	if !strings.Contains(recOut, "restore-recovery-pending removed: "+marker) {
+		t.Fatalf("recover-revocations did not report the marker's removal:\n%s", recOut)
+	}
+	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the restore marker is still there after the recovery: %v", err)
+	}
 	recovered, err := strconv.ParseUint(rm[1], 10, 64)
 	if err != nil || recovered <= lastServed {
 		t.Fatalf("the recovery published KRL v%s, want above v%d", rm[1], lastServed)
