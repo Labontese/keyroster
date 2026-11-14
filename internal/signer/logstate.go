@@ -503,6 +503,11 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 	return tree, last, installs, nil
 }
 
+// errGenerationsNotLogged is the generations_not_logged start-up refusal
+// (03-12): the stored CA key generation rows are not exactly the ca_init
+// keys plus the logged ca_generation entries.
+var errGenerationsNotLogged = fmt.Errorf("%w: generations_not_logged", errLogMismatch)
+
 // errRevocationsNotLogged is the revocations_not_logged start-up refusal.
 var errRevocationsNotLogged = fmt.Errorf("%w: revocations_not_logged", errLogMismatch)
 

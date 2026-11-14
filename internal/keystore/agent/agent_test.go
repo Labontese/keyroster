@@ -308,3 +308,33 @@ func TestOptions(t *testing.T) {
 		}
 	})
 }
+
+// TestKeyForSelectsByFingerprint (03-12): the agent backend has no
+// generation addressing, so keystore.KeyFor falls back to Key, which
+// selects among the agent's keys by fingerprint whatever the generation
+// and location arguments are, and refuses an unknown fingerprint.
+func TestKeyForSelectsByFingerprint(t *testing.T) {
+	keyring := sshagent.NewKeyring()
+	priv1, pub1 := ed25519Key(t)
+	priv2, pub2 := ed25519Key(t)
+	addKey(t, keyring, sshagent.AddedKey{PrivateKey: priv1})
+	addKey(t, keyring, sshagent.AddedKey{PrivateKey: priv2})
+	b := openBackend(t, map[string]string{"socket": serveKeyring(t, keyring)})
+	if _, ok := b.(keystore.GenerationBackend); ok {
+		t.Fatal("the agent backend implements GenerationBackend; KeyFor's fallback is not exercised")
+	}
+	for _, loc := range []string{"", "slot-9a"} {
+		k, err := keystore.KeyFor(b, keystore.RoleUser, 2, ssh.FingerprintSHA256(pub2), loc)
+		if err != nil || !bytes.Equal(k.PublicKey().Marshal(), pub2.Marshal()) {
+			t.Fatalf("KeyFor generation 2 with location %q = %v, want the second key", loc, err)
+		}
+		signThrough(t, k)
+	}
+	if k, err := keystore.KeyFor(b, keystore.RoleUser, 1, ssh.FingerprintSHA256(pub1), ""); err != nil || !bytes.Equal(k.PublicKey().Marshal(), pub1.Marshal()) {
+		t.Fatalf("KeyFor generation 1 = %v, want the first key", err)
+	}
+	_, other := ed25519Key(t)
+	if _, err := keystore.KeyFor(b, keystore.RoleUser, 2, ssh.FingerprintSHA256(other), ""); err == nil {
+		t.Fatal("KeyFor returned a key for a fingerprint the agent does not hold")
+	}
+}

@@ -1241,3 +1241,135 @@ func TestMachineIssueBody(t *testing.T) {
 		}
 	})
 }
+
+// caGenerationVector is the fixed ca_generation leaf of
+// test/vectors/leaf_ca_generation_v1.hex (03-12): generation 2 of the user
+// CA, the Ed25519 key whose seed is 0x00 to 0x1f, custody software, at
+// index 7.
+func caGenerationVector(t testing.TB) (Leaf, *CAGenerationBody) {
+	t.Helper()
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	pub, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(seed).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &CAGenerationBody{Role: "user", Generation: 2, PublicKey: pub.Marshal(), Alg: ssh.KeyAlgoED25519, Custody: "software"}
+	enc, err := body.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Leaf{Index: 7, TimeMicros: 1_700_000_000_000_007, Kind: KindCAGeneration, Body: enc}, body
+}
+
+// TestCAGenerationBody (03-12) covers the kind-14 body: it round-trips, and
+// the encoder and decoder refuse a generation below 2 (generation 1 is
+// ca_init's), an empty or oversize field and trailing bytes. Kind 14 is
+// of format v1, ca_generation.
+func TestCAGenerationBody(t *testing.T) {
+	leaf, body := caGenerationVector(t)
+	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeCAGenerationBody(b) })
+	raw := func(role string, gen uint32, pub []byte, alg, custody string) []byte {
+		var c cryptobyte.Builder
+		add16(&c, []byte(role))
+		c.AddUint32(gen)
+		add16(&c, pub)
+		add16(&c, []byte(alg))
+		add16(&c, []byte(custody))
+		return c.BytesOrPanic()
+	}
+	t.Run("generation_below_2_refused", func(t *testing.T) {
+		for _, gen := range []uint32{0, 1} {
+			b := *body
+			b.Generation = gen
+			if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("Encode of generation %d = %v", gen, err)
+			}
+			if _, err := DecodeCAGenerationBody(raw(b.Role, gen, b.PublicKey, b.Alg, b.Custody)); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("DecodeCAGenerationBody of generation %d = %v", gen, err)
+			}
+		}
+	})
+	t.Run("empty_field_refused", func(t *testing.T) {
+		for name, b := range map[string]CAGenerationBody{
+			"role": {Generation: 2, PublicKey: body.PublicKey, Alg: body.Alg, Custody: body.Custody},
+			"key":  {Role: "user", Generation: 2, Alg: body.Alg, Custody: body.Custody},
+			"alg":  {Role: "user", Generation: 2, PublicKey: body.PublicKey, Custody: body.Custody},
+			"cust": {Role: "user", Generation: 2, PublicKey: body.PublicKey, Alg: body.Alg},
+		} {
+			if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("Encode without %s = %v", name, err)
+			}
+			if _, err := DecodeCAGenerationBody(raw(b.Role, b.Generation, b.PublicKey, b.Alg, b.Custody)); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("DecodeCAGenerationBody without %s = %v", name, err)
+			}
+		}
+	})
+	t.Run("oversize_field_refused", func(t *testing.T) {
+		big := strings.Repeat("x", maxCAInitField+1)
+		for name, b := range map[string]CAGenerationBody{
+			"role": {Role: big, Generation: 2, PublicKey: body.PublicKey, Alg: body.Alg, Custody: body.Custody},
+			"key":  {Role: "user", Generation: 2, PublicKey: []byte(big), Alg: body.Alg, Custody: body.Custody},
+			"alg":  {Role: "user", Generation: 2, PublicKey: body.PublicKey, Alg: big, Custody: body.Custody},
+			"cust": {Role: "user", Generation: 2, PublicKey: body.PublicKey, Alg: body.Alg, Custody: big},
+		} {
+			if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("Encode with an oversize %s = %v", name, err)
+			}
+			if _, err := DecodeCAGenerationBody(raw(b.Role, b.Generation, b.PublicKey, b.Alg, b.Custody)); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("DecodeCAGenerationBody with an oversize %s = %v", name, err)
+			}
+		}
+	})
+	t.Run("kind_name", func(t *testing.T) {
+		if KindCAGeneration != 14 || KindCAGeneration.String() != "ca_generation" || !KindCAGeneration.valid() {
+			t.Fatalf("KindCAGeneration = %d %q valid %t", KindCAGeneration, KindCAGeneration, KindCAGeneration.valid())
+		}
+	})
+}
+
+// TestCAGenerationLeafVector pins the kind-14 leaf encoding (03-12).
+func TestCAGenerationLeafVector(t *testing.T) {
+	leaf, body := caGenerationVector(t)
+	checkLeafVector(t, "leaf_ca_generation_v1.hex", leaf, body, func(b []byte) (any, error) { return DecodeCAGenerationBody(b) })
+	// independent_layout reads the vector with cryptobyte, not with
+	// DecodeLeaf, so the vector does not confirm itself.
+	t.Run("independent_layout", func(t *testing.T) {
+		file, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, "leaf_ca_generation_v1.hex"))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := cryptobyte.String(file)
+		var (
+			tag, b, role, pub, alg, custody cryptobyte.String
+			index, tm                       uint64
+			kind                            uint8
+			gen                             uint32
+		)
+		if !s.ReadUint8LengthPrefixed(&tag) || string(tag) != "keyroster/log-leaf/v1" ||
+			!s.ReadUint64(&index) || index != 7 || !s.ReadUint64(&tm) || tm != 1_700_000_000_000_007 ||
+			!s.ReadUint8(&kind) || kind != 14 || !s.ReadUint24LengthPrefixed(&b) || !s.Empty() {
+			t.Fatalf("the vector's leaf header: tag %q index %d time %d kind %d", tag, index, tm, kind)
+		}
+		if !b.ReadUint16LengthPrefixed(&role) || string(role) != "user" || !b.ReadUint32(&gen) || gen != 2 ||
+			!b.ReadUint16LengthPrefixed(&pub) || !b.ReadUint16LengthPrefixed(&alg) || string(alg) != "ssh-ed25519" ||
+			!b.ReadUint16LengthPrefixed(&custody) || string(custody) != "software" || !b.Empty() {
+			t.Fatalf("the vector's body: role %q generation %d alg %q custody %q", role, gen, alg, custody)
+		}
+		// The SSH wire encoding of the Ed25519 key with seed 0x00..0x1f:
+		// string "ssh-ed25519", string of the 32-byte public key.
+		seed := make([]byte, ed25519.SeedSize)
+		for i := range seed {
+			seed[i] = byte(i)
+		}
+		edPub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+		var w cryptobyte.Builder
+		w.AddUint32LengthPrefixed(func(w *cryptobyte.Builder) { w.AddBytes([]byte("ssh-ed25519")) })
+		w.AddUint32LengthPrefixed(func(w *cryptobyte.Builder) { w.AddBytes(edPub) })
+		if !bytes.Equal(pub, w.BytesOrPanic()) {
+			t.Fatalf("the vector's key is %x", []byte(pub))
+		}
+	})
+}

@@ -276,6 +276,59 @@ func TestMigrations(t *testing.T) {
 			t.Fatalf("directory row after the upgrade: %+v, %v", dir, err)
 		}
 	})
+	// upgrade_from_v5 (03-12): a populated schema-5 database upgrades to 6
+	// with one generation-1 row per ca_keys row, equal to it, location
+	// empty.
+	t.Run("upgrade_from_v5", func(t *testing.T) {
+		if len(ms) < 6 || ms[5].name != "0006_ca_generations.sql" {
+			t.Fatalf("want migration 6 to be 0006_ca_generations.sql, have %d migrations", len(ms))
+		}
+		path := filepath.Join(t.TempDir(), "signer.db")
+		raw, err := sql.Open("sqlite", path+"?"+dsnParams)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range ms[:5] {
+			if _, err := raw.Exec(m.sql); err != nil {
+				t.Fatalf("apply %s: %v", m.name, err)
+			}
+			if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for i, role := range CARoles {
+			if _, err := raw.Exec(`INSERT INTO ca_keys (role, pubkey, alg, custody) VALUES (?, ?, ?, ?)`,
+				role, []byte{'k', byte(i)}, "ssh-ed25519", "agent"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := raw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		d, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open of a version 5 database: %v", err)
+		}
+		defer func() { _ = d.Close() }()
+		if got := userVersion(t, d); got != len(ms) {
+			t.Fatalf("user_version after the upgrade = %d, want %d", got, len(ms))
+		}
+		keys, err := d.CAKeys(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		gens, err := d.CAGenerations(context.Background())
+		if err != nil || len(gens) != len(CARoles) {
+			t.Fatalf("CAGenerations after the upgrade = %d rows, %v; want %d", len(gens), err, len(CARoles))
+		}
+		for i, g := range gens {
+			k := keys[i]
+			if g.Role != k.Role || g.Generation != 1 || !bytes.Equal(g.PublicKey, k.PublicKey) || g.Alg != k.Alg ||
+				g.Custody != k.Custody || g.Location != "" {
+				t.Fatalf("generation row %d = %+v, want generation 1 of %+v with no location", i, g, k)
+			}
+		}
+	})
 	t.Run("unusable_path", func(t *testing.T) {
 		for _, p := range []string{"", "a?mode=memory", "a#b"} {
 			if _, err := Open(p); err == nil || !strings.Contains(err.Error(), "unusable database path") {
@@ -484,6 +537,25 @@ func TestOpenReadOnlyRefuses(t *testing.T) {
 	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("OpenReadOnly created %s", missing)
 	}
+	// schema_5_refused_with_schema_line (03-12): a database that a build
+	// before 03-12 wrote is named by its schema version, not a crash,
+	// until a writable open migrates it.
+	t.Run("schema_5_refused_with_schema_line", func(t *testing.T) {
+		d, path := openTemp(t)
+		if _, err := d.db.Exec(`DROP TABLE ca_key_generations`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.db.Exec(`PRAGMA user_version = 5`); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.Close(); err != nil {
+			t.Fatal(err)
+		}
+		_, err := OpenReadOnly(path)
+		if err == nil || !strings.Contains(err.Error(), "has schema version 5, this binary reads 6") {
+			t.Fatalf("OpenReadOnly of a schema-5 database = %v, want the schema line", err)
+		}
+	})
 }
 
 // TestDurabilityPragmas pins assumption A7: the signer database runs in WAL
@@ -778,6 +850,144 @@ func TestLiveIssuanceForSubject(t *testing.T) {
 		d := seed(t, row{"host", kr3("web1", 15), 15, []byte("not a certificate")})
 		if got, err := live(t, d, "host", "web1"); err == nil || !strings.Contains(err.Error(), "invalid issuance record") {
 			t.Fatalf("LiveIssuanceForSubjectTx = %v, %v; want invalid issuance record", got, err)
+		}
+	})
+}
+
+// genKeys returns the five ca-init rows of TestCAGenerationTables.
+func genKeys() []CAKey {
+	keys := make([]CAKey, 0, len(CARoles))
+	for i, role := range CARoles {
+		keys = append(keys, CAKey{Role: role, PublicKey: []byte{'g', byte(i)}, Alg: "ssh-ed25519", Custody: "software"})
+	}
+	return keys
+}
+
+// TestCAGenerationTables (03-12) pins ca_key_generations: ca-init writes
+// generation 1 of each role with the keys, a later generation must be the
+// role's next number, no key serves two generations or roles, the role is
+// one of the five, and ReadLogWithHashes reads the rows in the snapshot of
+// the leaves.
+func TestCAGenerationTables(t *testing.T) {
+	ctx := context.Background()
+	gen := func(role string, n uint32, key byte) CAGeneration {
+		return CAGeneration{Role: role, Generation: n, PublicKey: []byte{'n', key}, Alg: "ssh-ed25519", Custody: "software", CreatedAtMicros: 1}
+	}
+	initDB := func(t *testing.T) *DB {
+		t.Helper()
+		d, _ := openTemp(t)
+		if err := d.WithTx(ctx, func(tx *sql.Tx) error { return d.SaveCAKeys(tx, genKeys()) }); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	insert := func(d *DB, g CAGeneration) error {
+		return d.WithTx(ctx, func(tx *sql.Tx) error { return d.InsertCAGenerationTx(tx, g) })
+	}
+	t.Run("fresh_db_has_table", func(t *testing.T) {
+		d, _ := openTemp(t)
+		gens, err := d.CAGenerations(ctx)
+		if err != nil || len(gens) != 0 {
+			t.Fatalf("CAGenerations of a fresh database = %+v, %v; want none", gens, err)
+		}
+	})
+	t.Run("save_ca_keys_writes_generation_1", func(t *testing.T) {
+		d := initDB(t)
+		gens, err := d.CAGenerations(ctx)
+		if err != nil || len(gens) != len(CARoles) {
+			t.Fatalf("CAGenerations = %d rows, %v", len(gens), err)
+		}
+		for i, g := range gens {
+			k := genKeys()[i]
+			if g.Role != k.Role || g.Generation != 1 || !bytes.Equal(g.PublicKey, k.PublicKey) || g.Alg != k.Alg || g.Custody != k.Custody ||
+				g.Location != "" || g.CreatedAtMicros != 0 {
+				t.Fatalf("row %d = %+v, want generation 1 of %+v", i, g, k)
+			}
+		}
+	})
+	t.Run("insert_requires_next_number", func(t *testing.T) {
+		d := initDB(t)
+		if err := insert(d, gen("user", 3, 1)); err == nil {
+			t.Fatal("InsertCAGenerationTx accepted generation 3 after 1")
+		}
+		if err := insert(d, gen("user", 2, 1)); err != nil {
+			t.Fatalf("generation 2: %v", err)
+		}
+		if err := insert(d, gen("user", 2, 2)); err == nil {
+			t.Fatal("InsertCAGenerationTx accepted generation 2 twice")
+		}
+		g := gen("user", 3, 3)
+		g.Location = "slot-9"
+		if err := insert(d, g); err != nil {
+			t.Fatalf("generation 3: %v", err)
+		}
+		gens, err := d.CAGenerations(ctx)
+		if err != nil || len(gens) != len(CARoles)+2 || gens[2].Generation != 3 || gens[2].Location != "slot-9" || gens[3].Role != "host" {
+			t.Fatalf("CAGenerations = %+v, %v; want user 1, 2 and 3 first, with the location", gens, err)
+		}
+	})
+	t.Run("insert_refuses_generation_1", func(t *testing.T) {
+		d := initDB(t)
+		for _, n := range []uint32{0, 1} {
+			if err := insert(d, gen("user", n, 1)); err == nil {
+				t.Fatalf("InsertCAGenerationTx accepted generation %d", n)
+			}
+		}
+		fresh, _ := openTemp(t)
+		if err := insert(fresh, gen("user", 2, 1)); err == nil {
+			t.Fatal("InsertCAGenerationTx accepted generation 2 before ca-init")
+		}
+	})
+	t.Run("pubkey_unique_across_roles", func(t *testing.T) {
+		d := initDB(t)
+		g := gen("user", 2, 1)
+		g.PublicKey = genKeys()[1].PublicKey // the host key
+		if err := insert(d, g); err == nil {
+			t.Fatal("InsertCAGenerationTx accepted the host key as generation 2 of user")
+		}
+	})
+	t.Run("role_check", func(t *testing.T) {
+		d := initDB(t)
+		if _, err := d.db.Exec(`INSERT INTO ca_key_generations (role, generation, pubkey, alg, custody, created_at_us) VALUES ('foo', 2, x'01', 'a', 'c', 0)`); err == nil {
+			t.Fatal("the schema accepted the role foo")
+		}
+		if _, err := d.db.Exec(`INSERT INTO ca_key_generations (role, generation, pubkey, alg, custody, created_at_us) VALUES ('user', 0, x'02', 'a', 'c', 0)`); err == nil {
+			t.Fatal("the schema accepted generation 0")
+		}
+	})
+	t.Run("snapshot_reads_generations", func(t *testing.T) {
+		writer, path := openTemp(t)
+		if err := writer.WithTx(ctx, func(tx *sql.Tx) error {
+			if err := writer.SaveCAKeys(tx, genKeys()); err != nil {
+				return err
+			}
+			return writer.AppendLeaf(tx, 0, []byte{0, 'l'}, hash32(0))
+		}); err != nil {
+			t.Fatal(err)
+		}
+		reader, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = reader.Close() })
+		snap, err := reader.ReadLogWithHashes(ctx, func(uint64, []byte, []byte) error {
+			// A generation committed mid-read is not in the snapshot.
+			return insert(writer, gen("host", 2, 9))
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.CAGenerations) != len(CARoles) {
+			t.Fatalf("the snapshot holds %d generation rows, want the %d of ca-init only", len(snap.CAGenerations), len(CARoles))
+		}
+		for i, g := range snap.CAGenerations {
+			if g.Role != CARoles[i] || g.Generation != 1 {
+				t.Fatalf("snapshot row %d = %+v", i, g)
+			}
+		}
+		snap, err = reader.ReadLogWithHashes(ctx, func(uint64, []byte, []byte) error { return nil })
+		if err != nil || len(snap.CAGenerations) != len(CARoles)+1 {
+			t.Fatalf("second read: %v; want the six rows", err)
 		}
 	})
 }

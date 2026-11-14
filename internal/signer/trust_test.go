@@ -944,3 +944,58 @@ func TestInstallBundlePoP(t *testing.T) {
 		}
 	})
 }
+
+// installedDocs returns the trust bundle and policy installed in db.
+func installedDocs(t *testing.T, db *signerdb.DB) (*trust.Bundle, *trust.Policy) {
+	t.Helper()
+	sb, err := db.LatestBundle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := trust.ParseBundle(sb.Bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := trust.ParsePolicy(sb.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b, p
+}
+
+// nextPolicy returns version prev.Version+1 of prev, chained to it, edited
+// by edit (nil: no other change) (03-12).
+func nextPolicy(t *testing.T, prev *trust.Policy, edit func(*trust.Policy)) *trust.Policy {
+	t.Helper()
+	pc, err := prev.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := trust.ParsePolicy(pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.Version, next.Prev = prev.Version+1, trust.SHA256Hex(pc)
+	if edit != nil {
+		edit(next)
+	}
+	return next
+}
+
+// editedSuccessor returns the successor of the bundle installed in db for
+// the next version of its policy (both edited by the given functions, nil
+// for none) as the four documents, signed by signers: a successor whose
+// root set adds a key at threshold 1 is valid when the old root signs it
+// (03-12).
+func editedSuccessor(t *testing.T, db *signerdb.DB, editBundle func(*trust.Bundle), editPolicy func(*trust.Policy), signers ...ssh.Signer) [4][]byte {
+	t.Helper()
+	b, p := installedDocs(t, db)
+	pol := nextPolicy(t, p, editPolicy)
+	next := successor(t, b, pol)
+	next.CAs = slices.Clone(b.CAs)
+	next.Root.Keys = slices.Clone(b.Root.Keys)
+	if editBundle != nil {
+		editBundle(next)
+	}
+	return docs4(t, next, pol, signers...)
+}

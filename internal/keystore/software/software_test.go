@@ -567,3 +567,186 @@ func TestSoftwareBackend(t *testing.T) {
 		}
 	})
 }
+
+// TestProvisionGeneration (03-12): a later CA key generation is its own
+// file, {role}-g{N}.age, written next to the genesis files and opened only
+// by KeyAt with its own number.
+func TestProvisionGeneration(t *testing.T) {
+	fastScrypt(t)
+	setup := func(t *testing.T) (string, keystore.Backend, map[keystore.Role]ssh.PublicKey) {
+		t.Helper()
+		dir := newStateDir(t)
+		be := mustOpen(t, dir, writePassFile(t, testPassphrase, 0o600))
+		return dir, be, provision(t, be)
+	}
+	gp := func(t *testing.T, be keystore.Backend) keystore.GenerationProvisioner {
+		t.Helper()
+		p, ok := be.(keystore.GenerationProvisioner)
+		if !ok {
+			t.Fatal("the software backend is not a GenerationProvisioner")
+		}
+		return p
+	}
+	gb := func(t *testing.T, be keystore.Backend) keystore.GenerationBackend {
+		t.Helper()
+		g, ok := be.(keystore.GenerationBackend)
+		if !ok {
+			t.Fatal("the software backend is not a GenerationBackend")
+		}
+		return g
+	}
+	t.Run("writes_generation_file", func(t *testing.T) {
+		dir, be, _ := setup(t)
+		pub, _, err := gp(t, be).ProvisionGeneration(keystore.RoleUser, 2, nil)
+		if err != nil || pub == nil {
+			t.Fatalf("ProvisionGeneration = %v, %v", pub, err)
+		}
+		fi, err := os.Lstat(filepath.Join(dir, "software", "user-g2.age"))
+		if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("user-g2.age: %v, %v; want a regular 0600 file", fi, err)
+		}
+	})
+	t.Run("genesis_files_untouched", func(t *testing.T) {
+		dir, be, _ := setup(t)
+		before := map[string][]byte{}
+		for _, role := range allRoles {
+			p := filepath.Join(dir, "software", string(role)+".age")
+			data, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before[p] = data
+		}
+		if _, _, err := gp(t, be).ProvisionGeneration(keystore.RoleUser, 2, nil); err != nil {
+			t.Fatal(err)
+		}
+		for p, data := range before {
+			if got, err := os.ReadFile(p); err != nil || !bytes.Equal(got, data) {
+				t.Fatalf("%s changed (%v)", p, err)
+			}
+		}
+		if got := ageFiles(t, filepath.Join(dir, "software")); len(got) != len(allRoles)+1 {
+			t.Fatalf("software directory holds %v", got)
+		}
+	})
+	t.Run("refuses_existing_file", func(t *testing.T) {
+		dir, be, _ := setup(t)
+		p := filepath.Join(dir, "software", "host-g3.age")
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := gp(t, be).ProvisionGeneration(keystore.RoleHost, 3, nil)
+		if !errors.Is(err, ErrKeyFilesExist) || !strings.Contains(err.Error(), p) {
+			t.Fatalf("ProvisionGeneration over an existing file = %v, want ErrKeyFilesExist naming %s", err, p)
+		}
+		if data, _ := os.ReadFile(p); string(data) != "x" {
+			t.Fatal("ProvisionGeneration overwrote the existing file")
+		}
+	})
+	t.Run("refuses_generation_below_2", func(t *testing.T) {
+		dir, be, _ := setup(t)
+		for _, gen := range []uint32{0, 1} {
+			if _, _, err := gp(t, be).ProvisionGeneration(keystore.RoleUser, gen, nil); err == nil {
+				t.Fatalf("ProvisionGeneration accepted generation %d", gen)
+			}
+		}
+		if got := ageFiles(t, filepath.Join(dir, "software")); len(got) != len(allRoles) {
+			t.Fatalf("software directory holds %v", got)
+		}
+	})
+	t.Run("private_directory_required", func(t *testing.T) {
+		dir, be, _ := setup(t)
+		if err := os.Chmod(filepath.Join(dir, "software"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := gp(t, be).ProvisionGeneration(keystore.RoleUser, 2, nil); err == nil {
+			t.Fatal("ProvisionGeneration wrote into a directory with group permissions")
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "software", "user-g2.age")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("user-g2.age exists after the refusal (%v)", err)
+		}
+	})
+	t.Run("key_is_generation_1", func(t *testing.T) {
+		_, be, pubs := setup(t)
+		fp := ssh.FingerprintSHA256(pubs[keystore.RoleUser])
+		k1, err := be.Key(keystore.RoleUser, fp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k2, err := gb(t, be).KeyAt(keystore.RoleUser, 1, fp, "")
+		if err != nil || !bytes.Equal(k1.PublicKey().Marshal(), k2.PublicKey().Marshal()) {
+			t.Fatalf("KeyAt generation 1 = %v, want Key's key", err)
+		}
+	})
+	t.Run("keyat_opens_own_file_only", func(t *testing.T) {
+		dir, be, pubs := setup(t)
+		pub2, _, err := gp(t, be).ProvisionGeneration(keystore.RoleUser, 2, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp1, fp2 := ssh.FingerprintSHA256(pubs[keystore.RoleUser]), ssh.FingerprintSHA256(pub2)
+		g := gb(t, be)
+		if _, err := g.KeyAt(keystore.RoleUser, 2, fp1, ""); err == nil {
+			t.Fatal("generation 2 opened generation 1's key")
+		}
+		if _, err := g.KeyAt(keystore.RoleUser, 1, fp2, ""); err == nil {
+			t.Fatal("generation 1 opened generation 2's key")
+		}
+		if _, err := g.KeyAt(keystore.RoleUser, 3, fp2, ""); err == nil {
+			t.Fatal("generation 3 opened generation 2's key")
+		}
+		g1, g2 := filepath.Join(dir, "software", "user.age"), filepath.Join(dir, "software", "user-g2.age")
+		d1, err := os.ReadFile(g1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(g1); err != nil {
+			t.Fatal(err)
+		}
+		if k, err := g.KeyAt(keystore.RoleUser, 2, fp2, ""); err != nil || ssh.FingerprintSHA256(k.PublicKey()) != fp2 {
+			t.Fatalf("generation 2 without user.age: %v", err)
+		}
+		if err := os.WriteFile(g1, d1, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(g2); err != nil {
+			t.Fatal(err)
+		}
+		if k, err := g.KeyAt(keystore.RoleUser, 1, fp1, ""); err != nil || ssh.FingerprintSHA256(k.PublicKey()) != fp1 {
+			t.Fatalf("generation 1 without user-g2.age: %v", err)
+		}
+		if _, err := g.KeyAt(keystore.RoleUser, 2, fp2, ""); err == nil {
+			t.Fatal("generation 2 opened without its file")
+		}
+	})
+	t.Run("keyat_wrong_fingerprint_refused", func(t *testing.T) {
+		_, be, pubs := setup(t)
+		if _, _, err := gp(t, be).ProvisionGeneration(keystore.RoleUser, 2, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := gb(t, be).KeyAt(keystore.RoleUser, 2, ssh.FingerprintSHA256(pubs[keystore.RoleHost]), ""); !errors.Is(err, ErrKeyNotPresent) {
+			t.Fatalf("KeyAt with another fingerprint = %v, want ErrKeyNotPresent", err)
+		}
+	})
+	t.Run("keyat_ignores_location", func(t *testing.T) {
+		_, be, _ := setup(t)
+		pub2, _, err := gp(t, be).ProvisionGeneration(keystore.RoleUser, 2, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp2 := ssh.FingerprintSHA256(pub2)
+		for _, loc := range []string{"", "slot-9a", "../../etc/passwd"} {
+			k, err := gb(t, be).KeyAt(keystore.RoleUser, 2, fp2, loc)
+			if err != nil || ssh.FingerprintSHA256(k.PublicKey()) != fp2 {
+				t.Fatalf("KeyAt with location %q = %v", loc, err)
+			}
+		}
+	})
+	t.Run("provision_returns_empty_location", func(t *testing.T) {
+		_, be, _ := setup(t)
+		_, loc, err := gp(t, be).ProvisionGeneration(keystore.RoleMachine, 2, []string{"slot-9a"})
+		if err != nil || loc != "" {
+			t.Fatalf("ProvisionGeneration location = %q, %v; want empty", loc, err)
+		}
+	})
+}

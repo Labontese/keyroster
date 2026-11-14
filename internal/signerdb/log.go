@@ -126,6 +126,9 @@ type LogSnapshot struct {
 	// latest installed trust bundle, nil when none is installed.
 	CAKeys []CAKey
 	Bundle *StoredBundle
+	// CAGenerations are the stored CA key generations (03-12), in the
+	// order DB.CAGenerations returns.
+	CAGenerations []CAGeneration
 	// Directory is the latest installed directory, nil when none is
 	// installed.
 	Directory *StoredDirectory

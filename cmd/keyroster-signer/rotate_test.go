@@ -20,6 +20,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/Labontese/keyroster/internal/audit"
+	"github.com/Labontese/keyroster/internal/keystore"
 	"github.com/Labontese/keyroster/internal/signer"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/sshsig"
@@ -368,4 +369,151 @@ func TestCARotatePrepareTracer(t *testing.T) {
 	if n := st.count(t, "SELECT count(*) FROM ca_key_generations WHERE role='user'"); n != 2 {
 		t.Fatalf("ca_key_generations holds %d user rows, want 2", n)
 	}
+}
+
+// signs requires key to sign and its public key to verify the signature.
+func signs(t *testing.T, key keystore.CAKey) {
+	t.Helper()
+	data := []byte("keyroster 03-12 generation check")
+	sig, err := key.Sign(rand.Reader, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := key.PublicKey().Verify(data, sig); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSignerRestartMixedBundle (03-12): after ca-rotate prepare the signer
+// restarts, and the stored backend opens both generations of the user CA
+// by generation and fingerprint and refuses each generation's number with
+// the other's fingerprint. The software case is the one test of this
+// package that runs scrypt at the production work factor.
+func TestSignerRestartMixedBundle(t *testing.T) {
+	check := func(t *testing.T, st *rotateState, fp1, fp2 string) {
+		t.Helper()
+		startSigner(t, st)
+		ctx := context.Background()
+		db, err := signerdb.Open(st.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		_, be, err := openStoredBackend(ctx, db, nil, st.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = be.Close() })
+		for _, k := range []struct {
+			gen uint32
+			fp  string
+		}{{1, fp1}, {2, fp2}} {
+			key, err := keystore.KeyFor(be, keystore.RoleUser, k.gen, k.fp, "")
+			if err != nil {
+				t.Fatalf("KeyFor generation %d: %v", k.gen, err)
+			}
+			if got := ssh.FingerprintSHA256(key.PublicKey()); got != k.fp {
+				t.Fatalf("KeyFor generation %d returned %s, want %s", k.gen, got, k.fp)
+			}
+			signs(t, key)
+		}
+		if _, isGen := be.(keystore.GenerationBackend); isGen {
+			if _, err := keystore.KeyFor(be, keystore.RoleUser, 2, fp1, ""); err == nil {
+				t.Fatal("generation 2 opened generation 1's key")
+			}
+			if _, err := keystore.KeyFor(be, keystore.RoleUser, 1, fp2, ""); err == nil {
+				t.Fatal("generation 1 opened generation 2's key")
+			}
+		}
+	}
+	t.Run("software", func(t *testing.T) {
+		if os.Getuid() == 0 {
+			t.Skip("doctor refuses to run as root; run the tests as a normal user")
+		}
+		t.Setenv("CREDENTIALS_DIRECTORY", "")
+		pass := filepath.Join(t.TempDir(), "passphrase")
+		if err := os.WriteFile(pass, []byte("abcdefghijklmnopqrstuvwx"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		st := &rotateState{dir: filepath.Join(t.TempDir(), "state")}
+		if err := os.Mkdir(st.dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		st.db = filepath.Join(st.dir, "signer.db")
+		if code, out := runSigner(t, "ca-init", "--backend", "software", "--backend-opt", "passphrase-file="+pass, "--state-dir", st.dir); code != 0 {
+			t.Fatalf("ca-init exited %d:\n%s", code, out)
+		}
+		install(t, st, genesisFiles(t, st))
+		outFile := filepath.Join(t.TempDir(), "user-g2.json")
+		code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--out", outFile)
+		if code != 0 {
+			t.Fatalf("ca-rotate prepare exited %d:\n%s", code, out)
+		}
+		user, _ := st.caPubKeys(t).Key(trust.RoleUser)
+		pub1, err := trust.ParseKey(user.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(outFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pf prepareFile
+		if err := trust.DecodeStrict(data, &pf); err != nil {
+			t.Fatal(err)
+		}
+		pub2, err := trust.ParseKey(pf.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pf.Generation != 2 || pf.Custody != "software" {
+			t.Fatalf("prepare file %+v", pf)
+		}
+		for _, name := range []string{"user.age", "user-g2.age"} {
+			fi, err := os.Lstat(filepath.Join(st.dir, "software", name))
+			if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+				t.Fatalf("%s: %v, %v; want a regular 0600 file", name, fi, err)
+			}
+		}
+		check(t, st, ssh.FingerprintSHA256(pub1), ssh.FingerprintSHA256(pub2))
+	})
+	t.Run("agent", func(t *testing.T) {
+		st := newRotateState(t)
+		install(t, st, genesisFiles(t, st))
+		fp2 := st.addKey(t)
+		if code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--key", fp2,
+			"--out", filepath.Join(t.TempDir(), "user-g2.json")); code != 0 {
+			t.Fatalf("ca-rotate prepare exited %d:\n%s", code, out)
+		}
+		user, _ := st.caPubKeys(t).Key(trust.RoleUser)
+		pub1, err := trust.ParseKey(user.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, st, ssh.FingerprintSHA256(pub1), fp2)
+	})
+}
+
+// TestPrepareFileFormat (03-12) pins the prepare file's bytes, which the
+// root ceremony of 03-12b reads: canonical JSON with the fields role,
+// generation, key, alg and custody in that order and one trailing newline.
+func TestPrepareFileFormat(t *testing.T) {
+	t.Run("prepare_file_bytes_pinned", func(t *testing.T) {
+		seed := make([]byte, ed25519.SeedSize)
+		for i := range seed {
+			seed[i] = byte(i)
+		}
+		pub, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(seed).Public())
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := prepareFileBytes("user", 2, pub, "software")
+		if err != nil {
+			t.Fatal(err)
+		}
+		const want = `{"role":"user","generation":2,"key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAOhB7/zzhC+HXDdGOdLwJln5NYwm6UNXx3chmQSVTG4","alg":"ssh-ed25519","custody":"software"}` + "\n"
+		if string(got) != want {
+			t.Fatalf("prepare file bytes:\n got %q\nwant %q", got, want)
+		}
+	})
 }
