@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"time"
 )
 
@@ -76,8 +78,9 @@ func (d *DB) BackendConfig(ctx context.Context) (string, map[string]string, erro
 	return name, opts, nil
 }
 
-// SaveCAKeys stores the five role keys inside tx. Every role must appear
-// exactly once; the schema refuses a key used for two roles.
+// SaveCAKeys stores the five role keys inside tx, each also as generation 1
+// of its role in ca_key_generations (03-12). Every role must appear exactly
+// once; the schema refuses a key used for two roles.
 func (d *DB) SaveCAKeys(tx *sql.Tx, keys []CAKey) error {
 	if len(keys) != len(CARoles) {
 		return fmt.Errorf("signerdb: want %d CA keys, got %d", len(CARoles), len(keys))
@@ -90,6 +93,90 @@ func (d *DB) SaveCAKeys(tx *sql.Tx, keys []CAKey) error {
 			k.Role, k.PublicKey, k.Alg, k.Custody); err != nil {
 			return fmt.Errorf("signerdb: insert CA key %s: %w", k.Role, err)
 		}
+		if _, err := tx.Exec(`INSERT INTO ca_key_generations (role, generation, pubkey, alg, custody, location, created_at_us) VALUES (?, 1, ?, ?, ?, '', 0)`,
+			k.Role, k.PublicKey, k.Alg, k.Custody); err != nil {
+			return fmt.Errorf("signerdb: insert CA key generation 1 of %s: %w", k.Role, err)
+		}
+	}
+	return nil
+}
+
+// CAGeneration is one row of ca_key_generations (03-12): a CA key
+// generation of a role. Generation 1 is the ca-init key; every later one
+// was recorded by ca-rotate prepare together with a ca_generation log
+// entry. Location is the backend's handle for the key (empty for the
+// software, agent and memory backends); it is not logged.
+type CAGeneration struct {
+	Role            string
+	Generation      uint32
+	PublicKey       []byte // SSH wire encoding
+	Alg             string
+	Custody         string
+	Location        string
+	CreatedAtMicros int64
+}
+
+// CAGenerations returns every stored CA key generation in the order of
+// CARoles, then by generation.
+func (d *DB) CAGenerations(ctx context.Context) ([]CAGeneration, error) {
+	return caGenerations(ctx, d.db)
+}
+
+func caGenerations(ctx context.Context, q queryer) ([]CAGeneration, error) {
+	rows, err := q.QueryContext(ctx, `SELECT role, generation, pubkey, alg, custody, location, created_at_us FROM ca_key_generations ORDER BY generation`)
+	if err != nil {
+		return nil, fmt.Errorf("signerdb: read CA key generations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	byRole := map[string][]CAGeneration{}
+	for rows.Next() {
+		var (
+			g   CAGeneration
+			gen int64
+		)
+		if err := rows.Scan(&g.Role, &gen, &g.PublicKey, &g.Alg, &g.Custody, &g.Location, &g.CreatedAtMicros); err != nil {
+			return nil, fmt.Errorf("signerdb: read CA key generations: %w", err)
+		}
+		if gen < 1 || gen > math.MaxUint32 {
+			return nil, fmt.Errorf("signerdb: invalid CA key generation %d of %s", gen, g.Role)
+		}
+		g.Generation = uint32(gen) //nolint:gosec // G115: 1 <= gen <= MaxUint32, checked above
+		if !slices.Contains(CARoles, g.Role) {
+			return nil, fmt.Errorf("signerdb: CA key generation of unknown role %q", g.Role)
+		}
+		byRole[g.Role] = append(byRole[g.Role], g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("signerdb: read CA key generations: %w", err)
+	}
+	var out []CAGeneration
+	for _, role := range CARoles {
+		out = append(out, byRole[role]...)
+	}
+	return out, nil
+}
+
+// InsertCAGenerationTx stores generation g.Generation of g.Role inside tx.
+// It refuses generation 1 (ca-init's) and every generation that is not the
+// role's stored maximum plus 1; the schema refuses a key that any stored
+// generation of any role already uses.
+func (d *DB) InsertCAGenerationTx(tx *sql.Tx, g CAGeneration) error {
+	if g.Generation < 2 {
+		return fmt.Errorf("signerdb: CA key generation %d of %s: generation 1 is ca-init's", g.Generation, g.Role)
+	}
+	if len(g.PublicKey) == 0 || g.Alg == "" || g.Custody == "" {
+		return fmt.Errorf("signerdb: incomplete CA key generation %d of %s", g.Generation, g.Role)
+	}
+	var latest int64
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(generation), 0) FROM ca_key_generations WHERE role = ?`, g.Role).Scan(&latest); err != nil {
+		return fmt.Errorf("signerdb: read CA key generation of %s: %w", g.Role, err)
+	}
+	if latest < 1 || int64(g.Generation) != latest+1 {
+		return fmt.Errorf("signerdb: CA key generation %d of %s is not the next after stored generation %d", g.Generation, g.Role, latest)
+	}
+	if _, err := tx.Exec(`INSERT INTO ca_key_generations (role, generation, pubkey, alg, custody, location, created_at_us) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		g.Role, int64(g.Generation), g.PublicKey, g.Alg, g.Custody, g.Location, g.CreatedAtMicros); err != nil {
+		return fmt.Errorf("signerdb: insert CA key generation %d of %s: %w", g.Generation, g.Role, err)
 	}
 	return nil
 }

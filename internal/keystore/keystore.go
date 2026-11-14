@@ -82,3 +82,35 @@ type Describer interface {
 type Provisioner interface {
 	Provision(roles []Role) (map[Role]ssh.PublicKey, error)
 }
+
+// GenerationProvisioner is implemented by backends that can create the key
+// of a later CA key generation in place (03-12: the software backend). used
+// holds the non-empty locations that every stored generation row of every
+// role records, so that a backend with a handle to allocate (a PIV slot)
+// can choose a free one. It returns the new public key and the location to
+// record in the generation row; the software backend returns "".
+type GenerationProvisioner interface {
+	ProvisionGeneration(role Role, generation uint32, used []string) (pub ssh.PublicKey, location string, err error)
+}
+
+// GenerationBackend is implemented by backends that keep a separate key per
+// CA key generation (03-12: the software backend, one file per
+// generation). KeyAt returns the key of that generation of role whose
+// SHA-256 fingerprint equals fingerprint, and never falls back to another
+// key or generation. location is the generation row's location column, as
+// ProvisionGeneration returned it; the software, agent and memory backends
+// ignore it, and a backend with a handle to remember (a PIV slot) receives
+// it here.
+type GenerationBackend interface {
+	KeyAt(role Role, generation uint32, fingerprint, location string) (CAKey, error)
+}
+
+// KeyFor opens the key of generation of role with fingerprint: through
+// KeyAt when b is a GenerationBackend, otherwise through Key, which selects
+// by fingerprint only and takes no location (03-12).
+func KeyFor(b Backend, role Role, generation uint32, fingerprint, location string) (CAKey, error) {
+	if g, ok := b.(GenerationBackend); ok {
+		return g.KeyAt(role, generation, fingerprint, location)
+	}
+	return b.Key(role, fingerprint)
+}

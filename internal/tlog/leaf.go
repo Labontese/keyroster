@@ -52,8 +52,9 @@ type Kind uint8
 // certificate issued to a host agent by proof of possession, and for a
 // negative probe the revocation of its own serial. Kind 13 joined format
 // v1 in Phase 3 (03-11): MachineIssue records a machine certificate issued
-// by proof of possession of the machine's key. Kind 14 stays reserved for
-// 03-12, which adds it to the valid set (valid).
+// by proof of possession of the machine's key. Kind 14 joined format v1 in
+// Phase 3 (03-12), taking its reserved number: CAGeneration records a CA
+// key generation that keyroster-signer ca-rotate prepare created.
 // A reader that has no check for a kind must refuse it, never
 // skip it (audit verify does). docs/format-registry.md allocates the
 // numbers; TestFormatRegistry fails when it and these constants disagree.
@@ -72,13 +73,15 @@ const (
 	KindHostIssue Kind = 11
 	// KindProbeIssue (03-10) takes its reserved number.
 	KindProbeIssue Kind = 12
-	// KindMachineIssue (03-11) takes its reserved number; 14 belongs to
-	// 03-12.
+	// KindMachineIssue (03-11) takes its reserved number.
 	KindMachineIssue Kind = 13
+	// KindCAGeneration (03-12) takes its reserved number: a CA key
+	// generation recorded by ca-rotate prepare (CAGenerationBody).
+	KindCAGeneration Kind = 14
 	// 15 (03-06b) was the first free number: 11 to 14 belonged to 03-09
 	// to 03-12.
 	KindRevocationRecovery Kind = 15
-	// 16 (03-08c) comes after 15; 14 stays 03-12's.
+	// 16 (03-08c) comes after 15.
 	KindHostForget Kind = 16
 )
 
@@ -111,6 +114,8 @@ func (k Kind) String() string {
 		return "probe_issue"
 	case KindMachineIssue:
 		return "machine_issue"
+	case KindCAGeneration:
+		return "ca_generation"
 	case KindRevocationRecovery:
 		return "revocation_recovery"
 	case KindHostForget:
@@ -121,9 +126,9 @@ func (k Kind) String() string {
 }
 
 // valid reports whether k is a kind of format v1. It is an explicit set:
-// 1 to 13, 15 and 16. Kind 14 is added by 03-12.
+// 1 to 16 (kind 14 since 03-12).
 func (k Kind) valid() bool {
-	return (k >= KindIssue && k <= KindMachineIssue) || k == KindRevocationRecovery || k == KindHostForget
+	return (k >= KindIssue && k <= KindCAGeneration) || k == KindRevocationRecovery || k == KindHostForget
 }
 
 // Size limits enforced by the encoders and the strict decoders.
@@ -250,6 +255,8 @@ func checkBody(k Kind, body []byte) error {
 		_, err = DecodeProbeIssueBody(body)
 	case KindMachineIssue:
 		_, err = DecodeMachineIssueBody(body)
+	case KindCAGeneration:
+		_, err = DecodeCAGenerationBody(body)
 	default:
 		err = fmt.Errorf("%w: unknown kind %d", ErrMalformedLeaf, k)
 	}
@@ -591,6 +598,59 @@ func DecodeCAInitBody(data []byte) (*CAInitBody, error) {
 		b.Keys = append(b.Keys, CAInitKey{Role: string(role), PublicKey: pub, Alg: string(alg), Custody: string(custody)})
 	}
 	if len(b.Keys) == 0 {
+		return nil, ErrMalformedLeaf
+	}
+	return &b, nil
+}
+
+// CAGenerationBody records a CA key generation (03-12): generation
+// (at least 2; generation 1 of every role is the ca_init entry's key) of
+// role, with its public key in SSH wire format, algorithm and custody.
+type CAGenerationBody struct {
+	Role       string
+	Generation uint32
+	PublicKey  []byte // SSH wire format
+	Alg        string
+	Custody    string
+}
+
+func (b *CAGenerationBody) check() error {
+	if b.Role == "" || len(b.PublicKey) == 0 || b.Alg == "" || b.Custody == "" ||
+		len(b.Role) > maxCAInitField || len(b.PublicKey) > maxCAInitField ||
+		len(b.Alg) > maxCAInitField || len(b.Custody) > maxCAInitField || b.Generation < 2 {
+		return fmt.Errorf("%w: ca_generation fields", ErrMalformedLeaf)
+	}
+	return nil
+}
+
+// Encode encodes the body: the role, the generation (uint32), the public
+// key, the algorithm and the custody, each string uint16-length-prefixed.
+func (b *CAGenerationBody) Encode() ([]byte, error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	var c cryptobyte.Builder
+	add16(&c, []byte(b.Role))
+	c.AddUint32(b.Generation)
+	add16(&c, b.PublicKey)
+	add16(&c, []byte(b.Alg))
+	add16(&c, []byte(b.Custody))
+	return c.Bytes()
+}
+
+// DecodeCAGenerationBody decodes a ca_generation body strictly.
+func DecodeCAGenerationBody(data []byte) (*CAGenerationBody, error) {
+	s := cryptobyte.String(data)
+	var (
+		b                       CAGenerationBody
+		role, pub, alg, custody []byte
+	)
+	if !read16(&s, &role, maxCAInitField) || !s.ReadUint32(&b.Generation) || !read16(&s, &pub, maxCAInitField) ||
+		!read16(&s, &alg, maxCAInitField) || !read16(&s, &custody, maxCAInitField) || !s.Empty() {
+		return nil, ErrMalformedLeaf
+	}
+	b.Role, b.PublicKey, b.Alg, b.Custody = string(role), pub, string(alg), string(custody)
+	if err := b.check(); err != nil {
 		return nil, ErrMalformedLeaf
 	}
 	return &b, nil

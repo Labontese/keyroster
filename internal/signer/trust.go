@@ -392,6 +392,58 @@ func openRoleKey(be keystore.Backend, caKeys []signerdb.CAKey, role string) (key
 	return nil, fmt.Errorf("signer: no key for role %s", role)
 }
 
+// isCARole reports whether role is a CA role (user, host or machine).
+func isCARole(role string) bool {
+	for _, kr := range caRoles {
+		if string(kr) == role {
+			return true
+		}
+	}
+	return false
+}
+
+// activeGeneration returns the stored generation row that b's active entry
+// for role names: the same role, generation number and key (03-12).
+func activeGeneration(b *trust.Bundle, gens []signerdb.CAGeneration, role string) (signerdb.CAGeneration, error) {
+	for _, ca := range b.CAs {
+		if ca.Role != role || ca.State != "active" {
+			continue
+		}
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			return signerdb.CAGeneration{}, fmt.Errorf("%w: CA %s: %w", ErrBundleKeys, role, err)
+		}
+		for _, g := range gens {
+			if g.Role == role && g.Generation == ca.Generation && bytes.Equal(g.PublicKey, pub.Marshal()) {
+				return g, nil
+			}
+		}
+		return signerdb.CAGeneration{}, fmt.Errorf("%w: the active CA %s entry (generation %d, %s) names no stored generation",
+			ErrBundleKeys, role, ca.Generation, ssh.FingerprintSHA256(pub))
+	}
+	return signerdb.CAGeneration{}, fmt.Errorf("%w: the bundle has no active CA %s entry", ErrBundleKeys, role)
+}
+
+// openGenerationKey opens the key of generation row g through
+// keystore.KeyFor, with the row's location, and requires the fingerprint,
+// the custody the backend reports and the key type to be the recorded
+// ones, as openRoleKey does for a ca-init key (03-12).
+func openGenerationKey(be keystore.Backend, g signerdb.CAGeneration) (keystore.CAKey, error) {
+	pub, err := ssh.ParsePublicKey(g.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: stored %s generation %d key: %w", ErrBundleKeys, g.Role, g.Generation, err)
+	}
+	key, err := pinnedKeyAt(be, keystore.Role(g.Role), g.Generation, ssh.FingerprintSHA256(pub), g.Location)
+	if err != nil {
+		return nil, fmt.Errorf("signer: bundle key for role %s (generation %d): %w", g.Role, g.Generation, err)
+	}
+	if got := string(key.Custody()); got != g.Custody {
+		return nil, fmt.Errorf("%w: the backend reports custody %s for the %s generation %d key, the generation records %s",
+			ErrBundleKeys, got, g.Role, g.Generation, g.Custody)
+	}
+	return key, nil
+}
+
 func fingerprintOf(key string) string {
 	pub, err := trust.ParseKey(key)
 	if err != nil {
@@ -453,20 +505,42 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	if err != nil {
 		return nil, err
 	}
+	gens, err := db.CAGenerations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Each CA role's signing key is the generation the bundle names as
+	// active, opened by generation through keystore.KeyFor with the
+	// location its row records (03-12); ops and log are still the ca-init
+	// keys. The rows the signer reports keep the fixed role order.
 	keys := map[string]keystore.CAKey{}
+	rows := make([]signerdb.CAKey, 0, len(caKeys))
 	for _, k := range caKeys {
-		key, err := openRoleKey(be, caKeys, k.Role)
-		if err != nil {
+		var (
+			key keystore.CAKey
+			row = k
+		)
+		if isCARole(k.Role) {
+			g, err := activeGeneration(ts.bundle, gens, k.Role)
+			if err != nil {
+				return nil, err
+			}
+			if key, err = openGenerationKey(be, g); err != nil {
+				return nil, err
+			}
+			row = signerdb.CAKey{Role: g.Role, PublicKey: g.PublicKey, Alg: g.Alg, Custody: g.Custody}
+		} else if key, err = openRoleKey(be, caKeys, k.Role); err != nil {
 			return nil, err
 		}
 		keys[k.Role] = key
+		rows = append(rows, row)
 	}
 	for role, kr := range caRoles {
 		ts.ca[role] = keys[string(kr)]
 	}
 	ts.logKey = keys["log"]
 	ts.opsKey = keys["ops"]
-	ts.caKeys = caKeys
+	ts.caKeys = rows
 	if ts.bundle.Log.Origin != tlog.Origin(ts.logKey.PublicKey()) {
 		return nil, fmt.Errorf("%w: log origin %q is not the log key's", ErrBundleKeys, ts.bundle.Log.Origin)
 	}

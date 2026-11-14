@@ -1094,6 +1094,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			rep.SummarizedRefusals += body.Total()
 		case tlog.KindRefusal, tlog.KindClockRegression, tlog.KindCAInit:
 			// No check beyond the strict decode DecodeLeaf already did.
+		case tlog.KindCAGeneration:
+			// A CA key generation (03-12). No check yet beyond the strict
+			// decode DecodeLeaf already did.
 		default:
 			// A kind this version has no check for is refused before it is
 			// hashed or counted, never skipped. From 03-01 until 03-03 the
