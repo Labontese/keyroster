@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/pem"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/age"
+	"filippo.io/age/armor"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
@@ -388,7 +391,9 @@ func signs(t *testing.T, key keystore.CAKey) {
 // restarts, and the stored backend opens both generations of the user CA
 // by generation and fingerprint and refuses each generation's number with
 // the other's fingerprint. The software case is the one test of this
-// package that runs scrypt at the production work factor.
+// package that runs scrypt at the production work factor: its
+// generation-1 files are written at a low work factor, and the
+// generation-2 file that prepare creates is at the production one.
 func TestSignerRestartMixedBundle(t *testing.T) {
 	check := func(t *testing.T, st *rotateState, fp1, fp2 string) {
 		t.Helper()
@@ -431,8 +436,9 @@ func TestSignerRestartMixedBundle(t *testing.T) {
 			t.Skip("doctor refuses to run as root; run the tests as a normal user")
 		}
 		t.Setenv("CREDENTIALS_DIRECTORY", "")
+		const passphrase = "abcdefghijklmnopqrstuvwx"
 		pass := filepath.Join(t.TempDir(), "passphrase")
-		if err := os.WriteFile(pass, []byte("abcdefghijklmnopqrstuvwx"), 0o600); err != nil {
+		if err := os.WriteFile(pass, []byte(passphrase), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		st := &rotateState{dir: filepath.Join(t.TempDir(), "state")}
@@ -440,7 +446,16 @@ func TestSignerRestartMixedBundle(t *testing.T) {
 			t.Fatal(err)
 		}
 		st.db = filepath.Join(st.dir, "signer.db")
-		if code, out := runSigner(t, "ca-init", "--backend", "software", "--backend-opt", "passphrase-file="+pass, "--state-dir", st.dir); code != 0 {
+		// The five generation-1 key files are written here at a low scrypt
+		// work factor and selected with --key, so that ca-init, the
+		// restart and the generation-1 opens stay cheap under -race; the
+		// generation-2 file that prepare creates is the one at the
+		// production work factor.
+		args := []string{"ca-init", "--backend", "software", "--backend-opt", "passphrase-file=" + pass, "--state-dir", st.dir}
+		for role, fp := range writeSoftwareKeys(t, st.dir, passphrase) {
+			args = append(args, "--key", role+"="+fp)
+		}
+		if code, out := runSigner(t, args...); code != 0 {
 			t.Fatalf("ca-init exited %d:\n%s", code, out)
 		}
 		install(t, st, genesisFiles(t, st))
@@ -516,4 +531,59 @@ func TestPrepareFileFormat(t *testing.T) {
 			t.Fatalf("prepare file bytes:\n got %q\nwant %q", got, want)
 		}
 	})
+}
+
+// writeSoftwareKeys writes the five generation-1 key files of the software
+// backend into {stateDir}/software (0700, each file 0600) in the backend's
+// format: an armored age file with one scrypt recipient for passphrase,
+// holding the OpenSSH PEM of a generated Ed25519 key. The work factor is
+// low, which the backend's decryption accepts, so that only keys the
+// backend itself creates cost scrypt at the production work factor. It
+// returns each role's fingerprint.
+func writeSoftwareKeys(t *testing.T, stateDir, passphrase string) map[string]string {
+	t.Helper()
+	dir := filepath.Join(stateDir, "software")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fps := map[string]string{}
+	for _, role := range []string{"user", "host", "machine", "ops", "log"} {
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, err := ssh.MarshalPrivateKey(priv, "keyroster test key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		recipient, err := age.NewScryptRecipient(passphrase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recipient.SetWorkFactor(10)
+		var out bytes.Buffer
+		aw := armor.NewWriter(&out)
+		w, err := age.Encrypt(aw, recipient)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(pem.EncodeToMemory(block)); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := aw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, role+".age"), out.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s, err := ssh.NewSignerFromKey(priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fps[role] = ssh.FingerprintSHA256(s.PublicKey())
+	}
+	return fps
 }
