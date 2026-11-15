@@ -149,7 +149,7 @@ Each: unmutated runs ok (TestRestoreMarker 2.430 s, TestInstallIssuedAtAhead 0.2
 ## What stays UNVERIFIED
 
 - Every runbook text on the homelab signer.
-- The marker block's `touch` and `chown` on the real units outside CI (the systemd-sandbox job runs them).
+- The marker block's `runuser` writes on the real units outside CI (the systemd-sandbox job runs them, with a planted marker link).
 - A real recovery that carries a certificate on the homelab signer.
 - The journal entry on a real journal (tests use their own unixgram listener).
 - The migration of a real schema-5 backup under the marker (tested with a database reduced to schema 5 by SQL; smoke.sh runs `--migrate-only` on a current database only).
@@ -184,7 +184,51 @@ Read at execution against origin/main d15f044: every row of the plan's reconcile
 7. 03-15-PLAN.md line 183: the owner's workstation's host name, which is on main, is replaced on the line the plan's insertion changes, because the pre-push scan refuses it; the publish commit was amended before the first push. The plan's whole-diff PR-text scan matches only text on main (context and removed lines). (Task 4)
 8. Not a deviation: the R3b route was not needed: no fixture tripped `bundle_issued_in_future`. (Task 3)
 
+## Pre-merge review
+
+The lean pre-merge review (run wf_733896d2-592) used two Opus lenses (restore-lock and generations-trust), one Codex lens at high, two Sonnet skeptics for the high items and one batched Sonnet skeptic for the rest. Outcome: three distinct issues confirmed (two lenses found I1, two found I2) and three low items refuted. The issues were fixed test first: a RED commit that fails, then the fix.
+
+- **I1 (high). The file-restore block followed a planted link as root.** Old: as root, `touch "$S/restore-recovery-pending"` then `chown keyroster-signer:keyroster-signer` on it, in the state directory that keyroster-signer owns. A link planted there led root to create the target and hand it to keyroster-signer. The signer.db lines used `install -o … -m 0600`. GNU install unlinks the destination first, but coreutils 9.4 `change_attributes` calls `lchownat` and then a link-following `chmodat`. A local race loop (non-root, 20000 installs while another loop swapped in a link) changed the target's mode 40 times. New: after the lock check, root runs `rm -f` on the marker, then creates it as keyroster-signer with `runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && : >"$1"'`. signer.db, -wal and -shm are copied the same way (`cat >"$1"` under `set -C`, stdin from root's backup directory). The rest of the block:
+  - root's `rm -f` lines unlink entries and never follow a final link;
+  - `exec 9<"$S/signer.lock"` follows a link, but it is a read-only open, not a write;
+  - every write into `$S` happens as keyroster-signer, which could write any target of its own links anyway. This is the property the block rests on, in any shell;
+  - `set -C` is only an extra. dash's noclobber refuses any entry planted between `rm -f` and the create, which stops the block under `-e` before signer.db is replaced. bash's noclobber, which is `sh` on AlmaLinux, still opens a link to a device or FIFO (checked in WSL). 73487ad's commit message overstates this, and d04b5c8 corrects the runbook text.
+
+  The runbook, smoke.sh and restoreFilesScript change identically, and the runbook says why. This deviates from the brief's preferred `install … /dev/null` form, because of the chmod race. The Go marker gate is unchanged: `lockState` and doctor use `os.Lstat`, and an entry of any type counts. A planted link or directory therefore makes every writer refuse, which `marker_symlink_counts` and `marker_is_directory_counts` pin. A regular-file requirement would have let a planted link bypass the gate. Pins:
+  - `restoreSignerPathWrite` in TestRestoreRunbookChecks refuses any `install|chown|chmod|cp|mv|mkdir|ln|tee|touch` line on a `"$S/` path in the runbook and smoke.sh, next to `restoreAdminPathWrite`, with the existing pins kept in order;
+  - smoke.sh now has keyroster-signer plant the marker as a link to a root-owned 0644 canary before the file restore, then requires the canary's mode, owner, mtime, size and content unchanged and the marker a regular 0600 file of keyroster-signer. This runs in the systemd-sandbox CI job only.
+
+  RED 845b482, fix 73487ad, runbook wording d04b5c8.
+- **I2 (medium). ca-rotate prepare trusted an unlogged trust_bundle row.** Old: prepareGeneration ran its distinctness check against `db.LatestBundle` without comparing the row with the log. New: `checkBundleLogged(stored, lw.loaded.last)` runs right after LatestBundle, before any key is selected or created, as InstallBundle does. Two new TestPrepareGeneration cases each must refuse with `errLogMismatch` and leave no leaf, no row and no provisioning call (the M187 no-file check):
+  - `unlogged_policy_row_refused`: the stored policy has admin 0's key replaced, the log is unchanged, and prepare runs with `--key <admin 0>` and without `--key`;
+  - `bundle_row_without_install_leaf_refused`: after ca-init the signed genesis documents are inserted by SQL, with no bundle_install entry.
+
+  On the old code both cases succeeded (RED: `PrepareGeneration = <nil>, want signer: log state mismatch`), so `--key <admin 0>` wrote a leaf. RED 6553504, fix 67f8ba1, lint 8615587.
+- **I3 (low). A release whose directory fsync failed was not recorded.** Old: removeMarker returned `(true, err)` and both callers returned before noteRelease. The recovery's error also sent the operator to `--no-recovery-needed`, which then answers "no marker". New: both callers record the release whenever the marker was removed. The error says that the marker was removed, that the fsync failed afterwards, and that the removal may not survive a crash. It no longer points to `--no-recovery-needed`. The seam is `syncStateDir` as a package variable (refactor 4a8b833). `TestRestoreMarker/release_recorded_when_sync_fails` covers both the recovery and `--no-recovery-needed`. RED 6b13f09 (the stderr record missing on both paths), fix 44f23bc.
+- **D1.** Old: "the software backend creates the key itself and takes no `--key`". New: without `--key` it creates `software/<role>-g<N>.age`. With `--key` it opens a `<role>-g<N>.age` file that the operator placed, encrypted to the signer's passphrase, and refuses unless the fingerprint matches. 7cf9d4e.
+- **D2.** Old: "under the marker only `recover-revocations` opens `signer.db`" (at the upgrade paragraph and at "A backup older than this build"). New: it is the only command that opens it for writing, and `doctor` and `export-log` open it read-only and migrate nothing. 7cf9d4e.
+- Refuted, low:
+  - D1's wording, which is not harmful because doctor's WARN text already describes the placed file (reworded anyway);
+  - D2's wording, which is loose but explained by the same paragraph (reworded anyway);
+  - the name TestDoctorGenerationsAndMarker overstates its body, but `TestRestoreMarker/doctor_reports_marker` covers doctor's marker FAIL.
+- Executor deviations recorded here:
+  - (8) The publish gate as written passes `depends_on: ["03-12"]` and the like to `grep -qx` as a basic regex, where the brackets are a bracket expression (`grep: Invalid range end`), so it was run with `grep -Fqx`.
+  - (10) Task 4 verify 9, the PR-text scan of the whole diff, matches only text that is already on main (context and removed lines). No added line matches.
+- Tests after the fixes:
+  - the delta tests of every touched package, with the RED tests passing;
+  - `go test -race` of internal/signer (402.4 s) and cmd/keyroster-signer (27.3 s): ok;
+  - TestRestoreRunbookChecks, TestRestoreCrossCheck and TestRestoreCopyCaps: ok;
+  - the runbook-reading tests in cmd/keyroster, internal/agent/apply, internal/audit and internal/server: ok.
+
+  The harness restore e2e tests (TestRestoreRecoveryTracer, TestRestoreRecoversLostRevocations, TestRestoreRecoveryAfterRecovery, TestRestoreReplaysLostDirectory) cannot run on this machine: WSL's resolver does not resolve `keyroster.localhost`. They run in the CI e2e lanes.
+- Gate:
+  - `go vet ./...`, `go vet -tags e2e ./test/e2e/`, gofmt, `bash -n test/systemd/smoke.sh`, dep-firewall, testonly-firewall and check-pinned-actions pass;
+  - golangci-lint reported three errcheck issues in the new prepare cases, fixed in 8615587, after which it reports 0 issues;
+  - capslock is unchanged: 97 pairs for keyroster-signer, 37 for keyroster-agent and 23 for keyroster-agent-fetch, each equal to its baseline.
+- CI: the run IDs of the final head are in the PR body, because recording them here would need one more push.
+
 ## Self-Check: PASSED
 
 - Files: internal/signerdb/migrations/0006_ca_generations.sql, internal/signer/rotate.go, internal/signer/generations_test.go, internal/signer/rotate_test.go, cmd/keyroster-signer/rotate.go, cmd/keyroster-signer/rotate_test.go and test/vectors/leaf_ca_generation_v1.hex exist.
 - Commits: R1 306caa7, T1 33682c4, R2a ed07d6c, T2a 470953d, R2b 1497674, T2b 7ffc235, 4b5c92c, R3 2045a5c, T3 6ab4715, 0bc8522, bd66716, e5d2d52 and db07083 are ancestors of HEAD.
+- Pre-merge review commits 845b482, 73487ad, 6553504, 67f8ba1, 4a8b833, 6b13f09, 44f23bc, 7cf9d4e, 8615587 and d04b5c8 are ancestors of HEAD.
