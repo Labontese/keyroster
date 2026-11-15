@@ -133,6 +133,14 @@ func prepareGeneration(ctx context.Context, lw *Signer, db *signerdb.DB, be keys
 	if err != nil {
 		return signerdb.CAGeneration{}, err
 	}
+	// The stored bundle and policy are the distinctness inputs below, so
+	// the row must be the one the verified log's last bundle_install entry
+	// records, as InstallBundle requires: an edited policy that no longer
+	// names an admin key would otherwise let that key become a generation
+	// (PR #102 review, I2).
+	if err := checkBundleLogged(stored, lw.loaded.last); err != nil {
+		return signerdb.CAGeneration{}, err
+	}
 	b, err := trust.ParseBundle(stored.Bundle)
 	if err != nil {
 		return signerdb.CAGeneration{}, fmt.Errorf("signer: installed bundle: %w", err)
