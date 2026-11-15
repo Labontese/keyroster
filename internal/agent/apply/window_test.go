@@ -163,15 +163,40 @@ func mustRecord(t *testing.T, h *testHost, bundle, dir uint64) {
 // withNextUser adds a next user CA entry for key to b at the user role's
 // next free generation, after the role's last entry, so the successor is
 // the one CA change the chain rule allows for the role (03-12b).
-func withNextUser(b *trust.Bundle, key ssh.Signer) {
+func withNextUser(b *trust.Bundle, key ssh.Signer) { withNext(b, trust.RoleUser, key) }
+
+// withNext is withNextUser for any CA role.
+func withNext(b *trust.Bundle, role string, key ssh.Signer) {
 	var gen uint32
 	at := 0
 	for i, c := range b.CAs {
-		if c.Role == trust.RoleUser {
+		if c.Role == role {
 			gen, at = max(gen, c.Generation), i+1
 		}
 	}
-	b.CAs = slices.Insert(b.CAs, at, trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(key.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "next", Generation: gen + 1})
+	b.CAs = slices.Insert(b.CAs, at, trust.CAEntry{Role: role, Key: trust.FormatKey(key.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "next", Generation: gen + 1})
+}
+
+// roleNextChain is a chain-legal CA rotation of role after the fixture's
+// genesis bundle (03-12b): version 2 adds key as the role's next CA at
+// generation 2 and, with abort, version 3 retires it. It returns the
+// bundles by version, for the spool.
+func (f *fixture) roleNextChain(role string, key ssh.Signer, abort bool) map[uint64]spool.Doc {
+	f.t.Helper()
+	b2, err := trust.BuildSuccessor(f.bundle, f.bundleDoc, f.policyDoc, trust.SuccessorOptions{Roots: f.bundle.Root.Keys, Threshold: 1, Policy: f.policyDoc, IssuedAt: "2026-10-02T00:00:00Z", InstallationID: testInstallation})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	withNext(b2, role, key)
+	doc2 := mustCanonical(f.t, b2)
+	if _, err := trust.ParseBundle(doc2); err != nil {
+		f.t.Fatalf("successor bundle with a next %s CA: %v", role, err)
+	}
+	out := map[uint64]spool.Doc{2: {Body: doc2, Sigs: f.rootSign(trust.NamespaceBundle, doc2)}}
+	if abort {
+		_, out[3] = f.successorWithout(b2, doc2, "2026-10-03T00:00:00Z")
+	}
+	return out
 }
 
 // retireNext retires every next CA entry of b (an abort): the chain rule

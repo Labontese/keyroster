@@ -308,6 +308,52 @@ func TestProbeStep(t *testing.T) {
 			t.Fatal("the refused request's outbox file is still there")
 		}
 	})
+	for _, c := range []struct {
+		name  string
+		abort bool
+	}{{"probe_pair_aborted_ca_refused", true}, {"probe_pair_next_ca_kept", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			// The bundle in force lists the machine CA generation 1 active
+			// and generation 2 next, or, after the abort, retired (03-12b),
+			// and the pair is signed by generation 2's key: the answer set
+			// is the active and next keys.
+			h := newProbeHost(t)
+			k2 := seedKey(t, 28)
+			for v, d := range h.f.roleNextChain(trust.RoleMachine, k2, c.abort) {
+				h.state.Bundles[v] = d
+			}
+			h.installed("role:ops")
+			if a, err := h.accepted(); err != nil || a.BundleVersion != uint64(len(h.state.Bundles)) {
+				t.Fatalf("accepted/ %+v (%v), want the newest bundle in force", a, err)
+			}
+			h.mustProbeCerts()
+			gen1 := h.f.mach
+			h.f.mach = k2
+			h.answerAll()
+			h.f.mach = gen1
+			r := h.mustProbeCerts()
+			rec := h.record()
+			if !c.abort {
+				if len(r.Kept) != 2 || rec.Next.Positive == nil || rec.Next.Negative == nil {
+					t.Fatalf("a pair signed by the next machine CA key: report %+v, record %+v, want both kept", r, rec)
+				}
+				return
+			}
+			// As bad_answer_not_kept_transient: not kept, a transient
+			// back-off, and the refused requests' outbox files gone.
+			if len(r.Kept) != 0 || rec.Next.Positive != nil || rec.Next.Negative != nil {
+				t.Fatalf("a pair signed by the aborted machine CA key was kept: report %+v, record %+v", r, rec)
+			}
+			for _, a := range []probecert.Attempt{rec.Attempts.Positive, rec.Attempts.Negative} {
+				if a.LastCode == "" || a.Sticky != nil || a.NextAt == 0 {
+					t.Fatalf("attempt %+v, want a transient refusal", a)
+				}
+			}
+			if len(h.outbox()) != 0 {
+				t.Fatal("the refused requests' outbox files are still there")
+			}
+		})
+	}
 	t.Run("refusal_sticky_and_transient", func(t *testing.T) {
 		h := newProbeHost(t)
 		h.installed("role:ops")
