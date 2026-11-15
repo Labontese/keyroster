@@ -19,8 +19,8 @@ import (
 // for a refused publickey login of user from src, which a certificate
 // signed by a CA key that TrustedUserCAKeys does not list gets (03-12b).
 // sshd names that CA reason only at a debug level, so the generic line,
-// from a source address of its own, is what can be matched. UNVERIFIED
-// until CI ran it on both OpenSSH builds.
+// from a source address of its own, is what can be matched; the 9.5p1 and
+// 10.5p1 builds both print it.
 func caRotFailedLogin(user, src string) string {
 	return "Failed publickey for " + user + " from " + src + " port"
 }
@@ -99,7 +99,8 @@ func caRotInstall(t *testing.T, env *signerEnv, dir string, version string) func
 // prepared user CA key becomes next through a root ceremony, the host
 // trusts it beside the active key after the widening wait, and an abort
 // withdraws it at once, so a certificate it signed is refused. The
-// exported log verifies across both. UNVERIFIED until it has run in CI.
+// exported log verifies across both (the e2e-rotation lane, 9.5p1 and
+// 10.5p1).
 func TestCANextAndAbort(t *testing.T) {
 	login := currentUser(t)
 	keys := t.TempDir()
