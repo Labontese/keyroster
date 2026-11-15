@@ -496,6 +496,52 @@ func TestRestoreMarker(t *testing.T) {
 			t.Fatalf("--no-recovery-needed without a journal exited %d (marker left: %t):\n%s", code, markerExists(t, m), out)
 		}
 	})
+	// PR #102 review (I3): a marker that was removed is recorded on stderr
+	// and in the journal even when the fsync of the state directory then
+	// fails, and the error names the fsync instead of sending the operator
+	// to --no-recovery-needed, which would answer that there is no marker.
+	t.Run("release_recorded_when_sync_fails", func(t *testing.T) {
+		old := syncStateDir
+		syncStateDir = func(string) error { return errors.New("injected fsync failure") }
+		t.Cleanup(func() { syncStateDir = old })
+		check := func(t *testing.T, m, out, errText string, journal func() []string) {
+			t.Helper()
+			if markerExists(t, m) {
+				t.Fatal("the marker is still there")
+			}
+			want := "restore-recovery-pending removed: " + m
+			if !strings.Contains(out, want) {
+				t.Fatalf("stderr %q does not record the release %q", out, want)
+			}
+			if got := journal(); len(got) != 1 || !strings.Contains(got[0], "MESSAGE="+want) {
+				t.Fatalf("journal datagrams %q, want one with MESSAGE=%s", got, want)
+			}
+			if !strings.Contains(errText, "injected fsync failure") || !strings.Contains(errText, "syncing") || strings.Contains(errText, "--no-recovery-needed") {
+				t.Fatalf("the error %q does not name the failed fsync, or sends the operator to --no-recovery-needed", errText)
+			}
+		}
+		t.Run("recovery", func(t *testing.T) {
+			st, _ := bootstrapped(t)
+			m := writeMarker(t, st.dir)
+			journal := listenJournal(t)
+			fakeRecovery(t, &signer.RecoveryResult{Entries: 1}, nil)
+			_, stderr, err := recoverIn(t, st.dir, "request")
+			if err == nil {
+				t.Fatal("the recovery reported no error although the fsync failed")
+			}
+			check(t, m, stderr, err.Error(), journal)
+		})
+		t.Run("no_recovery_needed", func(t *testing.T) {
+			dir := freshStateDir(t)
+			m := writeMarker(t, dir)
+			journal := listenJournal(t)
+			code, out := runSigner(t, "recover-revocations", "--state-dir", dir, "--no-recovery-needed")
+			if code == 0 {
+				t.Fatalf("--no-recovery-needed exited 0 although the fsync failed:\n%s", out)
+			}
+			check(t, m, out, out, journal)
+		})
+	})
 	t.Run("schema5_restore_migrates_under_marker", func(t *testing.T) {
 		st, g := bootstrapped(t)
 		// The backup of a build before 03-12: schema 5.
