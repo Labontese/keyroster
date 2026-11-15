@@ -20,10 +20,11 @@ on:
 # Least privilege: nothing by default, read-only contents per job.
 permissions: {}
 
-# The check names "e2e (9.5p1)", "e2e (10.5p1)", "e2e-probe (9.5p1)" and
-# "e2e-probe (10.5p1)" are required status checks in the main-integrity
-# ruleset. Renaming a job or changing a matrix blocks every merge until the
-# ruleset is updated (see CONTRIBUTING.md).
+# The check names "e2e (9.5p1)", "e2e (10.5p1)", "e2e-probe (9.5p1)",
+# "e2e-probe (10.5p1)", "e2e-rotation (9.5p1)" and "e2e-rotation (10.5p1)"
+# are required status checks in the main-integrity ruleset. Renaming a job
+# or changing a matrix blocks every merge until the ruleset is updated (see
+# CONTRIBUTING.md).
 jobs:
   e2e:
     name: e2e (${{ matrix.openssh }})
@@ -124,6 +125,57 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-probe-logs-${{ env.OPENSSH_VERSION }}
+          path: e2e-logs/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # The CA rotation lane (03-12b): the tests under the build tags e2e and
+  # e2erotation, which the main e2e lanes do not compile. 03-12e adds
+  # TestCARotationNoFailedLogin and 03-12f TestHostCARotation to this job's
+  # -run list and its PASS loop.
+  e2e-rotation:
+    name: e2e-rotation (${{ matrix.openssh }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        openssh: ["9.5p1", "10.5p1"]
+    env:
+      OPENSSH_VERSION: ${{ matrix.openssh }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # The same cache path and key as the e2e job: every job uses one build.
+      - name: Restore the OpenSSH build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/keyroster/openssh-${{ env.OPENSSH_VERSION }}
+          key: openssh-${{ runner.os }}-${{ env.OPENSSH_VERSION }}-${{ hashFiles('scripts/build-openssh.sh') }}
+      - name: Build OpenSSH (verified tarball)
+        run: bash scripts/build-openssh.sh "$OPENSSH_VERSION"
+      - name: Run the rotation e2e tests
+        run: |
+          mkdir -p e2e-logs
+          KEYROSTER_OPENSSH_PREFIX="$HOME/.cache/keyroster/openssh-$OPENSSH_VERSION" \
+            go test -tags "e2e e2erotation" -run '^(TestCANextAndAbort)$' -count=1 -timeout 20m -v ./test/e2e/... 2>&1 | tee "e2e-logs/go-test-rotation-$OPENSSH_VERSION.log"
+      - name: Check that every rotation test ran and passed
+        run: |
+          for t in TestCANextAndAbort; do grep -q -- "^--- PASS: $t (" "e2e-logs/go-test-rotation-$OPENSSH_VERSION.log" || { echo "the log has no PASS line for $t"; exit 1; }; done
+      - name: Upload the rotation logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-rotation-logs-${{ env.OPENSSH_VERSION }}
           path: e2e-logs/
           retention-days: 7
           if-no-files-found: warn
