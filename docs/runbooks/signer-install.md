@@ -91,7 +91,8 @@ writable open of `signer.db` by this build (`serve`, `install-bundle`,
 schema 5 to schema 6 and seeds one generation row per role from the
 ca-init keys; until then `doctor` and `export-log` on a schema-5 database
 refuse with `has schema version 5, this binary reads 6`. Under a restore
-marker only `recover-revocations` opens `signer.db`, so a backup taken
+marker only `recover-revocations` opens `signer.db` for writing (`doctor`
+and `export-log` open it read-only and migrate nothing), so a backup taken
 before the upgrade and restored after it is migrated there
 (`--migrate-only`, in the restore section below). There is no binary
 downgrade after the migration, because an older binary refuses schema 6:
@@ -402,8 +403,12 @@ runuser -u keyroster-signer -g keyroster-signer -G tss -- \
 systemctl start keyroster-signer.service
 ```
 
-`--key` names the new key with the agent backend; the software backend
-creates the key itself and takes no `--key`. `prepare` records the new
+`--key` names the new key by its fingerprint, and the agent backend
+needs it. Without `--key` the software backend creates the key itself,
+as `software/<role>-g<N>.age` in the state directory; with `--key` it
+instead opens a `<role>-g<N>.age` file there that you placed, encrypted
+to the signer's passphrase, and refuses unless its fingerprint is the
+one `--key` names. `prepare` records the new
 generation as a row and a `ca_generation` audit-log entry in one
 transaction, writes the prepare file (the new public key, its generation,
 algorithm and custody) for the root ceremony that 03-12b adds, and prints
@@ -859,8 +864,8 @@ block on every path: a file backup, a disk-only snapshot or a fresh VM. A
 the file-restore block `export-log` and `doctor` refuse it (`has schema
 version 5, this binary reads 6`), while every command that could migrate
 it is refused by the marker: under the marker only `recover-revocations`
-opens `signer.db`. So, after the file-restore block, run this as the
-signer's user:
+opens `signer.db` for writing. So, after the file-restore block, run
+this as the signer's user:
 
 ```
 runuser -u keyroster-signer -g keyroster-signer -G tss -- \
