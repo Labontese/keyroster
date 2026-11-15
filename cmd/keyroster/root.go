@@ -393,6 +393,10 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	passFD := fset.Int("passphrase-fd", -1, "with --key: read the passphrase from this inherited file descriptor instead of the terminal")
 	confirm := fset.String("confirm", "", "first 8 hex digits of the bundle hash (default: prompt on stdin)")
 	installID := fset.String("installation-id", "", `with --prev: the literal "new" adds a fresh installation ID to a successor whose previous bundle has none (a genesis bundle always gets one)`)
+	var caNext, caNextFP, caRetire repeated
+	fset.Var(&caNext, "ca-next", "with --prev, repeatable: ROLE=FILE adds the CA key of the prepare file FILE (keyroster-signer ca-rotate prepare) as the role's next CA; ROLE is user, host or machine")
+	fset.Var(&caNextFP, "ca-next-fingerprint", "with --ca-next, repeatable: ROLE=SHA256:... is the next key's fingerprint as read from the signer console; required for every --ca-next role")
+	fset.Var(&caRetire, "ca-retire", "with --prev, repeatable: ROLE:GEN aborts the role's next CA entry of generation GEN (it becomes retired)")
 	if err := fset.Parse(args); err != nil {
 		return errUsage
 	}
@@ -406,7 +410,17 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		return errUsage
 	}
 	if successor && *caPath != "" {
-		_, _ = fmt.Fprintln(stderr, "root sign: --ca-pubkeys is refused with --prev: a successor carries the CA, ops and log keys of the previous bundle unchanged (CA rotation is Phase 3)")
+		_, _ = fmt.Fprintln(stderr, "root sign: --ca-pubkeys is for a genesis bundle; a successor changes CA entries only with --ca-next and --ca-retire")
+		return errUsage
+	}
+	// The CA changes of a successor (03-12b): usage first, exit 2.
+	if !successor && len(caNext)+len(caNextFP)+len(caRetire) != 0 {
+		_, _ = fmt.Fprintln(stderr, "root sign: --ca-next, --ca-next-fingerprint and --ca-retire need --prev")
+		return errUsage
+	}
+	changes, err := parseCAChanges(caNext, caNextFP, caRetire)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "root sign: "+err.Error())
 		return errUsage
 	}
 	if fset.NArg() != 0 || (!successor && *caPath == "") || *policyPath == "" || *rootsPath == "" || *threshold == 0 || *outDir == "" {
@@ -462,7 +476,32 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		idRule     = installationRule{fresh: true} // a genesis always gets one
 	)
 	if successor {
-		prev, prevBundle, prevPolicy, build, err = successorBuilder(*prevDir, *prevSHA, *outDir, roots, thr, policy)
+		// The prepare files, each checked against its flag's role and its
+		// fingerprint before anything is written or signed (03-12b).
+		base := trust.SuccessorOptions{Roots: roots, Threshold: thr, Policy: policy, CARetire: changes.retire}
+		for _, role := range caChangeRoles {
+			file, ok := changes.next[role]
+			if !ok {
+				continue
+			}
+			e, err := readCANextFile(file)
+			if err != nil {
+				return fmt.Errorf("--ca-next %s=%s: %w; nothing was written or signed", role, file, err)
+			}
+			if e.Role != role {
+				_, _ = fmt.Fprintf(stderr, "root sign: --ca-next %s=%s: the file holds role %s, not %s\n", role, file, e.Role, role)
+				return errUsage
+			}
+			pub, err := trust.ParseKey(e.Key)
+			if err != nil {
+				return fmt.Errorf("--ca-next %s=%s: %w; nothing was written or signed", role, file, err)
+			}
+			if got, want := ssh.FingerprintSHA256(pub), changes.fingerprint[role]; got != want {
+				return fmt.Errorf("ca_next_fingerprint_mismatch: --ca-next-fingerprint %s=%s is not the key of %s (%s); nothing was written or signed", role, want, file, got)
+			}
+			base.CANext = append(base.CANext, e)
+		}
+		prev, prevBundle, prevPolicy, build, err = successorBuilder(*prevDir, *prevSHA, *outDir, base)
 		if err != nil {
 			return err
 		}
@@ -547,6 +586,9 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	hash := rootceremony.BundleHash(bundle)
 	if prev != nil {
 		_, _ = io.WriteString(stdout, successorHeader(prev, prevBundle, b))
+		// What the successor does to the CA entries and the root set,
+		// before the summary (03-12b).
+		_, _ = io.WriteString(stdout, rootceremony.CAChanges(prev, b)+rootceremony.RootSetLine(prev, b))
 		if prev.Root.Threshold == 1 {
 			_, _ = io.WriteString(stderr, threshold1Warning)
 		}
@@ -804,10 +846,12 @@ func buildBundle(cas *trust.CAPubKeys, roots []trust.RootKey, threshold uint32, 
 // from prevDir (loadPrev: the recorded SHA-256 prevSHA and its own roots'
 // signatures) and returns the previous bundle, its bytes, the policy in
 // force (for the policy block, 03-14b) and the builder of its successor
-// (trust.BuildSuccessor). outDir must not be prevDir: the
+// (trust.BuildSuccessor with base, whose IssuedAt and InstallationID the
+// builder fills; base carries the roots, threshold, policy and CA changes,
+// 03-12b). outDir must not be prevDir: the
 // successor never overwrites the documents it chains to. Every refusal
 // comes before anything is written.
-func successorBuilder(prevDir, prevSHA, outDir string, roots []trust.RootKey, threshold uint32, policy []byte) (*trust.Bundle, []byte, []byte, bundleBuilder, error) {
+func successorBuilder(prevDir, prevSHA, outDir string, base trust.SuccessorOptions) (*trust.Bundle, []byte, []byte, bundleBuilder, error) {
 	absPrev, err := filepath.Abs(prevDir)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -824,7 +868,9 @@ func successorBuilder(prevDir, prevSHA, outDir string, roots []trust.RootKey, th
 		return nil, nil, nil, nil, fmt.Errorf("%w; nothing was written or signed", err)
 	}
 	build := func(issuedAt, installationID string) (*trust.Bundle, error) {
-		return trust.BuildSuccessor(prev, prevBundle, prevPolicy, trust.SuccessorOptions{Roots: roots, Threshold: threshold, Policy: policy, IssuedAt: issuedAt, InstallationID: installationID})
+		o := base
+		o.IssuedAt, o.InstallationID = issuedAt, installationID
+		return trust.BuildSuccessor(prev, prevBundle, prevPolicy, o)
 	}
 	return prev, prevBundle, prevPolicy, build, nil
 }

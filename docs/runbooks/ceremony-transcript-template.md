@@ -19,6 +19,7 @@ transcript. Nothing below is secret, but the storage section is private.
 | Purpose | genesis / root rotation / policy change / re-sign |
 | Variant | software roots (D-10) / hardware roots (D-11) |
 | Agreed policy change (the changed field names, and a reference to the record that holds the agreed values; no hostname or other value is written here; agreed before the successor policy is written, and recorded by someone other than its proposer, or by the owner on a single-owner installation) | |
+| Purpose is a CA rotation: next CA fingerprint as read from the signer console by <name>, who did not run prepare | |
 
 For a policy change, every custodian takes the changed field names from the
 `Agreed policy change` row and checks every value in the policy block of `root sign --prev`

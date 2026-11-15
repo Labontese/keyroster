@@ -411,12 +411,12 @@ to the signer's passphrase, and refuses unless its fingerprint is the
 one `--key` names. `prepare` records the new
 generation as a row and a `ca_generation` audit-log entry in one
 transaction, writes the prepare file (the new public key, its generation,
-algorithm and custody) for the root ceremony that 03-12b adds, and prints
+algorithm and custody) for the root ceremony in docs/runbooks/ca-rotation.md, and prints
 `role <role> generation <N> <fingerprint> <alg> <custody>`. Read that
 fingerprint aloud from the signer console to the second person. It
 changes nothing that a host or a client trusts: the bundle in force still
 names the old key, and the ceremony and the rest of the rotation are in
-`docs/runbooks/ca-rotation.md` (added by 03-12b).
+`docs/runbooks/ca-rotation.md`.
 
 The refusals, by name, and what to do:
 
