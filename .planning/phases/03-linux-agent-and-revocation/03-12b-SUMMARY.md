@@ -36,10 +36,16 @@ A prepared CA key becomes `next` through one root ceremony (`root sign --prev --
 
 - Runs at dce96ea (C2, the last code commit): E2E 43765947044 success (e2e 9.5p1 775.400 s and 10.5p1 747.996 s against the 900 s stop; e2e-probe 276.290 s and 284.174 s; e2e-rotation 9.5p1 58.663 s and 10.5p1 63.490 s), CI 43765947010, E2E distro 43765947305, Systemd 43765947148, E2E TPM 43765947063, E2E PKCS#11 43765947084, PIV 43765947056, CodeQL 43765947016, PR title 43765946995, Workflow lint 43765947003. A SUMMARY cannot name the runs of the commit that carries it; the final head's runs are on the PR.
 - TestCANextAndAbort first ran locally under WSL (both OpenSSH builds), then in CI.
+- After 0725a90 (`docs(03-12b): complete ca-rotation-next plan`): 64e631ba571e4b8d4b92d9441fcff27c21531b86 (`test(e2e): drop the UNVERIFIED notes of TestCANextAndAbort, which has run on both builds`) and a docs commit that corrects the statement on the staged-diff reads below.
 
 ## Commits
 
-`git diff --cached` was run on every staged file, one file at a time, and read in full before every commit and amend below (S0's three mixed files were staged as S0-only blobs with `git update-index --cacheinfo`, so the staged diff held the sweep only). The plan commit's added side is byte-identical (sha256 01b637e5...) to the executable plan, which was read in full before execution; its removed side, the early plan, was read in full before that commit.
+`git diff --cached` was printed in full and read before every commit and amend below, file by file (some commands printed two or more files in one go). S0's three mixed files were staged as S0-only blobs with `git update-index --cacheinfo`, so the staged diff held the sweep only. The plan commit's added side is byte-identical (sha256 01b637e5...) to the executable plan, which was read in full before execution; its removed side, the early plan, was read in full before that commit. Exceptions, where a file was edited after its full read and only the edit was re-read before the commit:
+- R1 `internal/trust/castate_test.go`: one unused constant removed; the first 30 lines re-read before the commit, lines 1-80 again from 97500cf afterwards, the rest unchanged since its full read.
+- R2a `internal/trust/fuzz_test.go` and R3 `internal/rootceremony/cachanges_test.go`: one comment line each, changed with an exact one-line replacement and re-read as that line; the rest unchanged since its full read.
+- R3 `cmd/keyroster/runbook_test.go`: the `stateDirNames` refactor of the link-safety checker, checked before the commit only by its test run and a grep; the whole diff read from 7547a5e (`git show`) after the commit.
+- T3 `cmd/keyroster/canext.go` (the `slices`, `notGen` and G115 simplification) and `docs/runbooks/ca-rotation.md` (the `--confirm` sentence): re-read only in part before the commit; both read in full from e59a539 after the commit.
+- 0725a90's ROADMAP and STATE lines were read truncated at 160 columns before the commit (the ROADMAP gate checks every byte), and untruncated from 0725a90 after it.
 
 | Name | SHA | Subject |
 |---|---|---|
