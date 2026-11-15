@@ -215,7 +215,7 @@ func readMarker(t *testing.T, h *testHost) *marker {
 // keys and policy).
 func (f *fixture) successor(prev *trust.Bundle, prevDoc []byte, issuedAt string) (*trust.Bundle, spool.Doc) {
 	f.t.Helper()
-	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, prev.Root.Keys, 1, f.policyDoc, issuedAt, testInstallation)
+	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: f.policyDoc, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func (f *fixture) rotationOps(prev *trust.Bundle, prevDoc, prevPolicyDoc []byte,
 	p := *prevPolicy
 	p.Version, p.Prev, p.Admins = prevPolicy.Version+1, trust.SHA256Hex(prevPolicyDoc), admins
 	polDoc := mustCanonical(f.t, &p)
-	b, err := trust.BuildSuccessor(prev, prevDoc, prevPolicyDoc, prev.Root.Keys, 1, polDoc, issuedAt, testInstallation)
+	b, err := trust.BuildSuccessor(prev, prevDoc, prevPolicyDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: polDoc, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}

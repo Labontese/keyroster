@@ -31,7 +31,7 @@ func (f *fixture) rotationNext(prev *trust.Bundle, prevDoc, prevPolicyDoc []byte
 	p := *prevPolicy
 	p.Version, p.Prev, p.Admins = prevPolicy.Version+1, trust.SHA256Hex(prevPolicyDoc), admins
 	polDoc := mustCanonical(f.t, &p)
-	b, err := trust.BuildSuccessor(prev, prevDoc, prevPolicyDoc, prev.Root.Keys, 1, polDoc, issuedAt, testInstallation)
+	b, err := trust.BuildSuccessor(prev, prevDoc, prevPolicyDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: polDoc, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -712,7 +712,7 @@ func (f *fixture) rootSuccessor(prev *trust.Bundle, prevDoc []byte, roots []ssh.
 	for _, r := range roots {
 		rk = append(rk, trust.RootKey{Key: trust.FormatKey(r.PublicKey()), Custody: "software"})
 	}
-	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, rk, threshold, f.policyDoc, issuedAt, testInstallation)
+	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, trust.SuccessorOptions{Roots: rk, Threshold: threshold, Policy: f.policyDoc, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}

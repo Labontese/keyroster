@@ -23,7 +23,7 @@ import (
 // under the fixture's genesis policy.
 func (f *fixture) successorUnder(prev *trust.Bundle, prevDoc, polDoc []byte, issuedAt string) (*trust.Bundle, spool.Doc) {
 	f.t.Helper()
-	b, err := trust.BuildSuccessor(prev, prevDoc, polDoc, prev.Root.Keys, 1, polDoc, issuedAt, testInstallation)
+	b, err := trust.BuildSuccessor(prev, prevDoc, polDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: polDoc, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}

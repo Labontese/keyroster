@@ -488,7 +488,7 @@ func genNumbers(t *testing.T, h *testHost) []uint64 {
 // successorWithNext is successor with a next user CA entry for key added.
 func (f *fixture) successorWithNext(prev *trust.Bundle, prevDoc []byte, key ssh.Signer) (*trust.Bundle, spool.Doc) {
 	f.t.Helper()
-	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, prev.Root.Keys, 1, f.policyDoc, "2026-10-02T00:00:00Z", testInstallation)
+	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: f.policyDoc, IssuedAt: "2026-10-02T00:00:00Z", InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}

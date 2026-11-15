@@ -164,7 +164,7 @@ func mustRecord(t *testing.T, h *testHost, bundle, dir uint64) {
 // from prev) and issued at issuedAt.
 func (f *fixture) successorNextUnder(prev *trust.Bundle, prevDoc, polDoc []byte, issuedAt string, key ssh.Signer) (*trust.Bundle, spool.Doc) {
 	f.t.Helper()
-	b, err := trust.BuildSuccessor(prev, prevDoc, polDoc, prev.Root.Keys, 1, polDoc, issuedAt, testInstallation)
+	b, err := trust.BuildSuccessor(prev, prevDoc, polDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: polDoc, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func (f *fixture) successorNextUnder(prev *trust.Bundle, prevDoc, polDoc []byte,
 // successorWithout is f.successor that also drops every next CA entry.
 func (f *fixture) successorWithout(prev *trust.Bundle, prevDoc []byte, issuedAt string) (*trust.Bundle, spool.Doc) {
 	f.t.Helper()
-	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, prev.Root.Keys, 1, f.policyDoc, issuedAt, testInstallation)
+	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: f.policyDoc, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func (f *fixture) rotationDropping(prev *trust.Bundle, prevDoc []byte, issuedAt 
 	f.t.Helper()
 	bob := seedKey(f.t, 12)
 	_, _, p := f.rotationOps(prev, prevDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, issuedAt, nil)
-	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, prev.Root.Keys, 1, p.Body, issuedAt, testInstallation)
+	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: p.Body, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			b4r, err := trust.BuildSuccessor(b3r, d3r.Body, p2.Body, b3r.Root.Keys, 1, p2.Body, "2026-10-04T02:00:00Z", testInstallation)
+			b4r, err := trust.BuildSuccessor(b3r, d3r.Body, p2.Body, trust.SuccessorOptions{Roots: b3r.Root.Keys, Threshold: 1, Policy: p2.Body, IssuedAt: "2026-10-04T02:00:00Z", InstallationID: testInstallation})
 			if err != nil {
 				t.Fatal(err)
 			}

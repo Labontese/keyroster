@@ -824,7 +824,7 @@ func successorBuilder(prevDir, prevSHA, outDir string, roots []trust.RootKey, th
 		return nil, nil, nil, nil, fmt.Errorf("%w; nothing was written or signed", err)
 	}
 	build := func(issuedAt, installationID string) (*trust.Bundle, error) {
-		return trust.BuildSuccessor(prev, prevBundle, prevPolicy, roots, threshold, policy, issuedAt, installationID)
+		return trust.BuildSuccessor(prev, prevBundle, prevPolicy, trust.SuccessorOptions{Roots: roots, Threshold: threshold, Policy: policy, IssuedAt: issuedAt, InstallationID: installationID})
 	}
 	return prev, prevBundle, prevPolicy, build, nil
 }

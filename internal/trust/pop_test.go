@@ -148,7 +148,7 @@ func TestPoPSuccessor(t *testing.T) {
 		off := goldenPolicy(t)
 		off.Version, off.Prev = 2, SHA256Hex(r.policy)
 		offDoc := mustCanonical(t, off)
-		if _, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, rootKeysOf(r.a), 1, offDoc, rotationIssued, ""); !errors.Is(err, ErrPoPHostsRemoved) {
+		if _, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, SuccessorOptions{Roots: rootKeysOf(r.a), Threshold: 1, Policy: offDoc, IssuedAt: rotationIssued, InstallationID: ""}); !errors.Is(err, ErrPoPHostsRemoved) {
 			t.Fatalf("BuildSuccessor with pop.hosts cleared = %v, want ErrPoPHostsRemoved", err)
 		}
 		next := goldenBundle(t, offDoc)
@@ -162,7 +162,7 @@ func TestPoPSuccessor(t *testing.T) {
 		keep := goldenPolicy(t)
 		keep.Version, keep.Prev, keep.PoP = 2, SHA256Hex(r.policy), on(true, true)
 		keepDoc := mustCanonical(t, keep)
-		built, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, rootKeysOf(r.a), 1, keepDoc, rotationIssued, "")
+		built, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, SuccessorOptions{Roots: rootKeysOf(r.a), Threshold: 1, Policy: keepDoc, IssuedAt: rotationIssued, InstallationID: ""})
 		if err != nil {
 			t.Fatalf("BuildSuccessor keeping pop.hosts: %v", err)
 		}
