@@ -3,6 +3,7 @@ package trust
 import (
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // SuccessorOptions are what a successor changes or sets, beside the version,
@@ -39,9 +40,11 @@ type CARef struct {
 // carries prev's SHA-256 as prev, is issued at o.IssuedAt, names o.Roots at
 // o.Threshold as its root set, carries the SHA-256 of o.Policy and carries
 // o.InstallationID (prev's ID when prev has one, which the chain rule
-// requires; a fresh one or none when prev has none). Its CA, ops
-// and log keys are prev's, unchanged: rotating a root never changes an
-// online key (CA rotation is KEY-08).
+// requires; a fresh one or none when prev has none). Its ops and log keys
+// are prev's, unchanged, and so are its CA entries, except that each
+// o.CANext entry is added in state next, in generation order within its
+// role, and each o.CARetire reference, which must name a next entry of
+// prev, is retired (an abort; CA rotation, KEY-08, 03-12b).
 //
 // The result satisfies every rule of VerifySuccessor that does not involve
 // a signature (checkSuccessorChain, which the two share), and is refused
@@ -64,6 +67,20 @@ func BuildSuccessor(prev *Bundle, prevCanonical, prevPolicy []byte, o SuccessorO
 		PolicySHA256:   SHA256Hex(o.Policy),
 		InstallationID: o.InstallationID,
 	}
+	for _, add := range o.CANext {
+		add.State = "next"
+		next.CAs = insertCA(next.CAs, add)
+	}
+	for _, ref := range o.CARetire {
+		i := slices.IndexFunc(next.CAs, func(c CAEntry) bool { return c.Role == ref.Role && c.Generation == ref.Generation })
+		if i < 0 {
+			return nil, fmt.Errorf("%w: CA %s generation %d: no such entry", ErrVersionChain, ref.Role, ref.Generation)
+		}
+		if next.CAs[i].State != "next" {
+			return nil, fmt.Errorf("%w: CA %s generation %d: only a next entry can be retired", ErrVersionChain, ref.Role, ref.Generation)
+		}
+		next.CAs[i].State = "retired"
+	}
 	// Structure first, as VerifySuccessor parses next before the chain
 	// check; then the chain rule the verifier enforces.
 	if err := next.Validate(); err != nil {
@@ -76,4 +93,21 @@ func BuildSuccessor(prev *Bundle, prevCanonical, prevPolicy []byte, o SuccessorO
 		return nil, err
 	}
 	return next, nil
+}
+
+// insertCA inserts e into cas, which are ordered by role and then by
+// generation as Validate requires: after the last entry of e's role whose
+// generation is not above e's, or, when there is none, before the role's
+// first entry (or after the last entry of an earlier role). Validate
+// refuses the result if e repeats a generation (03-12b).
+func insertCA(cas []CAEntry, e CAEntry) []CAEntry {
+	role := indexOf(caRoles, e.Role)
+	at := 0
+	for i, c := range cas {
+		r := indexOf(caRoles, c.Role)
+		if r < role || (r == role && c.Generation <= e.Generation) {
+			at = i + 1
+		}
+	}
+	return slices.Insert(cas, at, e)
 }

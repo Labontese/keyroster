@@ -326,15 +326,17 @@ func checkIssuedNotAhead(b *trust.Bundle, now time.Time) error {
 	return nil
 }
 
-// checkBundleKeys requires the bundle to list exactly one active CA entry
-// each for user, host and machine, equal in key, algorithm, custody and
-// generation number to the role's stored generation 1, then the ops and
-// log keys of ca_keys with the same key, algorithm and custody, and no
-// root key equal to any stored key or generation of any role (03-12). It
-// accepts no CA entry that the rule before 03-12 refused, and refuses an
-// active entry whose generation field is not 1, so a root-signed
-// successor still changes no CA entry; the chain rule and the readers
-// that a rotation needs arrive in 03-12b to 03-12e.
+// checkBundleKeys requires, for each of user, host and machine, exactly one
+// active CA entry, equal in key, algorithm, custody and generation number
+// to the role's stored generation 1, and accepts beside it a next or a
+// retired entry only when it equals a stored generation of its role in
+// generation number, key, algorithm and custody (03-12b); a draining entry
+// is refused until the switch (03-12e). Then the ops and log keys of
+// ca_keys with the same key, algorithm and custody, and no root key equal
+// to any stored key or generation of any role (03-12). The active entry
+// still has to be generation 1: the chain rule (trust.checkSuccessorChain)
+// keeps it from changing, and the switch that makes a later generation
+// active arrives in 03-12e.
 func checkBundleKeys(b *trust.Bundle, caKeys []signerdb.CAKey, gens []signerdb.CAGeneration) error {
 	want := map[string]signerdb.CAKey{}
 	for _, k := range caKeys {
@@ -357,22 +359,57 @@ func checkBundleKeys(b *trust.Bundle, caKeys []signerdb.CAKey, gens []signerdb.C
 		}
 		return nil
 	}
-	if len(b.CAs) != len(caRoles) {
-		return fmt.Errorf("%w: the bundle lists %d CA keys, want one each for user, host and machine", ErrBundleKeys, len(b.CAs))
+	// stored reports whether ca equals a stored generation of its role in
+	// generation number, key, algorithm and custody.
+	stored := func(ca trust.CAEntry) bool {
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			return false
+		}
+		for _, g := range gens {
+			if g.Role == ca.Role && g.Generation == ca.Generation && bytes.Equal(g.PublicKey, pub.Marshal()) && g.Alg == ca.Alg && g.Custody == ca.Custody {
+				return true
+			}
+		}
+		return false
 	}
+	roles := []string{trust.RoleUser, trust.RoleHost, trust.RoleMachine}
 	for _, ca := range b.CAs {
-		if ca.State != "active" {
-			return fmt.Errorf("%w: CA %s is %s, want active", ErrBundleKeys, ca.Role, ca.State)
+		if !slices.Contains(roles, ca.Role) {
+			return fmt.Errorf("%w: the bundle lists a CA entry for role %q", ErrBundleKeys, ca.Role)
 		}
-		g, ok := gen1[ca.Role]
-		if !ok {
-			return fmt.Errorf("%w: no stored generation 1 of CA %s", ErrBundleKeys, ca.Role)
+	}
+	for _, role := range roles {
+		active := 0
+		for _, ca := range b.CAs {
+			if ca.Role != role {
+				continue
+			}
+			switch ca.State {
+			case "active":
+				active++
+				g, ok := gen1[ca.Role]
+				if !ok {
+					return fmt.Errorf("%w: no stored generation 1 of CA %s", ErrBundleKeys, ca.Role)
+				}
+				if err := same("CA "+ca.Role, ca.Key, ca.Alg, ca.Custody, g); err != nil {
+					return err
+				}
+				if ca.Generation != 1 {
+					return fmt.Errorf("%w: the active CA %s entry carries generation %d; its key is stored generation 1", ErrBundleKeys, ca.Role, ca.Generation)
+				}
+			case "next", "retired":
+				if !stored(ca) {
+					return fmt.Errorf("%w: CA %s is %s but generation %d is no stored generation of that key", ErrBundleKeys, ca.Role, ca.State, ca.Generation)
+				}
+			case "draining":
+				return fmt.Errorf("%w: CA %s is draining; the switch arrives in 03-12e", ErrBundleKeys, ca.Role)
+			default:
+				return fmt.Errorf("%w: CA %s is %s, want active, next or retired", ErrBundleKeys, ca.Role, ca.State)
+			}
 		}
-		if err := same("CA "+ca.Role, ca.Key, ca.Alg, ca.Custody, g); err != nil {
-			return err
-		}
-		if ca.Generation != 1 {
-			return fmt.Errorf("%w: the active CA %s entry carries generation %d; its key is stored generation 1", ErrBundleKeys, ca.Role, ca.Generation)
+		if active != 1 {
+			return fmt.Errorf("%w: the bundle lists %d active CA %s entries, want one", ErrBundleKeys, active, role)
 		}
 	}
 	if err := same("the ops key", b.OpsKey.Key, b.OpsKey.Alg, b.OpsKey.Custody, want["ops"]); err != nil {
