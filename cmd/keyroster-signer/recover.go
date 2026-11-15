@@ -197,7 +197,8 @@ func removeMarker(stateDir, marker string) (bool, error) {
 	return true, nil
 }
 
-func syncStateDir(dir string) error {
+// syncStateDir fsyncs the state directory dir; tests replace it.
+var syncStateDir = func(dir string) error {
 	d, err := os.Open(dir) //nolint:gosec // G304: the operator's state directory
 	if err != nil {
 		return err
