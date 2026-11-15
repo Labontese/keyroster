@@ -172,8 +172,8 @@ func TestPrepareGeneration(t *testing.T) {
 			t.Fatal(err)
 		}
 		e.exec(t, `UPDATE trust_bundle SET policy = ? WHERE version = (SELECT max(version) FROM trust_bundle)`, pol)
-		refusedWith(t, e, keystore.RoleUser, admin, errLogMismatch)
-		refusedWith(t, e, keystore.RoleUser, "", errLogMismatch)
+		_ = refusedWith(t, e, keystore.RoleUser, admin, errLogMismatch)
+		_ = refusedWith(t, e, keystore.RoleUser, "", errLogMismatch)
 		if n := e.be.provisionCount(); n != 0 {
 			t.Fatalf("the backend was asked to create %d keys over an unlogged policy row", n)
 		}
@@ -195,8 +195,8 @@ func TestPrepareGeneration(t *testing.T) {
 		// bundle_install entry.
 		b, bs, p, ps := SignDocs(t, fx.GenesisBundle(t, cas, fx.Policy()), fx.Policy(), fx.Root)
 		e.exec(t, `INSERT INTO trust_bundle (version, bundle, bundle_sigs, policy, policy_sigs, installed_at_us) VALUES (1, ?, ?, ?, ?, 1)`, b, bs, p, ps)
-		refusedWith(t, e, keystore.RoleUser, "", errLogMismatch)
-		refusedWith(t, e, keystore.RoleUser, held(e, fx.Admins[0]), errLogMismatch)
+		_ = refusedWith(t, e, keystore.RoleUser, "", errLogMismatch)
+		_ = refusedWith(t, e, keystore.RoleUser, held(e, fx.Admins[0]), errLogMismatch)
 		if n := e.be.provisionCount(); n != 0 {
 			t.Fatalf("the backend was asked to create %d keys over a bundle row without a bundle_install entry", n)
 		}
