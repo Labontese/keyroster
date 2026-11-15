@@ -153,20 +153,21 @@ func openStateForRecovery(stateDir string) (db *signerdb.DB, unlock func(), err 
 
 // releaseRestoreMarker removes the restore marker of stateDir, fsyncs the
 // directory and records the release on stderr and in the journal (03-12).
-// No marker is a silent no-op. A marker os.Remove cannot remove (a
-// non-empty directory) must be removed by hand; any other failure leaves
-// it to --no-recovery-needed.
+// No marker is a silent no-op. A removed marker is recorded even when the
+// fsync after it fails, and that error names the fsync. A marker
+// os.Remove cannot remove (a non-empty directory) must be removed by
+// hand; any other failure to remove it leaves it to --no-recovery-needed.
 func releaseRestoreMarker(stateDir string, stderr io.Writer) error {
 	marker := filepath.Join(stateDir, restoreMarkerName)
 	removed, err := removeMarker(stateDir, marker)
+	if removed {
+		noteRelease(marker, stderr)
+	}
 	if err != nil {
-		if errors.Is(err, errMarkerByHand) {
+		if removed || errors.Is(err, errMarkerByHand) {
 			return err
 		}
 		return fmt.Errorf("the restore marker %s could not be removed (%w): remove it with keyroster-signer recover-revocations --state-dir %s --no-recovery-needed", marker, err, stateDir)
-	}
-	if removed {
-		noteRelease(marker, stderr)
 	}
 	return nil
 }
@@ -174,8 +175,8 @@ func releaseRestoreMarker(stateDir string, stderr io.Writer) error {
 // errMarkerByHand is a marker that os.Remove cannot remove.
 var errMarkerByHand = errors.New("the restore marker cannot be removed by this command")
 
-// removeMarker removes marker and fsyncs stateDir. It reports whether a
-// marker was there.
+// removeMarker removes marker and fsyncs stateDir. It reports whether it
+// removed a marker, also when the fsync then fails.
 func removeMarker(stateDir, marker string) (bool, error) {
 	if _, err := os.Lstat(marker); errors.Is(err, fs.ErrNotExist) {
 		return false, nil
@@ -192,7 +193,7 @@ func removeMarker(stateDir, marker string) (bool, error) {
 		return false, err
 	}
 	if err := syncStateDir(stateDir); err != nil {
-		return true, fmt.Errorf("the marker %s was removed, but syncing %s failed: %w", marker, stateDir, err)
+		return true, fmt.Errorf("the marker %s was removed, and syncing %s failed afterwards (%w), so the removal may not survive a crash", marker, stateDir, err)
 	}
 	return true, nil
 }
@@ -232,6 +233,9 @@ func releaseWithoutRecovery(stateDir string, stdout, stderr io.Writer) error {
 	defer unlock()
 	marker := filepath.Join(stateDir, restoreMarkerName)
 	removed, err := removeMarker(stateDir, marker)
+	if removed {
+		noteRelease(marker, stderr)
+	}
 	if err != nil {
 		return err
 	}
@@ -239,7 +243,6 @@ func releaseWithoutRecovery(stateDir string, stdout, stderr io.Writer) error {
 		_, err := fmt.Fprintf(stdout, "no restore-recovery-pending marker in %s\n", stateDir)
 		return err
 	}
-	noteRelease(marker, stderr)
 	return nil
 }
 
