@@ -60,7 +60,7 @@ git config gpg.ssh.program C:/Windows/System32/OpenSSH/ssh-keygen.exe
 
 ## Required checks
 
-The `main-integrity` ruleset requires these 28 checks. Each name is a job
+The `main-integrity` ruleset requires these 30 checks. Each name is a job
 name (with its matrix value) in one of the workflows under
 `.github/workflows/`:
 
@@ -79,6 +79,8 @@ name (with its matrix value) in one of the workflows under
 | `e2e (10.5p1)` | `e2e.yml` | the same suite against portable OpenSSH 10.5p1 |
 | `e2e-probe (9.5p1)` | `e2e.yml` | the probe certificate tests (`TestProbeCertsAgainstSSHD`, `TestProbeSSHDFacts`, build tags `e2e e2eprobe`) against the OpenSSH 9.5p1 build; the main `e2e` lanes do not run them |
 | `e2e-probe (10.5p1)` | `e2e.yml` | the same probe certificate tests against the OpenSSH 10.5p1 build |
+| `e2e-rotation (9.5p1)` | `e2e.yml` | the CA rotation end-to-end test (`TestCANextAndAbort`, build tags `e2e e2erotation`) against the OpenSSH 9.5p1 build: a root ceremony adds a next user CA, an agent host trusts it, and an abort withdraws it; the main `e2e` lanes do not run it |
+| `e2e-rotation (10.5p1)` | `e2e.yml` | the same test against the OpenSSH 10.5p1 build |
 | `e2e-distro (debian:12)` | `e2e-distro.yml` | `test/distro/run.sh` in the Debian 12 image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
 | `e2e-distro (debian:13)` | `e2e-distro.yml` | `test/distro/run.sh` in the Debian 13 image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
 | `e2e-distro (ubuntu:24.04)` | `e2e-distro.yml` | `test/distro/run.sh` in the Ubuntu 24.04 image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
