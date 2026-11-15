@@ -987,8 +987,12 @@ func TestVerifyAnchoring(t *testing.T) {
 			return f, standardOpts(f)
 		}, "log key change unsupported", nil},
 		{"successor_ca_rotation_checked", func(t *testing.T) (*fixture, Options) {
-			// A successor makes another key the active user CA: the old
-			// CA's certificates no longer verify after it.
+			// A successor makes another key the active user CA, which the
+			// chain rule refuses (03-12b): an entry other than a next one
+			// never changes. The active-CA check of certificates is now
+			// reached through a next or an aborted key
+			// (TestVerifyCAGeneration/issue_by_next_refused and
+			// abort_key_never_signed).
 			f := newBareFixture(t, "ed25519")
 			g := f.signDocs(f.genesis(), f.policy(), f.root)
 			f.addBundle(g)
@@ -999,7 +1003,7 @@ func TestVerifyAnchoring(t *testing.T) {
 			}), f.policy(), f.root))
 			f.addIssue() // still signed by the old user CA
 			return f, standardOpts(f)
-		}, "not by the role's active CA", nil},
+		}, "an entry changes (only a next entry may become retired)", nil},
 		{"decoded_only_edit_still_ok", func(t *testing.T) (*fixture, Options) {
 			f := newFixture(t, "ed25519")
 			f.addIssue()

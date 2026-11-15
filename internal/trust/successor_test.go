@@ -3,6 +3,7 @@ package trust
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -204,4 +205,108 @@ func TestBuildSuccessor(t *testing.T) {
 			}
 		})
 	}
+}
+
+// caRotation is a rotation fixture whose previous bundle holds the user
+// entries users (the host and machine entries are the golden ones), with
+// prevBytes re-encoded.
+func caRotation(t *testing.T, users ...CAEntry) *rotation {
+	t.Helper()
+	r := newRotation(t)
+	r.prev.CAs = append(slices.Clone(users), r.prev.CAs[1:]...)
+	if err := r.prev.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	r.prevBytes = mustCanonical(t, r.prev)
+	return r
+}
+
+// buildCA builds r's successor under the previous roots and policy with the
+// given CA changes.
+func (r *rotation) buildCA(next []CAEntry, retire []CARef) (*Bundle, error) {
+	return BuildSuccessor(r.prev, r.prevBytes, r.policy, SuccessorOptions{
+		Roots: r.prev.Root.Keys, Threshold: 1, Policy: r.policy, IssuedAt: rotationIssued, CANext: next, CARetire: retire,
+	})
+}
+
+// TestBuildSuccessorCAChanges (03-12b): BuildSuccessor adds each CANext
+// entry as next in generation order and retires each CARetire reference,
+// and refuses what the chain rule and Validate refuse.
+func TestBuildSuccessorCAChanges(t *testing.T) {
+	u1 := goldenCA(t, RoleUser)
+	t.Run("adds_next_in_order", func(t *testing.T) {
+		r := caRotation(t, u1)
+		add := caAt(t, RoleUser, seedCANext, "active", 2) // the builder sets next
+		b, err := r.buildCA([]CAEntry{add}, nil)
+		if err != nil {
+			t.Fatalf("BuildSuccessor: %v", err)
+		}
+		want := caAt(t, RoleUser, seedCANext, "next", 2)
+		if len(b.CAs) != 4 || b.CAs[0] != u1 || b.CAs[1] != want || b.CAs[2].Role != RoleHost {
+			t.Fatalf("successor CAs %+v, want the next user entry right after generation 1", b.CAs)
+		}
+		if err := b.Validate(); err != nil {
+			t.Fatalf("the successor does not validate: %v", err)
+		}
+		// Before an entry of higher generation: inserted in order, the
+		// result validates, and only the chain rule refuses it.
+		r = caRotation(t, u1, caAt(t, RoleUser, seedCANext2, "retired", 3))
+		_, err = r.buildCA([]CAEntry{caAt(t, RoleUser, seedCANext, "next", 2)}, nil)
+		if errors.Is(err, ErrCARole) {
+			t.Fatalf("generation 2 below a held 3 was not inserted in order: %v", err)
+		}
+		mustChainRefusal(t, err, RoleUser, 2, "the generation is not above every earlier generation of the role")
+	})
+	t.Run("retires_next", func(t *testing.T) {
+		r := caRotation(t, u1, caAt(t, RoleUser, seedCANext, "next", 2))
+		b, err := r.buildCA(nil, []CARef{{Role: RoleUser, Generation: 2}})
+		if err != nil {
+			t.Fatalf("BuildSuccessor: %v", err)
+		}
+		if got, want := b.CAs[1], caAt(t, RoleUser, seedCANext, "retired", 2); got != want {
+			t.Fatalf("aborted entry %+v, want %+v", got, want)
+		}
+		if r.prev.CAs[1].State != "next" {
+			t.Fatal("the abort edited the previous bundle's entry")
+		}
+	})
+	t.Run("retire_of_active_refused", func(t *testing.T) {
+		r := caRotation(t, u1, caAt(t, RoleUser, seedCANext, "next", 2))
+		b, err := r.buildCA(nil, []CARef{{Role: RoleUser, Generation: 1}})
+		if b != nil {
+			t.Fatalf("BuildSuccessor built %+v", b)
+		}
+		mustChainRefusal(t, err, RoleUser, 1, "only a next entry can be retired")
+	})
+	t.Run("retire_of_unknown_refused", func(t *testing.T) {
+		r := caRotation(t, u1, caAt(t, RoleUser, seedCANext, "next", 2))
+		b, err := r.buildCA(nil, []CARef{{Role: RoleUser, Generation: 9}})
+		if b != nil {
+			t.Fatalf("BuildSuccessor built %+v", b)
+		}
+		mustChainRefusal(t, err, RoleUser, 9, "no such entry")
+	})
+	t.Run("next_key_equal_prev_key_refused", func(t *testing.T) {
+		// Validate runs first in the builder and refuses the duplicate key.
+		r := caRotation(t, u1)
+		b, err := r.buildCA([]CAEntry{caAt(t, RoleUser, seedHostCA, "next", 2)}, nil)
+		if b != nil || !errors.Is(err, ErrDuplicateKey) {
+			t.Fatalf("BuildSuccessor = %+v, %v; want ErrDuplicateKey", b, err)
+		}
+	})
+	t.Run("next_generation_not_above_refused", func(t *testing.T) {
+		r := caRotation(t, u1, caAt(t, RoleUser, seedCANext2, "retired", 3))
+		// Strictly below the role's maximum, inserted in order: Validate
+		// passes and the chain rule refuses.
+		b, err := r.buildCA([]CAEntry{caAt(t, RoleUser, seedCANext, "next", 2)}, nil)
+		if b != nil {
+			t.Fatalf("BuildSuccessor built %+v", b)
+		}
+		mustChainRefusal(t, err, RoleUser, 2, "the generation is not above every earlier generation of the role")
+		// Equal to a held one: Validate's ordering rule refuses it first.
+		b, err = r.buildCA([]CAEntry{caAt(t, RoleUser, seedCANext, "next", 3)}, nil)
+		if b != nil || !errors.Is(err, ErrCARole) || !strings.Contains(err.Error(), "entries must be ordered") {
+			t.Fatalf("BuildSuccessor = %+v, %v; want ErrCARole, entries must be ordered", b, err)
+		}
+	})
 }

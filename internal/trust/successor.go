@@ -21,6 +21,16 @@ type SuccessorOptions struct {
 	// InstallationID is prev's ID when prev has one, which the chain rule
 	// requires; a fresh one or none when prev has none.
 	InstallationID string
+	// CANext are CA entries to add in state next, and CARetire the next
+	// entries to retire (an abort) (03-12b).
+	CANext   []CAEntry
+	CARetire []CARef
+}
+
+// CARef names one CA entry of a bundle by role and generation (03-12b).
+type CARef struct {
+	Role       string
+	Generation uint32
 }
 
 // BuildSuccessor returns the unsigned successor of prev, the trust bundle in

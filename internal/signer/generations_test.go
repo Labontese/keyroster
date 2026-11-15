@@ -171,50 +171,110 @@ func formatWire(t *testing.T, pub []byte) string {
 	return trust.FormatKey(k)
 }
 
-// TestCheckBundleKeysGenerations (03-12): an install accepts exactly one
-// active CA entry per role, equal in key, algorithm, custody and generation
-// to the role's stored generation 1, and refuses a root or a policy admin
-// equal to any stored generation, prepared ones included. 03-12b rewrites
-// non_active_entry_refused and 03-12e active_not_generation_1_refused.
+// mustRefusedInstall installs docs, requires the refusal want, and requires
+// that nothing was written: no leaf and no bundle row (03-12b). It returns
+// the refusal.
+func mustRefusedInstall(t *testing.T, e *genEnv, docs [4][]byte, want error) error {
+	t.Helper()
+	leaves := e.leaves(t)
+	v, err := e.db.LatestBundleVersion(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ierr := e.install(docs)
+	if !errors.Is(ierr, want) {
+		t.Fatalf("install = %v, want %v", ierr, want)
+	}
+	t.Logf("refusal: %v", ierr)
+	if n := e.leaves(t); n != leaves {
+		t.Fatalf("%d leaves after the refusal, want %d", n, leaves)
+	}
+	if got, _ := e.db.LatestBundleVersion(context.Background()); got != v {
+		t.Fatalf("bundle version %d after the refusal, want %d", got, v)
+	}
+	return ierr
+}
+
+// checkKeys runs checkBundleKeys on the bundle of docs (or on b when docs
+// is the zero value) against e's stored ca_keys and generation rows: the
+// signer's own rule, apart from the chain rule that InstallBundle runs
+// first (03-12b).
+func (e *genEnv) checkKeys(t *testing.T, docs [4][]byte, b *trust.Bundle) error {
+	t.Helper()
+	if b == nil {
+		var err error
+		if b, err = trust.ParseBundle(docs[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	caKeys, err := e.db.CAKeys(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return checkBundleKeys(b, caKeys, e.gens(t))
+}
+
+// nextEntry is the next entry of the stored generation g of its role.
+func nextEntry(t *testing.T, g signerdb.CAGeneration) trust.CAEntry {
+	t.Helper()
+	return trust.CAEntry{Role: g.Role, Key: formatWire(t, g.PublicKey), Alg: g.Alg, Custody: g.Custody, State: "next", Generation: g.Generation}
+}
+
+// insertCA inserts e into b's CA entries after the last entry of its role.
+func insertCA(b *trust.Bundle, e trust.CAEntry) {
+	at := 0
+	for i, c := range b.CAs {
+		if c.Role == e.Role {
+			at = i + 1
+		}
+	}
+	b.CAs = slices.Insert(b.CAs, at, e)
+}
+
+// TestCheckBundleKeysGenerations (03-12, 03-12b): an install accepts exactly
+// one active CA entry per role, equal in key, algorithm, custody and
+// generation to the role's stored generation 1, and a next or retired
+// entry only when it equals a stored generation of its role; it refuses a
+// draining entry, and a root or a policy admin equal to any stored
+// generation, prepared ones included. An edit of the active entry is
+// refused by the chain rule first (03-12b), so those cases also call
+// checkBundleKeys directly. 03-12e rewrites active_not_generation_1_refused.
 func TestCheckBundleKeysGenerations(t *testing.T) {
 	refused := func(t *testing.T, e *genEnv, docs [4][]byte) {
 		t.Helper()
-		leaves := e.leaves(t)
-		v, err := e.db.LatestBundleVersion(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := e.install(docs); err == nil {
-			t.Fatal("the successor was installed")
-		} else {
-			t.Logf("refusal: %v", err)
-		}
-		if n := e.leaves(t); n != leaves {
-			t.Fatalf("%d leaves after the refusal, want %d", n, leaves)
-		}
-		if got, _ := e.db.LatestBundleVersion(context.Background()); got != v {
-			t.Fatalf("bundle version %d after the refusal, want %d", got, v)
-		}
+		_ = mustRefusedInstall(t, e, docs, ErrBundleKeys)
 	}
-	t.Run("non_active_entry_refused", func(t *testing.T) {
+	t.Run("next_stored_accepted", func(t *testing.T) {
 		e := newGenEnv(t)
 		g := e.mustPrepare(t, keystore.RoleUser)
-		refused(t, e, editedSuccessor(t, e.db, func(b *trust.Bundle) {
-			b.CAs = append(b.CAs, trust.CAEntry{Role: "user", Key: formatWire(t, g.PublicKey), Alg: g.Alg, Custody: g.Custody, State: "next", Generation: 2})
-		}, nil, e.fx.Root))
+		b, err := e.install(editedSuccessor(t, e.db, func(b *trust.Bundle) { insertCA(b, nextEntry(t, g)) }, nil, e.fx.Root))
+		if err != nil || b.Version != 2 {
+			t.Fatalf("a successor adding the stored generation 2 as next: %v, %v", b, err)
+		}
+		if _, err := e.start(); err != nil {
+			t.Fatalf("start after the successor: %v", err)
+		}
 	})
 	t.Run("active_not_generation_1_refused", func(t *testing.T) {
 		e := newGenEnv(t)
 		g := e.mustPrepare(t, keystore.RoleUser)
-		refused(t, e, editedSuccessor(t, e.db, func(b *trust.Bundle) {
+		docs := editedSuccessor(t, e.db, func(b *trust.Bundle) {
 			ca := caEntry(t, b, "user")
 			ca.Key, ca.Generation = formatWire(t, g.PublicKey), 2
-		}, nil, e.fx.Root))
+		}, nil, e.fx.Root)
+		if err := e.checkKeys(t, docs, nil); !errors.Is(err, ErrBundleKeys) {
+			t.Fatalf("checkBundleKeys = %v, want ErrBundleKeys", err)
+		}
+		_ = mustRefusedInstall(t, e, docs, trust.ErrVersionChain)
 	})
 	t.Run("generation_field_mismatch_refused", func(t *testing.T) {
 		e := newGenEnv(t)
 		e.mustPrepare(t, keystore.RoleUser)
-		refused(t, e, editedSuccessor(t, e.db, func(b *trust.Bundle) { caEntry(t, b, "user").Generation = 2 }, nil, e.fx.Root))
+		docs := editedSuccessor(t, e.db, func(b *trust.Bundle) { caEntry(t, b, "user").Generation = 2 }, nil, e.fx.Root)
+		if err := e.checkKeys(t, docs, nil); !errors.Is(err, ErrBundleKeys) || !strings.Contains(err.Error(), "carries generation 2") {
+			t.Fatalf("checkBundleKeys = %v, want ErrBundleKeys naming the generation field", err)
+		}
+		_ = mustRefusedInstall(t, e, docs, trust.ErrVersionChain)
 	})
 	t.Run("admin_equal_stored_generation_refused", func(t *testing.T) {
 		e := newGenEnv(t)
@@ -243,21 +303,22 @@ func TestCheckBundleKeysGenerations(t *testing.T) {
 }
 
 // TestSuccessorForeignCAKeyRefused (03-12, a duty of 03-14b): a root-signed
-// successor that replaces a CA key with a foreign one is refused by
-// checkBundleKeys through InstallBundle (the chain rule has no CA rule
-// yet), and nothing is written.
+// successor that replaces a CA key with a foreign one is refused by the
+// chain rule through InstallBundle (03-12b), naming the role, and nothing
+// is written; checkBundleKeys, called directly, refuses the same bundle
+// too.
 func TestSuccessorForeignCAKeyRefused(t *testing.T) {
 	for _, role := range []string{"user", "host", "machine"} {
 		t.Run(role, func(t *testing.T) {
 			e := newGenEnv(t)
-			leaves := e.leaves(t)
 			foreign := trust.FormatKey(newEd25519(t).PublicKey())
-			_, err := e.install(editedSuccessor(t, e.db, func(b *trust.Bundle) { caEntry(t, b, role).Key = foreign }, nil, e.fx.Root))
-			if !errors.Is(err, ErrBundleKeys) {
-				t.Fatalf("a successor with a foreign %s CA key = %v, want ErrBundleKeys", role, err)
+			docs := editedSuccessor(t, e.db, func(b *trust.Bundle) { caEntry(t, b, role).Key = foreign }, nil, e.fx.Root)
+			if err := e.checkKeys(t, docs, nil); !errors.Is(err, ErrBundleKeys) {
+				t.Fatalf("checkBundleKeys with a foreign %s CA key = %v, want ErrBundleKeys", role, err)
 			}
-			if n := e.leaves(t); n != leaves {
-				t.Fatalf("%d leaves after the refusal, want %d", n, leaves)
+			err := mustRefusedInstall(t, e, docs, trust.ErrVersionChain)
+			if !strings.Contains(err.Error(), "CA "+role+" generation 1") {
+				t.Fatalf("a successor with a foreign %s CA key = %v, want ErrVersionChain naming CA %s generation 1", role, err, role)
 			}
 			if v, _ := e.db.LatestBundleVersion(context.Background()); v != 1 {
 				t.Fatalf("bundle version %d after the refusal, want 1", v)
