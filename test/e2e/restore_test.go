@@ -202,12 +202,12 @@ if ! flock -n 9; then
   exit 1
 fi
 test -s "$1/signer.db"
-touch "$S/restore-recovery-pending"
-chown keyroster-signer:keyroster-signer "$S/restore-recovery-pending"
+rm -f "$S/restore-recovery-pending"
+runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && : >"$1"' sh "$S/restore-recovery-pending"
 rm -f "$S/signer.db" "$S/signer.db-wal" "$S/signer.db-shm"
 for f in signer.db signer.db-wal signer.db-shm; do
   if [ -e "$1/$f" ]; then
-    install -o keyroster-signer -g keyroster-signer -m 0600 "$1/$f" "$S/$f"
+    runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/$f" <"$1/$f"
   fi
 done
 echo "restored signer.db from $1"

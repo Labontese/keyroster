@@ -822,12 +822,12 @@ if ! flock -n 9; then
   exit 1
 fi
 test -s "$1/signer.db"
-touch "$S/restore-recovery-pending"
-chown keyroster-signer:keyroster-signer "$S/restore-recovery-pending"
+rm -f "$S/restore-recovery-pending"
+runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && : >"$1"' sh "$S/restore-recovery-pending"
 rm -f "$S/signer.db" "$S/signer.db-wal" "$S/signer.db-shm"
 for f in signer.db signer.db-wal signer.db-shm; do
   if [ -e "$1/$f" ]; then
-    install -o keyroster-signer -g keyroster-signer -m 0600 "$1/$f" "$S/$f"
+    runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/$f" <"$1/$f"
   fi
 done
 echo "restored signer.db from $1"
@@ -838,7 +838,11 @@ The file-restore block also writes the marker `restore-recovery-pending`
 in the state directory (03-12), after the lock check and before
 `signer.db` is replaced. From then on `serve`, `ca-init`, `install-bundle`
 and `ca-rotate prepare` refuse `restore_recovery_pending`, doctor reports
-it as a FAIL, and `export-log` still works. A VM-snapshot restore that
+it as a FAIL, and `export-log` still works. The block creates the marker
+and the restored files as keyroster-signer (`runuser`, refusing an entry
+that is already there), and as root it only removes entries in the state
+directory: keyroster-signer owns that directory, so a root write there
+would follow any link that account planted. A VM-snapshot restore that
 never runs the block carries no marker, and nothing can detect that
 locally: the hold-first rule above is the control there. After a restore,
 a `<role>-g<N>.age` file in the state directory's `software` directory
