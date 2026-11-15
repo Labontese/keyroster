@@ -181,6 +181,144 @@ type anchor struct {
 	// (KEY-07). It is one set, added to once per bundle, so the check
 	// costs each bundle its own admins, not every earlier root again.
 	roots trust.RootKeySet
+	// gens are the CA key generations the log records (03-12): the
+	// ca_init keys as generation 1 and every ca_generation entry.
+	gens generationRegistry
+}
+
+// generationRegistry is what audit verify has recorded of the CA key
+// generations (03-12). byRole lists each role's generations in order,
+// keys maps the raw key bytes of every recorded generation, of any role,
+// to the generation that holds them, and initRoles are the roles a
+// ca_init entry named (initSeen: one has been seen).
+type generationRegistry struct {
+	byRole    map[string][]tlog.CAGenerationBody
+	keys      map[string]string
+	initRoles map[string]bool
+	initSeen  bool
+}
+
+// caGenerationRoles are the roles a ca_generation entry may name.
+var caGenerationRoles = map[string]bool{"user": true, "host": true, "machine": true, "ops": true, "log": true}
+
+func (r *generationRegistry) init() {
+	if r.byRole == nil {
+		r.byRole, r.keys, r.initRoles = map[string][]tlog.CAGenerationBody{}, map[string]string{}, map[string]bool{}
+	}
+}
+
+func (r *generationRegistry) record(g tlog.CAGenerationBody) {
+	r.init()
+	r.byRole[g.Role] = append(r.byRole[g.Role], g)
+	if _, seen := r.keys[string(g.PublicKey)]; !seen {
+		r.keys[string(g.PublicKey)] = fmt.Sprintf("generation %d of %s", g.Generation, g.Role)
+	}
+}
+
+// addInit records each key of a ca_init entry as generation 1 of its role,
+// by its raw bytes and without refusing anything: no audit fixture before
+// 03-12 writes a ca_init entry before its first bundle, and one writes a
+// key that does not parse.
+func (r *generationRegistry) addInit(body *tlog.CAInitBody) {
+	r.init()
+	for _, k := range body.Keys {
+		if len(r.byRole[k.Role]) == 0 {
+			r.record(tlog.CAGenerationBody{Role: k.Role, Generation: 1, PublicKey: k.PublicKey, Alg: k.Alg, Custody: k.Custody})
+		}
+		r.initRoles[k.Role] = true
+	}
+	r.initSeen = true
+}
+
+// addGeneration checks a ca_generation entry against the trust state a in
+// force and records it: the role must be one of the five, a bundle_install
+// must have come before it, its key must parse with the body's algorithm,
+// its generation must be the role's recorded maximum plus 1 (every role is
+// at generation 1 with or without a ca_init entry), and its key must equal
+// no recorded generation of any role, no root of any accepted bundle, no
+// key of the bundle in force and no admin of the policy in force.
+func (a *anchor) addGeneration(body *tlog.CAGenerationBody) error {
+	if !caGenerationRoles[body.Role] {
+		return fmt.Errorf("ca_generation names the role %q, which is none of user, host, machine, ops and log", body.Role)
+	}
+	if a.bundle == nil {
+		return errors.New("ca_generation comes before any bundle_install")
+	}
+	pub, err := ssh.ParsePublicKey(body.PublicKey)
+	if err != nil {
+		return fmt.Errorf("ca_generation key: %w", err)
+	}
+	if pub.Type() != body.Alg {
+		return fmt.Errorf("ca_generation records algorithm %s for a %s key", body.Alg, pub.Type())
+	}
+	last := uint32(1)
+	if gs := a.gens.byRole[body.Role]; len(gs) > 0 {
+		last = gs[len(gs)-1].Generation
+	}
+	if body.Generation != last+1 {
+		return fmt.Errorf("ca_generation %d of %s does not follow generation %d", body.Generation, body.Role, last)
+	}
+	fp := ssh.FingerprintSHA256(pub)
+	if prior, ok := a.gens.keys[string(body.PublicKey)]; ok {
+		return fmt.Errorf("the key %s of ca_generation %d of %s is %s", fp, body.Generation, body.Role, prior)
+	}
+	if a.roots[string(pub.Marshal())] {
+		return fmt.Errorf("the key %s of ca_generation %d of %s is a root of an accepted trust bundle", fp, body.Generation, body.Role)
+	}
+	equal := func(key string) bool {
+		k, err := trust.ParseKey(key)
+		return err == nil && bytes.Equal(k.Marshal(), pub.Marshal())
+	}
+	if b := a.bundle; b != nil {
+		for _, ca := range b.CAs {
+			if equal(ca.Key) {
+				return fmt.Errorf("the key %s of ca_generation %d of %s is the %s CA key of trust bundle v%d", fp, body.Generation, body.Role, ca.Role, b.Version)
+			}
+		}
+		if equal(b.OpsKey.Key) || equal(b.Log.Key) {
+			return fmt.Errorf("the key %s of ca_generation %d of %s is the ops or log key of trust bundle v%d", fp, body.Generation, body.Role, b.Version)
+		}
+	}
+	if a.policy != nil {
+		for _, adm := range a.policy.Admins {
+			if equal(adm.Key) {
+				return fmt.Errorf("the key %s of ca_generation %d of %s is policy admin %s", fp, body.Generation, body.Role, adm.Name)
+			}
+		}
+	}
+	a.gens.record(*body)
+	return nil
+}
+
+// checkLoggedGenerations requires every CA entry of b in state next, and,
+// once a ca_init entry has been seen, every active CA entry of a role it
+// named, to equal a recorded generation on role, generation, key,
+// algorithm and custody (03-12). A log with no ca_init entry before the
+// install gets the next rule only.
+func (r *generationRegistry) checkLoggedGenerations(b *trust.Bundle) error {
+	for _, ca := range b.CAs {
+		switch {
+		case ca.State == "next":
+		case ca.State == "active" && r.initSeen && r.initRoles[ca.Role]:
+		default:
+			continue
+		}
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			return fmt.Errorf("bundle_install: %s CA key: %w", ca.Role, err)
+		}
+		found := false
+		for _, g := range r.byRole[ca.Role] {
+			if g.Generation == ca.Generation && bytes.Equal(g.PublicKey, pub.Marshal()) && g.Alg == ca.Alg && g.Custody == ca.Custody {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("trust bundle v%d: its %s CA entry %s (generation %d, %s) is no generation the log records", b.Version, ca.State, ca.Role, ca.Generation, ssh.FingerprintSHA256(pub))
+		}
+	}
+	return nil
 }
 
 // install verifies one bundle_install entry and makes its bundle the one in
@@ -216,6 +354,11 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 	// only; a root retired earlier must not become an admin either.
 	if err := trust.CheckAdminsNotRootSet(p, a.roots); err != nil {
 		return fmt.Errorf("trust bundle v%d: a root of an earlier trust bundle stays a root: %w", b.Version, err)
+	}
+	// A next CA entry, and an active one once a ca_init entry was seen,
+	// must be a generation the log records (03-12).
+	if err := a.gens.checkLoggedGenerations(b); err != nil {
+		return err
 	}
 	logKey, err := trust.ParseKey(b.Log.Key)
 	if err != nil {
@@ -1092,8 +1235,26 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
 			rep.SummarizedRefusals += body.Total()
-		case tlog.KindRefusal, tlog.KindClockRegression, tlog.KindCAInit:
+		case tlog.KindRefusal, tlog.KindClockRegression:
 			// No check beyond the strict decode DecodeLeaf already did.
+		case tlog.KindCAInit:
+			// No check beyond the strict decode DecodeLeaf already did;
+			// its keys are recorded as generation 1 of their roles
+			// (03-12).
+			body, err := tlog.DecodeCAInitBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
+			}
+			trustState.gens.addInit(body)
+		case tlog.KindCAGeneration:
+			// A CA key generation (03-12).
+			body, err := tlog.DecodeCAGenerationBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
+			}
+			if err := trustState.addGeneration(body); err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
 		default:
 			// A kind this version has no check for is refused before it is
 			// hashed or counted, never skipped. From 03-01 until 03-03 the
@@ -1653,7 +1814,9 @@ func checkBoundValues(decoded map[string]json.RawMessage, leaf *tlog.Leaf) error
 // decoder renders "policy_version" (decodeLeaf for issue and
 // directory_install, decodeRevoke, decodeRecovery, decodeHostForget,
 // decodeLoginIssue, decodeHostIssue, decodeMachineIssue and
-// decodeProbeIssue: nine kinds), and whether the body decodes.
+// decodeProbeIssue: nine kinds), and whether the body decodes. A
+// ca_generation entry (03-12, decodeCAGeneration) renders no
+// policy_version.
 func policyVersionOf(leaf tlog.Leaf) (version uint64, renders, decodes bool) {
 	var err error
 	switch leaf.Kind {

@@ -256,3 +256,76 @@ func TestDoctorImports(t *testing.T) {
 		}
 	}
 }
+
+// TestDoctorGenerationsAndMarker (03-12): after a prepare, doctor lists the
+// user role's generations, the new one as prepared.
+func TestDoctorGenerationsAndMarker(t *testing.T) {
+	st, _ := bootstrapped(t)
+	if code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--key", st.addKey(t),
+		"--out", filepath.Join(t.TempDir(), "g2.json")); code != 0 {
+		t.Fatalf("prepare exited %d:\n%s", code, out)
+	}
+	code, out := runSigner(t, "doctor", "--state-dir", st.dir)
+	if code != 0 {
+		t.Fatalf("doctor exited %d:\n%s", code, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "OK generations: ") {
+			if !strings.Contains(line, "prepared g2") || !strings.Contains(line, "active g1") {
+				t.Fatalf("the generations line does not list the user role's generations: %s", line)
+			}
+			return
+		}
+	}
+	t.Fatalf("doctor printed no OK generations line:\n%s", out)
+}
+
+// TestDoctorUnrecordedGenerationFile (03-12): a {state-dir}/software
+// <role>-g<N>.age file that no generation row names is a WARN naming it;
+// a recorded one, or no software directory, gives none. doctor lists names
+// only, so the files may be empty.
+func TestDoctorUnrecordedGenerationFile(t *testing.T) {
+	soft := func(t *testing.T, dir string, names ...string) {
+		t.Helper()
+		d := filepath.Join(dir, "software")
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range names {
+			if err := os.WriteFile(filepath.Join(d, n), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Run("stray_file_warns", func(t *testing.T) {
+		st, _ := bootstrapped(t)
+		soft(t, st.dir, "user-g3.age")
+		code, out := runSigner(t, "doctor", "--state-dir", st.dir)
+		if code != 0 {
+			t.Fatalf("doctor exited %d:\n%s", code, out)
+		}
+		requireLine(t, out, "WARN unrecorded_generation_file: ")
+		if !strings.Contains(out, filepath.Join(st.dir, "software", "user-g3.age")) {
+			t.Fatalf("the warning does not name the file:\n%s", out)
+		}
+	})
+	t.Run("recorded_file_no_warn", func(t *testing.T) {
+		st, _ := bootstrapped(t)
+		if code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--key", st.addKey(t),
+			"--out", filepath.Join(t.TempDir(), "g2.json")); code != 0 {
+			t.Fatalf("prepare exited %d:\n%s", code, out)
+		}
+		soft(t, st.dir, "user-g2.age")
+		code, out := runSigner(t, "doctor", "--state-dir", st.dir)
+		if code != 0 || strings.Contains(out, "unrecorded_generation_file") {
+			t.Fatalf("doctor exited %d:\n%s", code, out)
+		}
+	})
+	t.Run("no_software_dir_no_warning", func(t *testing.T) {
+		st, _ := bootstrapped(t)
+		code, out := runSigner(t, "doctor", "--state-dir", st.dir)
+		if code != 0 || strings.Contains(out, "unrecorded_generation_file") || strings.Contains(out, "FAIL ") {
+			t.Fatalf("doctor exited %d:\n%s", code, out)
+		}
+	})
+}

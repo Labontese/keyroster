@@ -268,3 +268,33 @@ func TestAuditVerifyClock(t *testing.T) {
 		}
 	})
 }
+
+// TestVerifyOutputCAGenerations (03-12): when the log holds ca_generation
+// entries, the line "CA generations: N" follows the probe line, before the
+// caller's anchored line; with none, the output is unchanged.
+func TestVerifyOutputCAGenerations(t *testing.T) {
+	out := func(t *testing.T, rep *audit.Report) string {
+		t.Helper()
+		var b bytes.Buffer
+		if err := printVerifyOK(&b, verifyResultOf(rep), rep); err != nil {
+			t.Fatal(err)
+		}
+		return b.String()
+	}
+	t.Run("line_when_present", func(t *testing.T) {
+		rep := &audit.Report{Counts: map[tlog.Kind]uint64{tlog.KindHostIssue: 2, tlog.KindProbeIssue: 7, tlog.KindCAGeneration: 1},
+			IssuedByCA: map[string]int{}, PendingNegativeProbes: 3}
+		lines := strings.Split(strings.TrimSpace(out(t, rep)), "\n")
+		if len(lines) != 4 || lines[2] != "probe certificates: 7, negative probes no published KRL lists yet: 3" || lines[3] != "CA generations: 1" {
+			t.Fatalf("output %q, want the CA generations line after the probe line", lines)
+		}
+	})
+	t.Run("no_line_when_none", func(t *testing.T) {
+		rep := &audit.Report{Counts: map[tlog.Kind]uint64{tlog.KindHostIssue: 2, tlog.KindProbeIssue: 7}, IssuedByCA: map[string]int{}, PendingNegativeProbes: 3}
+		s := out(t, rep)
+		lines := strings.Split(strings.TrimSpace(s), "\n")
+		if strings.Contains(s, "CA generations") || len(lines) != 3 || lines[2] != "probe certificates: 7, negative probes no published KRL lists yet: 3" {
+			t.Fatalf("output %q, want no CA generations line", s)
+		}
+	})
+}

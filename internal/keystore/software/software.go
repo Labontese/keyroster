@@ -5,6 +5,10 @@
 // machine CA, ops and log key) as Ed25519 keys in armored age files, one
 // per role, each encrypted to one scrypt recipient at age's default work
 // factor: {state-dir}/software/{role}.age, mode 0600 in a 0700 directory.
+// Those are generation 1 of each role. From the second CA key generation
+// (03-12, ca-rotate prepare) a role also has {state-dir}/software/
+// {role}-g{N}.age, mode 0600, created by ProvisionGeneration and opened only
+// through KeyAt with that generation's number.
 //
 // This custody is for evaluation only. Whoever can read the key files and
 // the passphrase can issue certificates, and the decrypted keys sit in the
@@ -89,6 +93,12 @@ const (
 var scryptWorkFactor = 0
 
 func init() { keystore.Register("software", open) }
+
+// The software backend keeps one key file per CA key generation (03-12).
+var (
+	_ keystore.GenerationBackend     = (*backend)(nil)
+	_ keystore.GenerationProvisioner = (*backend)(nil)
+)
 
 type backend struct {
 	dir      string // {state-dir}/software
@@ -201,15 +211,72 @@ func (b *backend) readPassphrase() ([]byte, error) {
 	return pass, nil
 }
 
-// keyPath returns the key file of role. Only the five known roles have
-// files, so a role can never name a path outside the directory.
+// keyPath returns the key file of role's generation 1. Only the five known
+// roles have files, so a role can never name a path outside the directory.
 func (b *backend) keyPath(role keystore.Role) (string, error) {
+	return b.keyPathAt(role, 1)
+}
+
+// keyPathAt returns the key file of generation of role (03-12):
+// {role}.age for generation 1 and {role}-g{N}.age from generation 2.
+func (b *backend) keyPathAt(role keystore.Role, generation uint32) (string, error) {
 	switch role {
 	case keystore.RoleUser, keystore.RoleHost, keystore.RoleMachine, keystore.RoleOps, keystore.RoleLog:
 	default:
 		return "", fmt.Errorf("keystore software: unknown role %q", role)
 	}
-	return filepath.Join(b.dir, string(role)+".age"), nil
+	switch generation {
+	case 0:
+		return "", fmt.Errorf("keystore software: no generation 0 of role %s", role)
+	case 1:
+		return filepath.Join(b.dir, string(role)+".age"), nil
+	default:
+		return filepath.Join(b.dir, fmt.Sprintf("%s-g%d.age", role, generation)), nil
+	}
+}
+
+// ProvisionGeneration creates the key of generation (at least 2) of role
+// as {state-dir}/software/{role}-g{N}.age, mode 0600, encrypted to the
+// passphrase as Provision does, and fsyncs the directory (03-12). It
+// ignores used, because a file name per generation needs no allocation,
+// and returns an empty location. It refuses, and writes nothing, when the
+// directory is not private or the file already exists.
+func (b *backend) ProvisionGeneration(role keystore.Role, generation uint32, _ []string) (ssh.PublicKey, string, error) {
+	if generation < 2 {
+		return nil, "", fmt.Errorf("keystore software: generation %d of role %s: generation 1 is ca-init's", generation, role)
+	}
+	path, err := b.keyPathAt(role, generation)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := checkPrivateDir(b.dir); err != nil {
+		return nil, "", err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return nil, "", fmt.Errorf("%w: %s (after a restore, a %s-g%d.age file that no generation row names is a key from a lost prepare: destroy it unless you placed it for a --key prepare)",
+			ErrKeyFilesExist, path, role, generation)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, "", fmt.Errorf("keystore software: %w", err)
+	}
+	pass, err := b.readPassphrase()
+	if err != nil {
+		return nil, "", err
+	}
+	defer clear(pass)
+	enc, pub, err := newEncryptedKey(pass)
+	if err != nil {
+		return nil, "", fmt.Errorf("keystore software: create the %s generation %d key: %w", role, generation, err)
+	}
+	if err := writeNew(path, enc); err != nil {
+		return nil, "", err
+	}
+	// The file is the only copy of this key, and the caller commits its
+	// fingerprint next: make the new directory entry durable first.
+	if err := syncDir(b.dir); err != nil {
+		_ = os.Remove(path)
+		return nil, "", fmt.Errorf("keystore software: sync %s: %w", b.dir, err)
+	}
+	return pub, "", nil
 }
 
 // Provision creates one Ed25519 key per role and writes each, as an
@@ -354,16 +421,23 @@ func newEncryptedKey(pass []byte) ([]byte, ssh.PublicKey, error) {
 	return out.Bytes(), pub, nil
 }
 
-// Key decrypts the key file of role with the passphrase, requires an
-// Ed25519 key whose SHA-256 fingerprint is fingerprint, and returns it as a
-// CAKey with custody software. The key file must be a private regular
-// file in a private directory. A wrong passphrase, an edited or truncated
-// file and another key are refused; no error carries the passphrase.
+// Key is KeyAt generation 1: the ca-init key file of role.
 func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, error) {
+	return b.KeyAt(role, 1, fingerprint, "")
+}
+
+// KeyAt decrypts the key file of generation of role with the passphrase
+// (exactly that one file: no scanning and no fallback to another
+// generation), requires an Ed25519 key whose SHA-256 fingerprint is
+// fingerprint, and returns it as a CAKey with custody software. It ignores
+// location (03-12). The key file must be a private regular file in a
+// private directory. A wrong passphrase, an edited or truncated file and
+// another key are refused; no error carries the passphrase.
+func (b *backend) KeyAt(role keystore.Role, generation uint32, fingerprint, _ string) (keystore.CAKey, error) {
 	if fingerprint == "" {
 		return nil, fmt.Errorf("keystore software: no pinned fingerprint for role %s", role)
 	}
-	path, err := b.keyPath(role)
+	path, err := b.keyPathAt(role, generation)
 	if err != nil {
 		return nil, err
 	}

@@ -185,6 +185,12 @@ func printVerifyOK(w io.Writer, res verifyResult, rep *audit.Report) error {
 			return err
 		}
 	}
+	// CA key generations (03-12), before the caller's anchored line.
+	if n := rep.Counts[tlog.KindCAGeneration]; n > 0 {
+		if _, err := fmt.Fprintf(w, "CA generations: %d\n", n); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -25,6 +25,8 @@ func FuzzDecodeLeaf(f *testing.F) {
 	f.Add(EncodeLeaf(probeIssue))
 	machineIssue, machineIssueBody := machineIssueVector(f)
 	f.Add(EncodeLeaf(machineIssue))
+	caGeneration, caGenerationBody := caGenerationVector(f)
+	f.Add(EncodeLeaf(caGeneration))
 	f.Add(EncodeLeaf(issue))
 	f.Add(EncodeLeaf(dirInstall))
 	f.Add(EncodeLeaf(login))
@@ -47,6 +49,7 @@ func FuzzDecodeLeaf(f *testing.F) {
 		hostIssueBody,
 		probeIssueBody,
 		machineIssueBody,
+		caGenerationBody,
 	} {
 		body, err := b.Encode()
 		if err != nil {
@@ -54,7 +57,7 @@ func FuzzDecodeLeaf(f *testing.F) {
 		}
 		for _, k := range []Kind{KindIssue, KindRefusal, KindRefusalSummary, KindClockRegression, KindCAInit, KindBundleInstall,
 			KindDirectoryInstall, KindLoginIssue, KindRevoke, KindKRLPublish, KindRevocationRecovery, KindHostForget, KindHostIssue,
-			KindProbeIssue, KindMachineIssue} {
+			KindProbeIssue, KindMachineIssue, KindCAGeneration} {
 			f.Add(EncodeLeaf(Leaf{Index: 1, TimeMicros: 2, Kind: k, Body: body}))
 		}
 	}
@@ -102,6 +105,8 @@ func FuzzDecodeLeaf(f *testing.F) {
 			body, err = DecodeProbeIssueBody(l.Body)
 		case KindMachineIssue:
 			body, err = DecodeMachineIssueBody(l.Body)
+		case KindCAGeneration:
+			body, err = DecodeCAGenerationBody(l.Body)
 		default:
 			t.Fatalf("DecodeLeaf accepted kind %d", l.Kind)
 		}
@@ -111,6 +116,34 @@ func FuzzDecodeLeaf(f *testing.F) {
 		enc, err := body.Encode()
 		if err != nil || !bytes.Equal(enc, l.Body) {
 			t.Fatalf("body is not canonical: %v", err)
+		}
+	})
+}
+
+// FuzzDecodeCAGenerationBody (03-12): a ca_generation body that decodes
+// re-encodes to exactly itself, and every refusal is ErrMalformedLeaf.
+func FuzzDecodeCAGenerationBody(f *testing.F) {
+	_, body := caGenerationVector(f)
+	enc, err := body.Encode()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(enc)
+	f.Add(append(append([]byte(nil), enc...), 0))
+	f.Add(enc[:len(enc)-1])
+	f.Add(enc[:8])
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		b, err := DecodeCAGenerationBody(data)
+		if err != nil {
+			if !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("DecodeCAGenerationBody error = %v, want ErrMalformedLeaf", err)
+			}
+			return
+		}
+		again, err := b.Encode()
+		if err != nil || !bytes.Equal(again, data) {
+			t.Fatalf("decode-encode changed the body (%v): in %x out %x", err, data, again)
 		}
 	})
 }

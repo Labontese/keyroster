@@ -109,7 +109,13 @@ software --backend-opt passphrase-file=FILE` creates the five online keys
 (user, host and machine CA, ops key, log key) as **Ed25519** keys. Each is
 stored as an armored age file encrypted to the passphrase, with one scrypt
 recipient at age's default work factor: `{state-dir}/software/{role}.age`,
-mode 0600 in a 0700 directory. The bundle, `ca-pubkeys.json` and the
+mode 0600 in a 0700 directory. From the second generation a role also
+has `<role>-g<N>.age` in the same directory, mode 0600, created by
+`keyroster-signer ca-rotate prepare` and opened only through generation
+addressing (03-12); one that no generation row names is, unless you placed
+it for a `--key` prepare, a key from a lost prepare, to be destroyed and
+not recorded again (run in CI: TestProvisionGeneration; UNVERIFIED on the
+homelab signer). The bundle, `ca-pubkeys.json` and the
 `ca_init` log entry record custody `software` for every key.
 
 **This custody is for evaluation only.** It does not protect against:

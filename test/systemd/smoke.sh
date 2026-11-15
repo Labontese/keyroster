@@ -546,10 +546,12 @@ if ! flock -n 9; then
   exit 1
 fi
 test -s "$1/signer.db"
+rm -f "$S/restore-recovery-pending"
+runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && : >"$1"' sh "$S/restore-recovery-pending"
 rm -f "$S/signer.db" "$S/signer.db-wal" "$S/signer.db-shm"
 for f in signer.db signer.db-wal signer.db-shm; do
   if [ -e "$1/$f" ]; then
-    install -o keyroster-signer -g keyroster-signer -m 0600 "$1/$f" "$S/$f"
+    runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/$f" <"$1/$f"
   fi
 done
 echo "restored signer.db from $1"
@@ -572,17 +574,36 @@ if file_restore "$backup" >"$work/restore-locked.log" 2>&1; then
 fi
 cat "$work/restore-locked.log"
 grep -q 'is in use by another keyroster-signer process' "$work/restore-locked.log" || fail "the file restore refused for another reason than the lock"
+[ ! -e "$STATE/restore-recovery-pending" ] || fail "the refused file restore wrote the restore marker"
 [ "$(sha256sum "$STATE/signer.db")" = "$db_before" ] || fail "the refused file restore changed signer.db"
 grep -qx 'stale signer.db-shm' "$STATE/signer.db-shm" || fail "the refused file restore changed signer.db-shm"
 pkill -P "$locker" sleep || true
 wait "$locker" || true
+# keyroster-signer owns the state directory and plants the restore marker
+# as a link to a root-owned file (PR #102 review, I1): the block must not
+# write, change or hand over that file, and must leave a regular marker.
+canary=$work/marker-canary
+printf 'canary\n' >"$canary"
+chmod 0644 "$canary"
+touch -d @946684800 "$canary"
+canary_before=$(stat -c '%a %U %G %Y %s' "$canary")
+runuser -u keyroster-signer -- ln -s "$canary" "$STATE/restore-recovery-pending"
 file_restore "$backup"
+[ "$(stat -c '%a %U %G %Y %s' "$canary")" = "$canary_before" ] || fail "the file restore followed the planted marker link: $(stat -c '%a %U %G %Y %s' "$canary"), was $canary_before"
+grep -qx canary "$canary" || fail "the file restore wrote through the planted marker link"
+if [ -L "$STATE/restore-recovery-pending" ] || [ ! -f "$STATE/restore-recovery-pending" ]; then
+	fail "the restore marker is not a regular file"
+fi
+[ "$(stat -c '%a %U %G' "$STATE/restore-recovery-pending")" = "600 keyroster-signer keyroster-signer" ] || fail "the restore marker is $(stat -c '%a %U %G' "$STATE/restore-recovery-pending")"
 ls -l "$STATE"
 for f in signer.db signer.db-wal; do
 	[ "$(stat -c '%a %U %G' "$STATE/$f")" = "600 keyroster-signer keyroster-signer" ] || fail "restored $f is $(stat -c '%a %U %G' "$STATE/$f")"
 	cmp "$backup/$f" "$STATE/$f" || fail "restored $f differs from the backup's"
 done
 [ ! -e "$STATE/signer.db-shm" ] || fail "the stale signer.db-shm, which the backup does not have, is still there"
+# The file-restore block wrote the restore marker (03-12), owned by the
+# signer's user.
+[ "$(stat -c '%U %G' "$STATE/restore-recovery-pending")" = "keyroster-signer keyroster-signer" ] || fail "the restore marker is missing or not owned by keyroster-signer"
 
 step "Restore step 2b: copy, read-back and recovery line, under the hold (docs/runbooks/signer-install.md, verbatim)"
 # The runbook's runuser -G tss needs the group, which the TPM packages
@@ -709,6 +730,7 @@ recover_refused() {
 	cat "$1"
 	grep -q 'recovery_malformed' "$1" || fail "recover-revocations refused for another reason than recovery_malformed"
 	[ "$(sha256sum "$STATE/signer.db")" = "$before" ] || fail "the refused recovery changed signer.db"
+	[ -e "$STATE/restore-recovery-pending" ] || fail "the refused recovery removed the restore marker"
 }
 recover_refused "$work/recover.log"
 systemctl is-active --quiet keyroster-signer.service && fail "keyroster-signer.service is active under the hold"
@@ -827,6 +849,31 @@ release_check_stops extra-entry 'does not hold exactly two entries after the 3 o
 cp /tmp/restored.jsonl /tmp/recovered.jsonl
 release_check_stops not-applied 'does not hold exactly two entries after the 3 of /tmp/restored.jsonl'
 rm -r /root/recovery /home/kradmin/recovery-in /tmp/restored.jsonl /tmp/recovered.jsonl /root/latest-saved.jsonl
+# The restore marker's lifecycle under the real units (03-12): the
+# exempt lock of --migrate-only keeps it (the restored database is already
+# current here), doctor fails on it, and --no-recovery-needed clears it
+# before the hold is released, since serve refuses under it.
+as_signer keyroster-signer recover-revocations --state-dir "$STATE" --migrate-only >"$work/migrate-only.log" 2>&1 || {
+	cat "$work/migrate-only.log"
+	fail "recover-revocations --migrate-only failed under the marker"
+}
+cat "$work/migrate-only.log"
+grep -q 'restore-recovery-pending kept: ' "$work/migrate-only.log" || fail "--migrate-only did not report the kept marker"
+[ -e "$STATE/restore-recovery-pending" ] || fail "--migrate-only removed the restore marker"
+if as_signer keyroster-signer doctor --state-dir "$STATE" >"$work/doctor-marker.log" 2>&1; then
+	cat "$work/doctor-marker.log"
+	fail "doctor passed under the restore marker"
+fi
+cat "$work/doctor-marker.log"
+grep -q '^FAIL restore_recovery_pending: ' "$work/doctor-marker.log" || fail "doctor did not report the restore marker"
+as_signer keyroster-signer recover-revocations --state-dir "$STATE" --no-recovery-needed </dev/null >"$work/release-marker.log" 2>&1 || {
+	cat "$work/release-marker.log"
+	fail "recover-revocations --no-recovery-needed failed"
+}
+cat "$work/release-marker.log"
+grep -q 'restore-recovery-pending removed: ' "$work/release-marker.log" || fail "--no-recovery-needed did not report the removal"
+[ ! -e "$STATE/restore-recovery-pending" ] || fail "--no-recovery-needed left the restore marker"
+echo "restore marker lifecycle: ok"
 bash -eu -s keyroster-server keyroster-signer <<'EOF'
 test "$#" -gt 0
 for u in "$@"; do

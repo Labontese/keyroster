@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 32/37 plans executed in 36 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 33/42 plans executed in 41 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -258,18 +258,33 @@ Plans:
 - [x] 03-14d-PLAN.md — Admin issue requests name their installation (F15): keyroster/issue-request/v2, the signer's refusals before any CA key, ca issue --installation-id, and one test that classifies every keyroster/ tag and signed request type
 
 **Wave 32** *(blocked on Wave 31 completion)*
-- [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
+- [x] 03-12-PLAN.md — CA key generations and the restore gate (D-14, KEY-08): the generation table and the ca_generation leaf, ca-rotate prepare, the restore-recovery-pending marker, and an install refusal for a future issued_at
 
 **Wave 33** *(blocked on Wave 32 completion)*
-- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
+- [ ] 03-12b-PLAN.md — CA rotation, ceremony 1 and abort (D-14, KEY-08): the chain rule for add-next and abort, root sign --ca-next and --ca-retire, the CA-change section, the Bundle reflect gate, the agent answer sets and the rotation e2e lane
 
 **Wave 34** *(blocked on Wave 33 completion)*
-- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
+- [ ] 03-12c-PLAN.md — CA rotation, agent and format readers (D-14, KEY-08): draining and trusted_until in the bundle, the time-aware CA sets, the drop latch and bundle_behind
 
 **Wave 35** *(blocked on Wave 34 completion)*
-- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+- [ ] 03-12d-PLAN.md — CA rotation, CLI readers (D-14, KEY-08): known_hosts narrowing, login and machine renew on the issuing set, and the host status live count
 
 **Wave 36** *(blocked on Wave 35 completion)*
+- [ ] 03-12e-PLAN.md — CA rotation, switch and fences (D-14, KEY-08): ceremony 2, the drain binding, key removal, recovery without CA keys and the no-failed-login e2e
+
+**Wave 37** *(blocked on Wave 36 completion)*
+- [ ] 03-12f-PLAN.md — CA rotation, TPM and PIV generations (D-14, KEY-08): generations and key removal on TPM and PIV, and the host-CA end-to-end test
+
+**Wave 38** *(blocked on Wave 37 completion)*
+- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
+
+**Wave 39** *(blocked on Wave 38 completion)*
+- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
+
+**Wave 40** *(blocked on Wave 39 completion)*
+- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+
+**Wave 41** *(blocked on Wave 40 completion)*
 - [ ] 03-16-PLAN.md — Homelab dogfood: enroll the owner's hosts, take over the 02-14 hosts, drills (revocation, no TOFU, corrupt file, break-glass, machine, rotation if chosen, forget and re-enrollment)
 
 **Phase close (after verification):** the README quickstart (install server, signer and agent, first certificate) on branch `p03/close`, per the documentation convention.
@@ -340,7 +355,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 32/37 | In Progress | - |
+| 3. Linux Agent and Revocation | 33/42 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |

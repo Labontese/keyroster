@@ -57,6 +57,25 @@ func FuzzVerifyExport(f *testing.F) {
 	}
 	f.Add([]byte(join(machine)))
 	f.Add([]byte(join(append(slices.Clone(machine[:len(machine)-2]), machine[len(machine)-1]))))
+	// A log with a ca_init and a ca_generation entry (03-12), a truncation
+	// of it, and two logs Verify must refuse: a ca_generation for the role
+	// foo, and one before the first bundle_install.
+	gf, _ := initFixture(f, fx.root)
+	gf.add(tlog.KindCAGeneration, caGenBody(f, "user", 2, newSigner(f, "ed25519").PublicKey()))
+	gen := gf.lines()
+	if _, err := Verify(strings.NewReader(join(gen)), Options{Pins: pins, Threshold: 1}); err != nil {
+		f.Fatalf("the ca_generation seed does not verify under the pins: %v", err)
+	}
+	f.Add([]byte(join(gen)))
+	f.Add([]byte(join(gen[:2])))
+	uf, _ := initFixture(f, fx.root)
+	uf.add(tlog.KindCAGeneration, caGenBody(f, "foo", 2, newSigner(f, "ed25519").PublicKey()))
+	f.Add([]byte(join(uf.lines())))
+	bf := newBareFixture(f, "ed25519")
+	bf.root = fx.root
+	bf.add(tlog.KindCAGeneration, caGenBody(f, "user", 2, newSigner(f, "ed25519").PublicKey()))
+	bf.addBundle(bf.signDocs(bf.genesis(), bf.policy(), bf.root))
+	f.Add([]byte(join(bf.lines())))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		rep, err := Verify(strings.NewReader(string(data)), Options{Pins: pins, Threshold: 1})
 		if err != nil {

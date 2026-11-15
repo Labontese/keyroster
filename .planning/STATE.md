@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-14b Task 3; PR #98 awaits the owner's merge (Task 4)"
-last_updated: "2026-11-13T07:01:50.833Z"
+stopped_at: "Completed 03-12-PLAN.md (PR #102 open, merge gate pending)"
+last_updated: "2026-11-14T22:24:43.422Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 036c5f000f00caad42fd390c20bbac78b0db3cae
+state_head: db070831623ab139cea8c6022b991508f64661ac
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 72
-  completed_plans: 67
+  total_plans: 77
+  completed_plans: 68
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 32 of 37
+Plan: 33 of 42
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -117,6 +117,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P10b | 5 executor sessions | 5 tasks | 43 files |
 | Phase 03 P10c | about 3 h (from the base measurement to the PR) | 4 tasks | 39 files |
 | Phase 03 P11 | 2 sessions | 4 tasks | 46 files |
+| Phase 03 P12 | 7.5h | 5 tasks | 53 files |
 
 ## Accumulated Context
 
@@ -333,6 +334,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-10b: a failed gated addition settles on Intermediate(last-good, target) with the newest KRL; plain rollback only when the target removes nothing last-good grants (owner-approved 2026-11-08)
 - [Phase 03]: 03-10c: the probe account is checked completely (passwd, shadow classes, sshd -T -C from the probe source, definite Allow/Deny rules); its preflight and drift findings are report only (probe_account); the runbook's account commands are the script CI runs
 - [Phase 03]: 03-10d: no rollback of an in-flight apply and no start-up recovery re-grants a landed removal (RollbackKeeping: last-good, current and the base intersected, newest KRL; only --recover-to-last-good stays plain, Q1 = A); a signer recovery revokes every lost probe certificate, both polarities, told apart by its key ID (Q-R option 1)
+- [Phase 03]: 03-12: the custody of a key the backend creates at ca-rotate prepare is taken from the opened log key and checked against generation 1 before anything is created
+- [Phase 03]: 03-12: the production-factor scrypt test writes its generation-1 key files at a low work factor to stay inside the 90 s test-time budget
+- [Phase 03]: 03-12: the keyroster-signer capslock baseline records five new pairs (internal/signer, internal/trust); the binary's capability set is unchanged
 
 ### Pending Todos
 
@@ -373,6 +377,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-11T00:38:26.500Z
-Stopped at: Completed 03-14b Task 3; PR #98 awaits the owner's merge (Task 4)
+Last session: 2026-11-14T22:24:42.960Z
+Stopped at: Completed 03-12-PLAN.md (PR #102 open, merge gate pending)
 Resume file: None

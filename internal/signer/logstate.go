@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -279,7 +280,10 @@ func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error 
 // backend, whoever can use the agent socket can); the check that holds is
 // keyroster audit verify --pin.
 func CheckTrust(ctx context.Context, db *signerdb.DB) error {
-	var installs loggedInstalls
+	var (
+		installs loggedInstalls
+		gens     = loggedGenerations{}
+	)
 	snap, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, _ []byte) error {
 		l, err := tlog.DecodeLeaf(leaf)
 		if err != nil {
@@ -292,17 +296,24 @@ func CheckTrust(ctx context.Context, db *signerdb.DB) error {
 			return installs.addDirectory(idx, l.Body)
 		case tlog.KindKRLPublish:
 			installs.lastKRLPublish = l.Body
+		case tlog.KindCAInit:
+			return gens.addInit(idx, l.Body)
+		case tlog.KindCAGeneration:
+			return gens.addGeneration(idx, l.Body)
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	if err := gens.check(snap.CAGenerations); err != nil {
+		return err
+	}
 	if snap.CAKeys == nil {
 		return ErrNotInitialised
 	}
 	if snap.Bundle != nil {
-		ts, err := checkStoredTrust(snap.CAKeys, snap.Bundle)
+		ts, err := checkStoredTrust(snap.CAKeys, snap.CAGenerations, snap.Bundle)
 		if err != nil {
 			return err
 		}
@@ -332,6 +343,7 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		installs loggedInstalls
 		issued   issuedSummary
 		revoked  = loggedRevocations{}
+		gens     = loggedGenerations{}
 	)
 	// ReadLogWithHashes yields idx = 0, 1, 2, ... without gaps.
 	snap, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
@@ -454,6 +466,15 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			// nothing. DecodeLeaf above already decoded its body strictly
 			// (tlog's checkBody), and refused the start with errLogMismatch
 			// when it does not decode.
+		case tlog.KindCAInit:
+			// The ca-init keys are generation 1 of each role (03-12).
+			if err := gens.addInit(idx, l.Body); err != nil {
+				return err
+			}
+		case tlog.KindCAGeneration:
+			if err := gens.addGeneration(idx, l.Body); err != nil {
+				return err
+			}
 		}
 		last = l.TimeMicros
 		hashes = append(hashes, hash)
@@ -464,6 +485,12 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			return nil, 0, loggedInstalls{}, err
 		}
 		return nil, 0, loggedInstalls{}, fmt.Errorf("%w: %w", errLogMismatch, err)
+	}
+	// The generation rows commit with their ca_init and ca_generation
+	// entries; both the checkpoint and the no-checkpoint path below need
+	// them to agree (03-12).
+	if err := gens.check(snap.CAGenerations); err != nil {
+		return nil, 0, loggedInstalls{}, err
 	}
 	tree, err := tlog.FromHashes(hashes)
 	if err != nil {
@@ -501,6 +528,99 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 	}
 	installs.revoked = revoked
 	return tree, last, installs, nil
+}
+
+// errGenerationsNotLogged is the generations_not_logged start-up refusal
+// (03-12): the stored CA key generation rows are not exactly the ca_init
+// keys plus the logged ca_generation entries.
+var errGenerationsNotLogged = fmt.Errorf("%w: generations_not_logged", errLogMismatch)
+
+// loggedGenerations is what the ca_init and ca_generation leaves of a log
+// record (03-12): every CA key generation by role and number, generation 1
+// being the ca_init key of the role.
+type loggedGenerations map[string][]tlog.CAGenerationBody
+
+// addInit records generation 1 of every key the ca_init leaf idx names.
+// A second ca_init leaf, or a role named twice, is errLogMismatch.
+func (lg loggedGenerations) addInit(idx uint64, body []byte) error {
+	b, err := tlog.DecodeCAInitBody(body)
+	if err != nil {
+		return fmt.Errorf("%w: leaf %d: ca_init body does not decode", errLogMismatch, idx)
+	}
+	if len(lg) != 0 {
+		return fmt.Errorf("%w: leaf %d is a second ca_init entry", errLogMismatch, idx)
+	}
+	for _, k := range b.Keys {
+		if _, dup := lg[k.Role]; dup {
+			return fmt.Errorf("%w: leaf %d: the ca_init entry names role %s twice", errLogMismatch, idx, k.Role)
+		}
+		lg[k.Role] = []tlog.CAGenerationBody{{Role: k.Role, Generation: 1, PublicKey: k.PublicKey, Alg: k.Alg, Custody: k.Custody}}
+	}
+	return nil
+}
+
+// addGeneration records the ca_generation leaf idx: its role must be known
+// from the ca_init leaf, its generation the role's last plus 1, and its
+// key equal to no earlier generation of any role.
+func (lg loggedGenerations) addGeneration(idx uint64, body []byte) error {
+	b, err := tlog.DecodeCAGenerationBody(body)
+	if err != nil {
+		return fmt.Errorf("%w: leaf %d: ca_generation body does not decode", errLogMismatch, idx)
+	}
+	prev, ok := lg[b.Role]
+	if !ok {
+		return fmt.Errorf("%w: leaf %d: ca_generation for role %q, which no ca_init entry names", errLogMismatch, idx, b.Role)
+	}
+	if last := prev[len(prev)-1].Generation; b.Generation != last+1 {
+		return fmt.Errorf("%w: leaf %d: ca_generation %d of %s follows generation %d", errLogMismatch, idx, b.Generation, b.Role, last)
+	}
+	for _, gs := range lg {
+		for _, g := range gs {
+			if bytes.Equal(g.PublicKey, b.PublicKey) {
+				return fmt.Errorf("%w: leaf %d: the key of ca_generation %d of %s is generation %d of %s", errLogMismatch, idx, b.Generation, b.Role, g.Generation, g.Role)
+			}
+		}
+	}
+	lg[b.Role] = append(prev, *b)
+	return nil
+}
+
+// check requires rows, the stored generation rows, to be exactly the
+// recorded generations on role, generation, public key, algorithm and
+// custody (the location and the creation time are not logged), in both
+// directions.
+func (lg loggedGenerations) check(rows []signerdb.CAGeneration) error {
+	stored := map[string]signerdb.CAGeneration{}
+	for _, r := range rows {
+		stored[fmt.Sprintf("%s/%d", r.Role, r.Generation)] = r
+	}
+	n := 0
+	for _, role := range signerdb.CARoles {
+		for _, g := range lg[role] {
+			n++
+			r, ok := stored[fmt.Sprintf("%s/%d", g.Role, g.Generation)]
+			if !ok {
+				return fmt.Errorf("%w: the log records generation %d of %s, the state database has no such row", errGenerationsNotLogged, g.Generation, g.Role)
+			}
+			if !bytes.Equal(r.PublicKey, g.PublicKey) || r.Alg != g.Alg || r.Custody != g.Custody {
+				return fmt.Errorf("%w: the generation %d row of %s differs from its log entry (key, algorithm or custody)", errGenerationsNotLogged, g.Generation, g.Role)
+			}
+		}
+	}
+	for role := range lg {
+		if !slices.Contains(signerdb.CARoles, role) {
+			return fmt.Errorf("%w: the log records generations of unknown role %q", errGenerationsNotLogged, role)
+		}
+	}
+	if n != len(rows) {
+		for _, r := range rows {
+			if !slices.ContainsFunc(lg[r.Role], func(g tlog.CAGenerationBody) bool { return g.Generation == r.Generation }) {
+				return fmt.Errorf("%w: the state database holds generation %d of %s, which no log entry records", errGenerationsNotLogged, r.Generation, r.Role)
+			}
+		}
+		return fmt.Errorf("%w: the state database holds %d generation rows, the log records %d", errGenerationsNotLogged, len(rows), n)
+	}
+	return nil
 }
 
 // errRevocationsNotLogged is the revocations_not_logged start-up refusal.

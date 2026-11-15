@@ -126,6 +126,9 @@ type LogSnapshot struct {
 	// latest installed trust bundle, nil when none is installed.
 	CAKeys []CAKey
 	Bundle *StoredBundle
+	// CAGenerations are the stored CA key generations (03-12), in the
+	// order DB.CAGenerations returns.
+	CAGenerations []CAGeneration
 	// Directory is the latest installed directory, nil when none is
 	// installed.
 	Directory *StoredDirectory
@@ -191,6 +194,9 @@ func (d *DB) ReadLogWithHashes(ctx context.Context, fn func(idx uint64, leaf, ha
 		return nil, err
 	}
 	if snap.Bundle, err = latestBundle(ctx, tx); err != nil && !errors.Is(err, ErrNoBundle) {
+		return nil, err
+	}
+	if snap.CAGenerations, err = caGenerations(ctx, tx); err != nil {
 		return nil, err
 	}
 	if snap.KRL, err = krlState(ctx, tx); err != nil {

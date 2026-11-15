@@ -309,7 +309,7 @@ func TestExportKeysLowercase(t *testing.T) {
 			t.Errorf("the decoders write no %q key: the scope matches nothing it should", k)
 		}
 	}
-	for _, fn := range []string{"decodeLeaf", "decodeRevoke", "decodeRecovery", "decodeHostForget", "decodeLoginIssue", "decodeHostIssue", "decodeMachineIssue", "decodeProbeIssue"} {
+	for _, fn := range []string{"decodeLeaf", "decodeRevoke", "decodeRecovery", "decodeHostForget", "decodeLoginIssue", "decodeHostIssue", "decodeMachineIssue", "decodeProbeIssue", "decodeCAGeneration"} {
 		if !found[fn] {
 			t.Errorf("no function %s found: the scope matches nothing it should", fn)
 		}
@@ -363,4 +363,27 @@ func mapIdents(fd *ast.FuncDecl) map[string]bool {
 		return true
 	})
 	return out
+}
+
+// TestExportCAGeneration (03-12): a ca_generation line renders the role,
+// the generation, the key's fingerprint, the algorithm and the custody,
+// and no policy_version or other bound key.
+func TestExportCAGeneration(t *testing.T) {
+	t.Run("renders_role_generation_fingerprint_alg_custody", func(t *testing.T) {
+		pub := newSigner(t, "ed25519").PublicKey()
+		raw, err := tlog.MarshalLeaf(tlog.Leaf{Index: 3, TimeMicros: 5, Kind: tlog.KindCAGeneration, Body: caGenBody(t, "host", 2, pub)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := decoded(t, raw)
+		if m["kind"] != "ca_generation" || m["role"] != "host" || m["generation"] != float64(2) ||
+			m["fingerprint"] != ssh.FingerprintSHA256(pub) || m["alg"] != "ssh-ed25519" || m["custody"] != "agent" {
+			t.Fatalf("the ca_generation line: %v", m)
+		}
+		for _, k := range []string{"policy_version", "version", "bundle_version", "directory", "sigs", "import_krl_versions"} {
+			if _, ok := m[k]; ok {
+				t.Errorf("the ca_generation line carries %q", k)
+			}
+		}
+	})
 }

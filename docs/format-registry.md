@@ -49,7 +49,7 @@ skips it. A kind is in use when it has a constant and `valid` accepts it.
 | 11 | in use | `KindHostIssue` | `host_issue` | 03-09 |
 | 12 | in use | `KindProbeIssue` | `probe_issue` | 03-10 |
 | 13 | in use | `KindMachineIssue` | `machine_issue` | 03-11 |
-| 14 | reserved | | | 03-12 (CA rotation) |
+| 14 | in use | `KindCAGeneration` | `ca_generation` | 03-12 |
 | 15 | in use | `KindRevocationRecovery` | `revocation_recovery` | 03-06b |
 | 16 | in use | `KindHostForget` | `host_forget` | 03-08c |
 

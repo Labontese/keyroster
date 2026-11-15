@@ -116,6 +116,17 @@ EOF`
 
 var restoreAdminPathWrite = regexp.MustCompile(`(?m)^[ \t]*(?:install|chown|chmod|cp|mv|mkdir|ln|tee|touch)\b[^\n]*(?:<admin>|/home/)`)
 
+// restoreSignerPathWrite is a command of root's that creates, changes or
+// writes a path in the signer's state directory ("$S/" in the file-restore
+// block). keyroster-signer owns that directory and can plant a link there:
+// the block's touch and chown of the restore marker followed one as root
+// and handed its target to keyroster-signer (PR #102 review, I1), and
+// install's chmod follows a link swapped in after its create. The block
+// writes there as keyroster-signer only (runuser), and root only removes
+// entries (rm -f, which does not follow a link). TestRestoreRunbookChecks
+// refuses any match in the runbook and in test/systemd/smoke.sh.
+var restoreSignerPathWrite = regexp.MustCompile(`(?m)^[ \t]*(?:install|chown|chmod|cp|mv|mkdir|ln|tee|touch)\b[^\n]*"\$S/[^\n]*`)
+
 // restoreVerify is the first line of the runbook's audit verify commands.
 const restoreVerify = `keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \`
 
@@ -191,10 +202,12 @@ if ! flock -n 9; then
   exit 1
 fi
 test -s "$1/signer.db"
+rm -f "$S/restore-recovery-pending"
+runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && : >"$1"' sh "$S/restore-recovery-pending"
 rm -f "$S/signer.db" "$S/signer.db-wal" "$S/signer.db-shm"
 for f in signer.db signer.db-wal signer.db-shm; do
   if [ -e "$1/$f" ]; then
-    install -o keyroster-signer -g keyroster-signer -m 0600 "$1/$f" "$S/$f"
+    runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/$f" <"$1/$f"
   fi
 done
 echo "restored signer.db from $1"
@@ -725,6 +738,11 @@ func TestRestoreRunbookChecks(t *testing.T) {
 	}
 	for _, m := range restoreAdminPathWrite.FindAllString(runbook, -1) {
 		t.Errorf("signer-install.md has root create, change or write an admin's path, following any link the admin planted: %q", strings.TrimSpace(m))
+	}
+	for name, text := range map[string]string{"signer-install.md": runbook, "test/systemd/smoke.sh": smoke} {
+		for _, m := range restoreSignerPathWrite.FindAllString(text, -1) {
+			t.Errorf("%s has root create, change or write a path in the signer's state directory, following any link keyroster-signer planted: %q", name, strings.TrimSpace(m))
+		}
 	}
 
 	// The order, on the runbook's restore section with its white space

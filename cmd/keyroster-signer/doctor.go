@@ -8,8 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -91,6 +94,13 @@ func gatherFacts(ctx context.Context, stateDir string, overrides map[string]stri
 		f.StateDirError = "cannot read the owner of " + stateDir
 	}
 
+	// The restore marker is read without the lock, as every fact here;
+	// any entry of that name counts, as in lockStateDir (03-12).
+	marker := filepath.Join(stateDir, restoreMarkerName)
+	if _, err := os.Lstat(marker); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		f.RestoreMarker = marker
+	}
+
 	dbPath := filepath.Join(stateDir, "signer.db")
 	fi, err := os.Lstat(dbPath)
 	switch {
@@ -111,7 +121,78 @@ func gatherFacts(ctx context.Context, stateDir string, overrides map[string]stri
 	if err := readDBFacts(ctx, db, &f, overrides); err != nil {
 		f.DBError = err.Error()
 	}
+	if gens, err := db.CAGenerations(ctx); err == nil {
+		f.Generations = generationFacts(gens, f.Bundle)
+		f.UnrecordedGenerationFiles = unrecordedGenerationFiles(stateDir, gens)
+	}
 	return f
+}
+
+// generationFacts are the stored CA key generations with the state of the
+// installed bundle's entry for the same key (03-12): active for the ops or
+// log key the bundle names, prepared when the bundle names no such entry.
+func generationFacts(gens []signerdb.CAGeneration, b *trust.Bundle) []doctor.GenerationFact {
+	out := make([]doctor.GenerationFact, 0, len(gens))
+	for _, g := range gens {
+		gf := doctor.GenerationFact{Role: g.Role, Generation: g.Generation, Alg: g.Alg, Custody: g.Custody, State: "prepared"}
+		pub, err := ssh.ParsePublicKey(g.PublicKey)
+		if err != nil {
+			gf.Fingerprint = "an unparsable key"
+			out = append(out, gf)
+			continue
+		}
+		gf.Fingerprint = ssh.FingerprintSHA256(pub)
+		if b != nil {
+			key := trust.FormatKey(pub)
+			for _, ca := range b.CAs {
+				if ca.Key == key {
+					gf.State = ca.State
+				}
+			}
+			if b.OpsKey.Key == key || b.Log.Key == key {
+				gf.State = "active"
+			}
+		}
+		out = append(out, gf)
+	}
+	return out
+}
+
+// generationFile is the name of a software key file of a later CA key
+// generation: <role>-g<N>.age.
+var generationFile = regexp.MustCompile(`^(user|host|machine|ops|log)-g([0-9]{1,10})\.age$`)
+
+// unrecordedGenerationFiles lists, by name only (no file is opened), the
+// <role>-g<N>.age files in {stateDir}/software with N of at least 2 that no
+// generation row names (03-12). A missing or unreadable directory gives
+// none: the agent, tpm and piv backends have no such directory.
+func unrecordedGenerationFiles(stateDir string, gens []signerdb.CAGeneration) []string {
+	dir := filepath.Join(stateDir, "software")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		m := generationFile.FindStringSubmatch(e.Name())
+		if m == nil {
+			continue
+		}
+		n, err := strconv.ParseUint(m[2], 10, 32)
+		if err != nil || n < 2 {
+			continue
+		}
+		recorded := false
+		for _, g := range gens {
+			if g.Role == m[1] && uint64(g.Generation) == n {
+				recorded = true
+			}
+		}
+		if !recorded {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
 }
 
 // readDBFacts fills the facts that come from the state database (and, for

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -408,4 +409,96 @@ func TestLevelsAndLines(t *testing.T) {
 	if r.Line() != "WARN no_bundle: no trust bundle installed" {
 		t.Fatalf("Line = %q", r.Line())
 	}
+}
+
+// TestDoctorRestoreMarker (03-12): a restore-recovery-pending marker in the
+// state directory is a FAIL that names it; no marker, no line.
+func TestDoctorRestoreMarker(t *testing.T) {
+	t.Run("fails_with_path", func(t *testing.T) {
+		f := healthy(t)
+		f.RestoreMarker = "/var/lib/keyroster-signer/restore-recovery-pending"
+		r := requireOne(t, Run(f), FAIL, CodeRestorePending)
+		if !strings.Contains(r.Message, f.RestoreMarker) {
+			t.Fatalf("the result does not name the marker: %s", r.Line())
+		}
+	})
+	t.Run("absent_no_line", func(t *testing.T) {
+		requireNone(t, Run(healthy(t)), "restore_recovery_pending")
+	})
+}
+
+// TestDoctorInstalledIssuedAt (03-12): an installed bundle dated after the
+// wall clock is a WARN; one at or before it, or an issued_at that does not
+// parse (the bundle parser already refused such a value), gives nothing.
+func TestDoctorInstalledIssuedAt(t *testing.T) {
+	at := func(f Facts, d time.Duration) string {
+		return time.UnixMicro(int64(f.NowMicros)).Add(d).UTC().Truncate(time.Second).Format(trust.TimeFormat) //nolint:gosec // G115: a test clock
+	}
+	t.Run("after_now_warns", func(t *testing.T) {
+		f := healthy(t)
+		f.Bundle.IssuedAt = at(f, 10*time.Second)
+		r := requireOne(t, Run(f), WARN, "installed_issued_at_after_now")
+		if !strings.Contains(r.Message, f.Bundle.IssuedAt) {
+			t.Fatalf("the warning does not name the issued_at: %s", r.Line())
+		}
+	})
+	t.Run("not_after_now_ok", func(t *testing.T) {
+		f := healthy(t)
+		f.Bundle.IssuedAt = at(f, -10*time.Second)
+		requireNone(t, Run(f), "installed_issued_at_after_now")
+	})
+	t.Run("unparseable_is_skipped", func(t *testing.T) {
+		f := healthy(t)
+		f.Bundle.IssuedAt = "not a time"
+		requireNone(t, Run(f), "installed_issued_at_after_now")
+	})
+}
+
+// TestDoctorGenerations (03-12): one OK line coded generations names each
+// role's active and prepared generations with their fingerprints; with no
+// generation fact there is no line.
+func TestDoctorGenerations(t *testing.T) {
+	f := healthy(t)
+	f.Generations = []GenerationFact{
+		{Role: "user", Generation: 1, Fingerprint: "SHA256:aaa", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "active"},
+		{Role: "user", Generation: 2, Fingerprint: "SHA256:bbb", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "prepared"},
+		{Role: "host", Generation: 1, Fingerprint: "SHA256:ccc", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "active"},
+	}
+	r := requireOne(t, Run(f), OK, "generations")
+	for _, want := range []string{"user", "active g1 SHA256:aaa", "prepared g2 SHA256:bbb", "host", "active g1 SHA256:ccc"} {
+		if !strings.Contains(r.Message, want) {
+			t.Fatalf("the generations line lacks %q: %s", want, r.Line())
+		}
+	}
+	requireNone(t, Run(healthy(t)), "generations")
+}
+
+// TestDoctorGenerationFiles (03-12): a <role>-g<N>.age file that no
+// generation row names is a WARN that names every such path and states the
+// conditions under which it is a lost prepare's key.
+func TestDoctorGenerationFiles(t *testing.T) {
+	paths := []string{"/var/lib/keyroster-signer/software/user-g3.age", "/var/lib/keyroster-signer/software/host-g2.age"}
+	t.Run("warns_for_unrecorded_file", func(t *testing.T) {
+		f := healthy(t)
+		f.UnrecordedGenerationFiles = paths
+		r := requireOne(t, Run(f), WARN, "unrecorded_generation_file")
+		for _, p := range paths {
+			if !strings.Contains(r.Message, p) {
+				t.Fatalf("the warning does not name %s: %s", p, r.Line())
+			}
+		}
+	})
+	t.Run("warn_text_states_the_conditions", func(t *testing.T) {
+		f := healthy(t)
+		f.UnrecordedGenerationFiles = paths[:1]
+		r := requireOne(t, Run(f), WARN, "unrecorded_generation_file")
+		for _, want := range []string{"no generation row names this file", "unless you placed it for a --key prepare"} {
+			if !strings.Contains(r.Message, want) {
+				t.Fatalf("the warning lacks %q: %s", want, r.Line())
+			}
+		}
+	})
+	t.Run("none_no_line", func(t *testing.T) {
+		requireNone(t, Run(healthy(t)), "unrecorded_generation_file")
+	})
 }
