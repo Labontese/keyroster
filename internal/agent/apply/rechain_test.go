@@ -485,15 +485,15 @@ func genNumbers(t *testing.T, h *testHost) []uint64 {
 	return out
 }
 
-// successorWithNext is successor with a next user CA entry for key added.
+// successorWithNext is successor with a next user CA entry for key added
+// at the user role's next free generation (withNextUser, 03-12b).
 func (f *fixture) successorWithNext(prev *trust.Bundle, prevDoc []byte, key ssh.Signer) (*trust.Bundle, spool.Doc) {
 	f.t.Helper()
 	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: f.policyDoc, IssuedAt: "2026-10-02T00:00:00Z", InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	// The entries are ordered by role (user first), then generation.
-	b.CAs = slices.Insert(b.CAs, 1, trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(key.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "next", Generation: 2})
+	withNextUser(b, key)
 	doc := mustCanonical(f.t, b)
 	if _, err := trust.ParseBundle(doc); err != nil {
 		f.t.Fatalf("successor bundle with a next CA: %v", err)

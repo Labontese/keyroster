@@ -160,15 +160,45 @@ func mustRecord(t *testing.T, h *testHost, bundle, dir uint64) {
 	}
 }
 
+// withNextUser adds a next user CA entry for key to b at the user role's
+// next free generation, after the role's last entry, so the successor is
+// the one CA change the chain rule allows for the role (03-12b).
+func withNextUser(b *trust.Bundle, key ssh.Signer) {
+	var gen uint32
+	at := 0
+	for i, c := range b.CAs {
+		if c.Role == trust.RoleUser {
+			gen, at = max(gen, c.Generation), i+1
+		}
+	}
+	b.CAs = slices.Insert(b.CAs, at, trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(key.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "next", Generation: gen + 1})
+}
+
+// retireNext retires every next CA entry of b (an abort): the chain rule
+// never lets an entry be dropped (03-12b).
+func retireNext(b *trust.Bundle) {
+	for i := range b.CAs {
+		if b.CAs[i].State == "next" {
+			b.CAs[i].State = "retired"
+		}
+	}
+}
+
+// hasNextCA reports whether b holds a next CA entry.
+func hasNextCA(b *trust.Bundle) bool {
+	return slices.ContainsFunc(b.CAs, func(c trust.CAEntry) bool { return c.State == "next" })
+}
+
 // successorNextUnder is successorWithNext under the policy polDoc (kept
-// from prev) and issued at issuedAt.
+// from prev) and issued at issuedAt: the next user CA entry is added at
+// the role's next free generation (withNextUser).
 func (f *fixture) successorNextUnder(prev *trust.Bundle, prevDoc, polDoc []byte, issuedAt string, key ssh.Signer) (*trust.Bundle, spool.Doc) {
 	f.t.Helper()
 	b, err := trust.BuildSuccessor(prev, prevDoc, polDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: polDoc, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	b.CAs = slices.Insert(b.CAs, 1, trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(key.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "next", Generation: 2})
+	withNextUser(b, key)
 	doc := mustCanonical(f.t, b)
 	if _, err := trust.ParseBundle(doc); err != nil {
 		f.t.Fatalf("successor bundle with a next CA: %v", err)
@@ -176,14 +206,16 @@ func (f *fixture) successorNextUnder(prev *trust.Bundle, prevDoc, polDoc []byte,
 	return b, spool.Doc{Body: doc, Sigs: f.rootSign(trust.NamespaceBundle, doc)}
 }
 
-// successorWithout is f.successor that also drops every next CA entry.
+// successorWithout is f.successor that also retires every next CA entry of
+// prev (an abort), so the next keys leave every trust file; the chain rule
+// never lets an entry be dropped (03-12b).
 func (f *fixture) successorWithout(prev *trust.Bundle, prevDoc []byte, issuedAt string) (*trust.Bundle, spool.Doc) {
 	f.t.Helper()
 	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: f.policyDoc, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	b.CAs = slices.DeleteFunc(b.CAs, func(c trust.CAEntry) bool { return c.State == "next" })
+	retireNext(b)
 	doc := mustCanonical(f.t, b)
 	if _, err := trust.ParseBundle(doc); err != nil {
 		f.t.Fatalf("successor bundle without the next CA: %v", err)
@@ -192,11 +224,46 @@ func (f *fixture) successorWithout(prev *trust.Bundle, prevDoc []byte, issuedAt 
 }
 
 // rotationDropping is the next bundle after prev, which is under the
-// fixture's policy, rotating the policy to admin bob: it drops every next
-// CA entry of prev and adds one for key (a line the host's ssh-keygen can
-// be made to refuse). With ops, the bundle names ops as its ops key
-// (03-08k). It returns the bundle and the rotated policy.
+// fixture's policy and holds no next CA entry, rotating the policy to
+// admin bob and adding a next user CA for key (a line the host's
+// ssh-keygen can be made to refuse). With ops, the bundle names ops as its
+// ops key (03-08k). It returns the bundle and the rotated policy. A prev
+// that holds a next entry takes two versions instead, rotationRetiring and
+// then successorNextUnder, because replacing one next key by another is
+// two changes for one role (03-12b).
 func (f *fixture) rotationDropping(prev *trust.Bundle, prevDoc []byte, issuedAt string, key, ops ssh.Signer) (bundle, policy spool.Doc) {
+	f.t.Helper()
+	if hasNextCA(prev) {
+		f.t.Fatal("rotationDropping: prev holds a next CA entry; use rotationRetiring and then successorNextUnder")
+	}
+	b, p := f.rotationToBob(prev, prevDoc, issuedAt, ops)
+	withNextUser(b, key)
+	doc := mustCanonical(f.t, b)
+	if _, err := trust.ParseBundle(doc); err != nil {
+		f.t.Fatalf("rotated bundle: %v", err)
+	}
+	return spool.Doc{Body: doc, Sigs: f.rootSign(trust.NamespaceBundle, doc)}, p
+}
+
+// rotationRetiring is the next bundle after prev, which is under the
+// fixture's policy, rotating the policy to admin bob as rotationDropping
+// does and retiring every next CA entry of prev (an abort, 03-12b). With
+// ops, the bundle names ops as its ops key (03-08k). It returns the parsed
+// bundle, the bundle and the rotated policy.
+func (f *fixture) rotationRetiring(prev *trust.Bundle, prevDoc []byte, issuedAt string, ops ssh.Signer) (*trust.Bundle, spool.Doc, spool.Doc) {
+	f.t.Helper()
+	b, p := f.rotationToBob(prev, prevDoc, issuedAt, ops)
+	retireNext(b)
+	doc := mustCanonical(f.t, b)
+	if _, err := trust.ParseBundle(doc); err != nil {
+		f.t.Fatalf("rotated bundle: %v", err)
+	}
+	return b, spool.Doc{Body: doc, Sigs: f.rootSign(trust.NamespaceBundle, doc)}, p
+}
+
+// rotationToBob is the unsigned successor of prev under the policy rotated
+// to admin bob, and that policy; with ops, it names ops as its ops key.
+func (f *fixture) rotationToBob(prev *trust.Bundle, prevDoc []byte, issuedAt string, ops ssh.Signer) (*trust.Bundle, spool.Doc) {
 	f.t.Helper()
 	bob := seedKey(f.t, 12)
 	_, _, p := f.rotationOps(prev, prevDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, issuedAt, nil)
@@ -204,16 +271,10 @@ func (f *fixture) rotationDropping(prev *trust.Bundle, prevDoc []byte, issuedAt 
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	b.CAs = slices.DeleteFunc(b.CAs, func(c trust.CAEntry) bool { return c.State == "next" })
-	b.CAs = slices.Insert(b.CAs, 1, trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(key.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "next", Generation: 2})
 	if ops != nil {
 		b.OpsKey = trust.KeyEntry{Key: trust.FormatKey(ops.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software"}
 	}
-	doc := mustCanonical(f.t, b)
-	if _, err := trust.ParseBundle(doc); err != nil {
-		f.t.Fatalf("rotated bundle: %v", err)
-	}
-	return spool.Doc{Body: doc, Sigs: f.rootSign(trust.NamespaceBundle, doc)}, p
+	return b, p
 }
 
 // mustHeldBelowRecord checks the end of a widening wait below a recorded
@@ -256,21 +317,24 @@ func mustHeldBelowRecord(t *testing.T, h *testHost, recorded spool.Doc, dir uint
 // survives, and a KRL published during the wait still lands.
 func TestSpoolWindowWideningWait(t *testing.T) {
 	// recordAbove: bundle 2 keeps the policy and adds a next CA x, bundle
-	// 3 rotates the policy, drops x and adds a CA line ssh-keygen refuses,
-	// so apply 1 records {Bundle: 3} and takes KRL 7 alone. Directory 2,
-	// signed under bundle 1's policy, widens deploy to role:q: apply 2
-	// holds at bundle 1 and waits.
-	recordAbove := func(t *testing.T) (h *testHost, b2 *trust.Bundle, d2, d3 spool.Doc, x string) {
+	// 3 rotates the policy and retires x (an abort), and bundle 4 keeps
+	// policy 2 and adds a next CA line ssh-keygen refuses (03-12b: one CA
+	// change per version), so apply 1 records {Bundle: 4} and takes KRL 7
+	// alone. Directory 2, signed under bundle 1's policy, widens deploy to
+	// role:q: apply 2 holds at bundle 1 and waits. It returns bundle 3 (b3,
+	// d3), the recorded bundle 4 (d4), policy 2 and x's line.
+	recordAbove := func(t *testing.T) (h *testHost, b3 *trust.Bundle, d3, d4, p2 spool.Doc, x string) {
 		t.Helper()
 		f := newFixture(t)
 		h = newTestHost(t, f)
 		spoolInState(t, h)
 		h.installed("role:ops")
 		xKey := seedKey(t, 25)
-		b2, d2 = f.successorNextUnder(f.bundle, f.bundleDoc, f.policyDoc, "2026-10-02T00:00:00Z", xKey)
+		b2, d2 := f.successorNextUnder(f.bundle, f.bundleDoc, f.policyDoc, "2026-10-02T00:00:00Z", xKey)
 		rejected := seedKey(t, 21)
-		d3, p2 := f.rotationDropping(b2, d2.Body, "2026-10-03T00:00:00Z", rejected, nil)
-		h.state.Bundles[2], h.state.Bundles[3], h.state.Policies[2] = d2, d3, p2
+		b3, d3, p2 = f.rotationRetiring(b2, d2.Body, "2026-10-03T00:00:00Z", nil)
+		_, d4 = f.successorNextUnder(b3, d3.Body, p2.Body, "2026-10-03T01:00:00Z", rejected)
+		h.state.Bundles[2], h.state.Bundles[3], h.state.Bundles[4], h.state.Policies[2] = d2, d3, d4, p2
 		line := trust.FormatKey(rejected.PublicKey())
 		h.run.rejectCA = func(l string) bool { return l == line }
 		h.clock.advance(time.Hour)
@@ -278,23 +342,24 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 		if _, err := h.apply(); !errors.Is(err, ErrCALineRejected) {
 			t.Fatalf("apply 1: %v, want ca_line_rejected", err)
 		}
-		mustRecord(t, h, 3, 0)
+		mustRecord(t, h, 4, 0)
 		h.publishDir(h.spec("role:ops", "role:q"))
-		return h, b2, d2, d3, trust.FormatKey(xKey.PublicKey())
+		return h, b3, d3, d4, p2, trust.FormatKey(xKey.PublicKey())
 	}
 	for _, c := range []struct {
 		name string
 		// during changes the spool at the wait's first poll.
-		during  func(t *testing.T, h *testHost, b2 *trust.Bundle, d2 spool.Doc)
+		during  func(t *testing.T, h *testHost, b3 *trust.Bundle, d3, p2 spool.Doc)
 		dir     uint64
 		krl     uint64
 		wantErr error
 	}{
 		{name: "nothing_new"},
-		{name: "remade_chain", krl: 8, wantErr: state.ErrBundle, during: func(t *testing.T, h *testHost, _ *trust.Bundle, _ spool.Doc) {
-			// A signer restore lost bundles 2 and 3 and re-made 2' and 3'
-			// on bundle 1 (3' rotates to the same policy 2), and a 4'
-			// under policy 2 without 3''s next CA. All of them render.
+		{name: "remade_chain", krl: 8, wantErr: state.ErrBundle, during: func(t *testing.T, h *testHost, _ *trust.Bundle, _, _ spool.Doc) {
+			// A signer restore lost bundles 2 to 4 and re-made 2', 3' and
+			// 4' on bundle 1 (3' rotates to the same policy 2 and adds a
+			// next CA, 4' under policy 2 retires it), and a 5' under
+			// policy 2 above the record. All of them render.
 			b2r, d2r := h.f.successor(h.f.bundle, h.f.bundleDoc, "2026-10-04T00:00:00Z")
 			d3r, p2 := h.f.rotationDropping(b2r, d2r.Body, "2026-10-04T01:00:00Z", seedKey(t, 26), nil)
 			b3r, err := trust.ParseBundle(d3r.Body)
@@ -305,34 +370,36 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			b4r.CAs = slices.DeleteFunc(b4r.CAs, func(c trust.CAEntry) bool { return c.State == "next" })
+			retireNext(b4r)
 			doc4 := mustCanonical(t, b4r)
 			d4r := spool.Doc{Body: doc4, Sigs: h.f.rootSign(trust.NamespaceBundle, doc4)}
-			h.state.Bundles[2], h.state.Bundles[3], h.state.Bundles[4] = d2r, d3r, d4r
+			_, d5r := h.f.successorUnder(b4r, doc4, p2.Body, "2026-10-04T03:00:00Z")
+			h.state.Bundles[2], h.state.Bundles[3], h.state.Bundles[4], h.state.Bundles[5] = d2r, d3r, d4r, d5r
 		}},
-		{name: "remade_chain_under_the_old_policy", krl: 8, wantErr: state.ErrPolicyMissing, during: func(_ *testing.T, h *testHost, _ *trust.Bundle, _ spool.Doc) {
-			// As remade_chain with 2', 3' and 4' all under bundle 1's
-			// policy, which a capture read from the record's floor (policy
-			// 2) does not hold: 4' is refused before its chain check.
+		{name: "remade_chain_under_the_old_policy", krl: 8, wantErr: state.ErrPolicyMissing, during: func(_ *testing.T, h *testHost, _ *trust.Bundle, _, _ spool.Doc) {
+			// As remade_chain with 2' to 5' all under bundle 1's policy,
+			// which a capture read from the record's floor (policy 2) does
+			// not hold: 5' is refused before its chain check.
 			b2r, d2r := h.f.successor(h.f.bundle, h.f.bundleDoc, "2026-10-04T00:00:00Z")
 			b3r, d3r := h.f.successor(b2r, d2r.Body, "2026-10-04T01:00:00Z")
-			_, d4r := h.f.successor(b3r, d3r.Body, "2026-10-04T02:00:00Z")
-			h.state.Bundles[2], h.state.Bundles[3], h.state.Bundles[4] = d2r, d3r, d4r
+			b4r, d4r := h.f.successor(b3r, d3r.Body, "2026-10-04T02:00:00Z")
+			_, d5r := h.f.successor(b4r, d4r.Body, "2026-10-04T03:00:00Z")
+			h.state.Bundles[2], h.state.Bundles[3], h.state.Bundles[4], h.state.Bundles[5] = d2r, d3r, d4r, d5r
 		}},
-		{name: "record_version_withheld", krl: 8, wantErr: state.ErrBundleOlder, during: func(t *testing.T, h *testHost, _ *trust.Bundle, _ spool.Doc) {
-			for _, n := range []string{"bundle-3.json", "bundle-3.json.sigs"} {
+		{name: "record_version_withheld", krl: 8, wantErr: state.ErrBundleOlder, during: func(t *testing.T, h *testHost, _ *trust.Bundle, _, _ spool.Doc) {
+			for _, n := range []string{"bundle-4.json", "bundle-4.json.sigs"} {
 				if err := os.Remove(filepath.Join(h.spool, n)); err != nil {
 					t.Fatal(err)
 				}
 			}
-			delete(h.state.Bundles, 3)
+			delete(h.state.Bundles, 4)
 		}},
-		{name: "fork_at_the_record_version", krl: 8, during: func(_ *testing.T, h *testHost, b2 *trust.Bundle, d2 spool.Doc) {
-			// The spool's 3 becomes a renderable 3' on the original 2.
-			_, d3r := h.f.successorWithout(b2, d2.Body, "2026-10-04T00:00:00Z")
-			h.state.Bundles[3] = d3r
+		{name: "fork_at_the_record_version", krl: 8, during: func(_ *testing.T, h *testHost, b3 *trust.Bundle, d3, p2 spool.Doc) {
+			// The spool's 4 becomes a renderable 4' on the original 3.
+			_, d4r := h.f.successorUnder(b3, d3.Body, p2.Body, "2026-10-04T00:00:00Z")
+			h.state.Bundles[4] = d4r
 		}},
-		{name: "newer_directory_under_the_policy_in_force", dir: 3, krl: 8, during: func(_ *testing.T, h *testHost, _ *trust.Bundle, _ spool.Doc) {
+		{name: "newer_directory_under_the_policy_in_force", dir: 3, krl: 8, during: func(_ *testing.T, h *testHost, _ *trust.Bundle, _, _ spool.Doc) {
 			// Bundle 2 carries the quorum of directory 3 too: the poll
 			// holds at bundle 1 again, never at bundle 2.
 			h.publishDir(h.spec("role:ops", "role:q"))
@@ -340,7 +407,7 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			h, b2, d2, d3, x := recordAbove(t)
+			h, b3, d3, d4, p2, x := recordAbove(t)
 			var log strings.Builder
 			h.cfg.Log = &log
 			sleeps := 0
@@ -349,7 +416,7 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 					return
 				}
 				if c.during != nil {
-					c.during(t, h, b2, d2)
+					c.during(t, h, b3, d3, p2)
 				}
 				if c.krl != 0 {
 					h.publishKRL(7, c.krl)
@@ -363,14 +430,15 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 			if c.wantErr == nil && err != nil || c.wantErr != nil && !errors.Is(err, c.wantErr) {
 				t.Fatalf("apply 2: %v, want %v (report %+v)", err, c.wantErr, r)
 			}
-			mustHeldBelowRecord(t, h, d3, max(c.dir, 2), x, c.krl, log.String())
+			mustHeldBelowRecord(t, h, d4, max(c.dir, 2), x, c.krl, log.String())
 		})
 	}
 	t.Run("older_bundle_at_the_window_boundary", func(t *testing.T) {
 		t.Parallel()
 		// Bundles 2-64 are root-signed successors, 65 adds a next CA x, 66
-		// rotates the policy, drops x and adds a line ssh-keygen refuses.
-		// With x refused too, apply 1 records 65 and apply 2 66. Then x is
+		// rotates the policy and retires x, and 67 adds a next CA line
+		// ssh-keygen refuses (03-12b: one CA change per version). With x
+		// refused too, apply 1 records 65 and apply 2 67. Then x is
 		// accepted, and directory 2 under bundle 1's policy widens deploy:
 		// apply 3 holds at bundle 1 and waits. Read from bundle 1, a poll's
 		// window would end at 65, which now renders.
@@ -387,14 +455,15 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 		xKey := seedKey(t, 25)
 		b65, d65 := f.successorNextUnder(cur, curDoc, f.policyDoc, "2026-10-02T00:00:00Z", xKey)
 		rejected := seedKey(t, 21)
-		d66, p2 := f.rotationDropping(b65, d65.Body, "2026-10-03T00:00:00Z", rejected, nil)
-		h.state.Bundles[65], h.state.Bundles[66], h.state.Policies[2] = d65, d66, p2
+		b66, d66, p2 := f.rotationRetiring(b65, d65.Body, "2026-10-03T00:00:00Z", nil)
+		_, d67 := f.successorNextUnder(b66, d66.Body, p2.Body, "2026-10-03T01:00:00Z", rejected)
+		h.state.Bundles[65], h.state.Bundles[66], h.state.Bundles[67], h.state.Policies[2] = d65, d66, d67, p2
 		x := trust.FormatKey(xKey.PublicKey())
 		refuse := map[string]bool{x: true, trust.FormatKey(rejected.PublicKey()): true}
 		h.run.rejectCA = func(l string) bool { return refuse[l] }
 		h.clock.advance(time.Hour)
 		h.publishKRL(7)
-		for i, want := range []uint64{65, 66} {
+		for i, want := range []uint64{65, 67} {
 			if _, err := h.apply(); !errors.Is(err, ErrCALineRejected) {
 				t.Fatalf("apply %d: %v, want ca_line_rejected", i+1, err)
 			}
@@ -409,7 +478,7 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 		if r, err := h.apply(); err != nil || sleeps == 0 {
 			t.Fatalf("apply 3: %v after %d sleeps, want the widened directory 2 under bundle 1 (report %+v)", err, sleeps, r)
 		}
-		mustHeldBelowRecord(t, h, d66, 2, x, 0, log.String())
+		mustHeldBelowRecord(t, h, d67, 2, x, 0, log.String())
 	})
 }
 
@@ -507,8 +576,8 @@ func TestSpoolWindow(t *testing.T) {
 	t.Run("bundle_ca_line_window_newest_then_fixed_bundle_applies", func(t *testing.T) {
 		t.Parallel()
 		// Bundles 2-64 are root-signed successors, 65 adds a next CA whose
-		// line ssh-keygen refuses (the window's newest), and 66 drops that
-		// entry again.
+		// line ssh-keygen refuses (the window's newest), and 66 retires
+		// that entry (an abort, 03-12b).
 		h := newTestHost(t, newFixture(t))
 		spoolInState(t, h)
 		h.installed("role:ops")
