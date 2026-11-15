@@ -579,7 +579,22 @@ grep -q 'is in use by another keyroster-signer process' "$work/restore-locked.lo
 grep -qx 'stale signer.db-shm' "$STATE/signer.db-shm" || fail "the refused file restore changed signer.db-shm"
 pkill -P "$locker" sleep || true
 wait "$locker" || true
+# keyroster-signer owns the state directory and plants the restore marker
+# as a link to a root-owned file (PR #102 review, I1): the block must not
+# write, change or hand over that file, and must leave a regular marker.
+canary=$work/marker-canary
+printf 'canary\n' >"$canary"
+chmod 0644 "$canary"
+touch -d @946684800 "$canary"
+canary_before=$(stat -c '%a %U %G %Y %s' "$canary")
+runuser -u keyroster-signer -- ln -s "$canary" "$STATE/restore-recovery-pending"
 file_restore "$backup"
+[ "$(stat -c '%a %U %G %Y %s' "$canary")" = "$canary_before" ] || fail "the file restore followed the planted marker link: $(stat -c '%a %U %G %Y %s' "$canary"), was $canary_before"
+grep -qx canary "$canary" || fail "the file restore wrote through the planted marker link"
+if [ -L "$STATE/restore-recovery-pending" ] || [ ! -f "$STATE/restore-recovery-pending" ]; then
+	fail "the restore marker is not a regular file"
+fi
+[ "$(stat -c '%a %U %G' "$STATE/restore-recovery-pending")" = "600 keyroster-signer keyroster-signer" ] || fail "the restore marker is $(stat -c '%a %U %G' "$STATE/restore-recovery-pending")"
 ls -l "$STATE"
 for f in signer.db signer.db-wal; do
 	[ "$(stat -c '%a %U %G' "$STATE/$f")" = "600 keyroster-signer keyroster-signer" ] || fail "restored $f is $(stat -c '%a %U %G' "$STATE/$f")"
