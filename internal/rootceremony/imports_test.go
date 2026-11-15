@@ -104,8 +104,8 @@ func TestExportedAPI(t *testing.T) {
 	}
 	slices.Sort(exported)
 	want := []string{
-		"BundleHash", "GenerateRoot", "OpenRoot", "ReadPassphrase", "Root",
-		"Root.Close", "Root.PublicKey", "Root.SignBundle", "Root.SignPolicy",
+		"BundleHash", "CAChanges", "GenerateRoot", "OpenRoot", "ReadPassphrase", "Root",
+		"Root.Close", "Root.PublicKey", "Root.SignBundle", "Root.SignPolicy", "RootSetLine",
 		"SignBundle", "SignPolicy", "Summary", "ValidatePassphrase",
 	}
 	if !slices.Equal(exported, want) {

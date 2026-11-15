@@ -1,4 +1,6 @@
 Successor of trust bundle v1, sha256 5305b6899202797fa6753ab984a07b2835c786a750f17b4c9b991603c86dabbd
+CA entries: unchanged
+Root set: unchanged
 Trust bundle version 2, issued 2026-10-06T00:00:00Z
   prev:          5305b6899202797fa6753ab984a07b2835c786a750f17b4c9b991603c86dabbd
   policy sha256: f76c3e5a251e6624b875fd5289d9e8799e65fb1b2477337127a38a4df3a511ad

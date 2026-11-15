@@ -1102,15 +1102,6 @@ func TestRootSignSuccessor(t *testing.T) {
 		}
 	})
 
-	t.Run("ca_pubkeys_refused", func(t *testing.T) {
-		out := filepath.Join(g.dir, "out-ca")
-		code, _, stderr := sign(t, out, prevPolicy, "1", nil, "--agent-key", a.fingerprint, "--ca-pubkeys", g.caPubkeys)
-		if code != 2 || !strings.Contains(stderr, "--ca-pubkeys is refused with --prev") {
-			t.Fatalf("--ca-pubkeys with --prev: exit %d, stderr %q", code, stderr)
-		}
-		mustNotExist(t, out)
-	})
-
 	t.Run("unknown_root_refused", func(t *testing.T) {
 		_, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
@@ -1382,6 +1373,229 @@ func TestRootSignSuccessor(t *testing.T) {
 		if after, err := os.ReadFile(filepath.Join(out, "bundle.json")); err != nil || !bytes.Equal(after, before) { //nolint:gosec // G304: test file
 			t.Fatalf("bundle.json changed after a refused rerun (%v)", err)
 		}
+	})
+
+	// The CA changes of a successor (03-12b). prepareFile writes a
+	// prepare file, as keyroster-signer ca-rotate prepare does, for role
+	// at generation gen with a fresh Ed25519 key, and returns its path,
+	// the key and its fingerprint.
+	prepareFile := func(t *testing.T, role string, gen uint32) (string, string, string) {
+		t.Helper()
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := ssh.NewPublicKey(priv.Public())
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := trust.CanonicalJSON(struct {
+			Role       string `json:"role"`
+			Generation uint32 `json:"generation"`
+			Key        string `json:"key"`
+			Alg        string `json:"alg"`
+			Custody    string `json:"custody"`
+		}{role, gen, trust.FormatKey(pub), pub.Type(), "software"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.CreateTemp(g.dir, role+"-g"+strconv.FormatUint(uint64(gen), 10)+"-*.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write(data); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return f.Name(), trust.FormatKey(pub), ssh.FingerprintSHA256(pub)
+	}
+	// verifyFrom is verifyOut against the bundle in force in prevDir.
+	verifyFrom := func(t *testing.T, prevDir, out string) (*trust.Bundle, error) {
+		t.Helper()
+		prevBundle := readTestFile(t, filepath.Join(prevDir, "bundle.json"))
+		prev, err := trust.ParseBundle(prevBundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _, err := trust.VerifySuccessor(prev, prevBundle, readTestFile(t, filepath.Join(prevDir, "policy.json")),
+			readTestFile(t, filepath.Join(out, "bundle.json")), readTestFile(t, filepath.Join(out, "bundle.json.sigs")),
+			readTestFile(t, filepath.Join(out, "policy.json")), readTestFile(t, filepath.Join(out, "policy.json.sigs")))
+		return b, err
+	}
+	// editBundle is a copyPrev edit of the bundle in force.
+	editBundle := func(t *testing.T, edit func(b *trust.Bundle)) func([]byte) []byte {
+		return func(data []byte) []byte {
+			b, err := trust.ParseBundle(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edit(b)
+			out, err := b.Canonical()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		}
+	}
+	// userEntries sets b's user CA entries to the active one and extra.
+	userEntries := func(b *trust.Bundle, extra ...trust.CAEntry) {
+		b.CAs = append(append([]trust.CAEntry{b.CAs[0]}, extra...), b.CAs[1:]...)
+	}
+	fileKey := func(t *testing.T, role string, gen uint32, state string) (trust.CAEntry, string) {
+		t.Helper()
+		_, key, fp := prepareFile(t, role, gen)
+		return trust.CAEntry{Role: role, Key: key, Alg: ssh.KeyAlgoED25519, Custody: "software", State: state, Generation: gen}, fp
+	}
+	t.Run("ca_next_signs_and_verifies", func(t *testing.T) {
+		file, key, fp := prepareFile(t, "user", 2)
+		out := filepath.Join(g.dir, "out-ca-next")
+		code, stdout, stderr := sign(t, out, prevPolicy, "1", &a, "--ca-next", "user="+file, "--ca-next-fingerprint", "user="+fp)
+		if code != 0 {
+			t.Fatalf("root sign --ca-next by A: exit %d: %s", code, stderr)
+		}
+		for _, want := range []string{"CA user gen 2 " + fp + ": none -> next\n", "Root set: CHANGED (added 2, removed 2)\n"} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("root sign --ca-next output lacks %q:\n%s", want, stdout)
+			}
+		}
+		if code, _, stderr := sign(t, out, prevPolicy, "1", &c, "--ca-next", "user="+file, "--ca-next-fingerprint", "user="+fp); code != 0 {
+			t.Fatalf("root sign --ca-next by C: exit %d: %s", code, stderr)
+		}
+		b, err := verifyFrom(t, g.out, out)
+		if err != nil {
+			t.Fatalf("VerifySuccessor of the next CA successor: %v", err)
+		}
+		if b.CAs[1] != (trust.CAEntry{Role: "user", Key: key, Alg: ssh.KeyAlgoED25519, Custody: "software", State: "next", Generation: 2}) {
+			t.Fatalf("the successor's CAs %+v, want the prepared key as user generation 2 next", b.CAs)
+		}
+	})
+	t.Run("ca_next_fingerprint_mismatch_refused", func(t *testing.T) {
+		file, _, _ := prepareFile(t, "user", 2)
+		_, _, other := prepareFile(t, "user", 2)
+		out := filepath.Join(g.dir, "out-ca-next-mismatch")
+		code, _, stderr := sign(t, out, prevPolicy, "1", &a, "--ca-next", "user="+file, "--ca-next-fingerprint", "user="+other)
+		if code != 1 || !strings.Contains(stderr, "ca_next_fingerprint_mismatch") {
+			t.Fatalf("a wrong --ca-next-fingerprint: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+	usage := func(t *testing.T, name, want string, extra ...string) {
+		t.Helper()
+		out := filepath.Join(g.dir, "out-"+name)
+		code, _, stderr := sign(t, out, prevPolicy, "1", &a, extra...)
+		if code != 2 || !strings.Contains(stderr, "root sign: "+want) {
+			t.Fatalf("%v: exit %d, stderr %q; want exit 2 and %q", extra, code, stderr, want)
+		}
+		mustNotExist(t, out)
+	}
+	t.Run("ca_next_without_fingerprint_refused", func(t *testing.T) {
+		file, _, _ := prepareFile(t, "user", 2)
+		usage(t, "no-fp", "--ca-next user needs --ca-next-fingerprint user=SHA256:...", "--ca-next", "user="+file)
+	})
+	t.Run("ca_next_fingerprint_without_ca_next_refused", func(t *testing.T) {
+		_, _, fp := prepareFile(t, "user", 2)
+		usage(t, "fp-only", "--ca-next-fingerprint user needs --ca-next user=FILE", "--ca-next-fingerprint", "user="+fp)
+	})
+	t.Run("ca_next_role_not_the_files_role_refused", func(t *testing.T) {
+		file, _, fp := prepareFile(t, "user", 2)
+		usage(t, "role-slip", "--ca-next host="+file+": the file holds role user, not host", "--ca-next", "host="+file, "--ca-next-fingerprint", "host="+fp)
+	})
+	t.Run("ca_pubkeys_with_prev_refused", func(t *testing.T) {
+		out := filepath.Join(g.dir, "out-ca")
+		code, _, stderr := sign(t, out, prevPolicy, "1", nil, "--agent-key", a.fingerprint, "--ca-pubkeys", g.caPubkeys)
+		if code != 2 || !strings.Contains(stderr, "root sign: --ca-pubkeys is for a genesis bundle; a successor changes CA entries only with --ca-next and --ca-retire") {
+			t.Fatalf("--ca-pubkeys with --prev: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+	t.Run("ca_retire_next_signs", func(t *testing.T) {
+		next, fp := fileKey(t, "user", 2, "next")
+		dir, sha := copyPrev(t, "bundle.json", editBundle(t, func(b *trust.Bundle) { userEntries(b, next) }), true)
+		out := filepath.Join(g.dir, "out-ca-retire")
+		code, stdout, stderr := sign(t, out, prevPolicy, "1", &a, "--prev", dir, "--prev-sha256", sha, "--ca-retire", "user:2")
+		if code != 0 || !strings.Contains(stdout, "CA user gen 2 "+fp+": next -> retired\n") {
+			t.Fatalf("root sign --ca-retire by A: exit %d: %s\n%s", code, stderr, stdout)
+		}
+		if code, _, stderr := sign(t, out, prevPolicy, "1", &c, "--prev", dir, "--prev-sha256", sha, "--ca-retire", "user:2"); code != 0 {
+			t.Fatalf("root sign --ca-retire by C: exit %d: %s", code, stderr)
+		}
+		b, err := verifyFrom(t, dir, out)
+		if err != nil {
+			t.Fatalf("VerifySuccessor of the abort: %v", err)
+		}
+		if b.CAs[1].State != "retired" || b.CAs[1].Key != next.Key {
+			t.Fatalf("the abort's CAs %+v, want user generation 2 retired", b.CAs)
+		}
+	})
+	t.Run("ca_retire_active_refused", func(t *testing.T) {
+		out := filepath.Join(g.dir, "out-retire-active")
+		code, _, stderr := sign(t, out, prevPolicy, "1", &a, "--ca-retire", "user:1")
+		if code != 1 || !strings.Contains(stderr, "only a next entry can be retired") {
+			t.Fatalf("--ca-retire user:1: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+	t.Run("ca_retire_unknown_generation_refused", func(t *testing.T) {
+		out := filepath.Join(g.dir, "out-retire-unknown")
+		code, _, stderr := sign(t, out, prevPolicy, "1", &a, "--ca-retire", "user:9")
+		if code != 1 || !strings.Contains(stderr, "no such entry") {
+			t.Fatalf("--ca-retire user:9: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+	t.Run("two_changes_one_role_refused", func(t *testing.T) {
+		file, _, fp := prepareFile(t, "user", 2)
+		usage(t, "two-changes", "at most one CA change per role: user is named more than once",
+			"--ca-next", "user="+file, "--ca-next-fingerprint", "user="+fp, "--ca-retire", "user:2")
+	})
+	t.Run("installation_id_new_with_ca_next", func(t *testing.T) {
+		dir, sha := copyPrev(t, "bundle.json", editBundle(t, func(b *trust.Bundle) { b.InstallationID = "" }), true)
+		file, _, fp := prepareFile(t, "user", 2)
+		out := filepath.Join(g.dir, "out-id-ca-next")
+		args := []string{"--prev", dir, "--prev-sha256", sha, "--installation-id", "new", "--ca-next", "user=" + file, "--ca-next-fingerprint", "user=" + fp}
+		code, stdout, stderr := sign(t, out, prevPolicy, "1", &a, args...)
+		if code != 0 {
+			t.Fatalf("root sign --installation-id new --ca-next: exit %d: %s", code, stderr)
+		}
+		for _, want := range []string{"(new in this version)\n", "CA user gen 2 " + fp + ": none -> next\n"} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("root sign output lacks %q:\n%s", want, stdout)
+			}
+		}
+		if code, _, stderr := sign(t, out, prevPolicy, "1", &c, args...); code != 0 {
+			t.Fatalf("root sign by C: exit %d: %s", code, stderr)
+		}
+		if b, err := verifyFrom(t, dir, out); err != nil || b.InstallationID == "" {
+			t.Fatalf("VerifySuccessor of the combined successor: %+v, %v", b, err)
+		}
+	})
+	t.Run("ca_next_generation_not_above_refused", func(t *testing.T) {
+		retired, _ := fileKey(t, "user", 3, "retired")
+		dir, sha := copyPrev(t, "bundle.json", editBundle(t, func(b *trust.Bundle) { userEntries(b, retired) }), true)
+		for _, leg := range []struct {
+			gen  uint32
+			want string
+		}{{2, "the generation is not above every earlier generation of the role"}, {3, "entries must be ordered"}} {
+			file, _, fp := prepareFile(t, "user", leg.gen)
+			out := filepath.Join(g.dir, "out-not-above-"+strconv.FormatUint(uint64(leg.gen), 10))
+			code, _, stderr := sign(t, out, prevPolicy, "1", &a, "--prev", dir, "--prev-sha256", sha, "--ca-next", "user="+file, "--ca-next-fingerprint", "user="+fp)
+			if code != 1 || !strings.Contains(stderr, leg.want) {
+				t.Fatalf("--ca-next of generation %d below a retired 3: exit %d, stderr %q; want %q", leg.gen, code, stderr, leg.want)
+			}
+			mustNotExist(t, out)
+		}
+	})
+	t.Run("ca_flags_need_prev", func(t *testing.T) {
+		file, _, fp := prepareFile(t, "user", 2)
+		out := filepath.Join(g.dir, "out-genesis-ca-next")
+		code, _, stderr := run(t, "root", "sign", "--ca-pubkeys", g.caPubkeys, "--policy", prevPolicy, "--roots", g.roots, "--threshold", "1",
+			"--out-dir", out, "--agent-key", a.fingerprint, "--ca-next", "user="+file, "--ca-next-fingerprint", "user="+fp)
+		if code != 2 || !strings.Contains(stderr, "root sign: --ca-next, --ca-next-fingerprint and --ca-retire need --prev") {
+			t.Fatalf("--ca-next in genesis mode: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
 	})
 }
 

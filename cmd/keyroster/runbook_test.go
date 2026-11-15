@@ -174,13 +174,23 @@ func successorSigningSections() []*signingSection {
 			"Agreed policy change", "Previous root keys", "Root keys (threshold",
 			"without `--confirm`", "policy version", "bundle you pinned with", "do not apply there",
 			"SHA256 fingerprint", "the record holds exactly the values",
-			"`admin_quorum`, `admins`, `ca_profiles` and `timelock_seconds`", "with no WARNING"}}
+			"`admin_quorum`, `admins`, `ca_profiles` and `timelock_seconds`", "with no WARNING",
+			"CA entries: unchanged", "Root set:"}}
+	// The CA rotation ceremonies (03-12b): ceremony 1 and the abort carry
+	// the same checks as any successor, plus the CA-change line they
+	// expect and the root-set line.
+	caChecks := func(caLine string, extra ...string) []string {
+		return append([]string{"Policy in force:", "Successor policy: unchanged, every field carried over", "WARNING: this successor changes",
+			"Previous root keys", "Root keys (threshold", "pop hosts=", "pop: none (", "webauthn rp_id ", caLine, "Root set: unchanged",
+			"without `--confirm`", "do not apply there"}, extra...)
+	}
 	return []*signingSection{
 		{id: "genesis_step_4", file: "root-ceremony.md", section: "4. Sign with root A",
 			want: []string{"pop: none", "pop.hosts", "without `--confirm`"}},
 		{id: "rotation_step_3", file: "root-ceremony.md", section: "Rotate the roots",
 			start: "3. **Build the successor", end: "4. **Sign with a current root",
-			want: []string{"Successor policy: unchanged, every field carried over", "without `--confirm`", "do not apply there"}},
+			want: []string{"Successor policy: unchanged, every field carried over", "without `--confirm`", "do not apply there",
+				"CA entries: unchanged", "Root set:"}},
 		{id: "rotation_step_4", file: "root-ceremony.md", section: "Rotate the roots",
 			start: "4. **Sign with a current root", end: "5. **Verify against the paper",
 			want: []string{"checks of step 3", "policy block"}},
@@ -203,7 +213,11 @@ func successorSigningSections() []*signingSection {
 			want: []string{"before each touch"}},
 		{id: "transcript_template", file: "ceremony-transcript-template.md", section: "Ceremony",
 			want: []string{"root rotation / policy change / re-sign", "Agreed policy change (the changed field names", "someone other than its proposer",
-				"checks every value"}},
+				"checks every value", "next CA fingerprint as read from the signer console by"}},
+		{id: "ca_next_sign", file: "ca-rotation.md", section: "Ceremony 1",
+			want: caChecks("none -> next", "fingerprint as read from the signer console")},
+		{id: "ca_abort_sign", file: "ca-rotation.md", section: "Abort",
+			want: caChecks("next -> retired")},
 		{id: "host_setup_pop", file: "host-setup.md", section: "Registering a host in the directory",
 			want: []string{"successor_pop", "CHANGED"}},
 		{id: "machine_identities_pop", file: "machine-identities.md", section: "Renewal needs pop.machines",
@@ -296,6 +310,7 @@ func normalizeSpace(s string) string { return strings.Join(strings.Fields(s), " 
 var policyCheckPrefixes = []string{
 	"Policy in force: v", "Successor policy: unchanged, every field carried over", "WARNING: this successor changes",
 	"Previous root keys (threshold", "Root keys (threshold", "pop hosts=", "pop: none (", "webauthn rp_id ", "pop.hosts is one-way",
+	"Root set: ", "CA entries: unchanged", "none -> next", "next -> retired",
 }
 
 // TestRootCeremonyPolicyChecks (03-14b, F04, F14): every successor-signing
@@ -340,6 +355,178 @@ func TestRootCeremonyPolicyChecks(t *testing.T) {
 			}
 			if !slices.ContainsFunc(out, func(o string) bool { return strings.Contains(o, p) }) {
 				t.Errorf("no ceremony golden prints %q", p)
+			}
+		}
+	})
+}
+
+// signerStateDir is the signer's state directory, which keyroster-signer
+// owns (03-12b).
+const signerStateDir = "/var/lib/keyroster-signer"
+
+var (
+	shellBinding  = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=("?)` + regexp.QuoteMeta(signerStateDir) + `("?)$`)
+	singleQuoted  = regexp.MustCompile(`'[^']*'`)
+	shellRedirect = regexp.MustCompile(`[0-9]*(>>|>|<)\s*("?)([^\s"';|&]+)`)
+)
+
+// signerDirLinkSafety checks the shell lines of text's fenced code blocks
+// for a root write below the signer's state directory, which follows any
+// link keyroster-signer planted there (03-12b, the lesson of 03-12's
+// restore block). It is an allowlist: after joining backslash-continued
+// lines, every line that names the directory, or a variable bound to it
+// earlier in the block, must be a command that starts with runuser -u
+// keyroster-signer, an rm -f of direct children of the state directory
+// ("$S/<name>", never one below incoming), or a read-only lock open; and,
+// with single-quoted text removed (the signer's own shell opens what is
+// quoted there), no redirect the root shell performs may name the
+// directory or the variable. It returns the refused lines.
+func signerDirLinkSafety(text string) []string {
+	var bad []string
+	inBlock := false
+	var block []string
+	check := func(lines []string) {
+		var joined []string
+		cur := ""
+		for _, l := range lines {
+			t := strings.TrimSpace(l)
+			if strings.HasSuffix(t, "\\") {
+				cur += strings.TrimSuffix(t, "\\") + " "
+				continue
+			}
+			joined = append(joined, strings.Join(strings.Fields(cur+t), " "))
+			cur = ""
+		}
+		if cur != "" {
+			joined = append(joined, strings.Join(strings.Fields(cur), " "))
+		}
+		vars := []string{}
+		for _, l := range joined {
+			if l == "" || strings.HasPrefix(l, "#") {
+				continue
+			}
+			if m := shellBinding.FindStringSubmatch(l); m != nil {
+				vars = append(vars, m[1])
+				continue
+			}
+			names := func(s string) bool {
+				for _, dir := range stateDirNames(vars) {
+					if strings.Contains(s, dir) {
+						return true
+					}
+				}
+				return false
+			}
+			if !names(l) {
+				continue
+			}
+			unquoted := singleQuoted.ReplaceAllString(l, "''")
+			lockOpen := false
+			for _, dir := range stateDirNames(vars) {
+				if regexp.MustCompile(`^exec [0-9]+<"?` + regexp.QuoteMeta(dir) + `/signer\.lock"?$`).MatchString(l) {
+					lockOpen = true
+				}
+			}
+			allowed := lockOpen || strings.HasPrefix(l, "runuser -u keyroster-signer ") || directChildRemoval(l, vars)
+			if !allowed {
+				bad = append(bad, l)
+				continue
+			}
+			if lockOpen {
+				continue
+			}
+			for _, m := range shellRedirect.FindAllStringSubmatch(unquoted, -1) {
+				if names(m[3]) {
+					bad = append(bad, l)
+					break
+				}
+			}
+		}
+	}
+	for _, l := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "```") {
+			if inBlock {
+				check(block)
+				block = nil
+			}
+			inBlock = !inBlock
+			continue
+		}
+		if inBlock {
+			block = append(block, l)
+		}
+	}
+	return bad
+}
+
+// stateDirNames are the ways a shell line names the state directory: the
+// literal path, and $V and ${V} for each variable V bound to it.
+func stateDirNames(vars []string) []string {
+	out := []string{signerStateDir}
+	for _, v := range vars {
+		out = append(out, "$"+v, "${"+v+"}")
+	}
+	return out
+}
+
+// directChildRemoval reports whether l is an rm -f whose every operand is a
+// direct child of the state directory ("$S/<name>" for a variable S bound
+// to it, or the literal path), never incoming or anything below it.
+func directChildRemoval(l string, vars []string) bool {
+	ops, ok := strings.CutPrefix(l, "rm -f ")
+	if !ok {
+		return false
+	}
+	for _, op := range strings.Fields(ops) {
+		op = strings.Trim(op, `"`)
+		name := ""
+		for _, dir := range stateDirNames(vars) {
+			if rest, ok := strings.CutPrefix(op, dir+"/"); ok {
+				name = rest
+			}
+		}
+		if name == "" || strings.Contains(name, "/") || name == "incoming" || strings.ContainsAny(name, "*?[") {
+			return false
+		}
+	}
+	return true
+}
+
+// TestCARotationRunbookLinkSafety (03-12b): in ca-rotation.md root runs
+// nothing below the signer's state directory: the files below incoming/
+// are removed, written and read only as keyroster-signer, in the pinned
+// forms. The fixture subtests pin what the checker refuses and accepts.
+func TestCARotationRunbookLinkSafety(t *testing.T) {
+	block := func(lines ...string) string { return "```\n" + strings.Join(lines, "\n") + "\n```\n" }
+	for _, c := range []struct {
+		name string
+		text string
+		bad  bool
+	}{
+		{"one_line_root_write_refused", block("install -o keyroster-signer -g keyroster-signer -m 0600 /media/transfer/ceremony/* /var/lib/keyroster-signer/incoming/"), true},
+		{"continuation_line_write_refused", block("install -o keyroster-signer -g keyroster-signer -m 0600 \\", "  /media/transfer/ceremony/* /var/lib/keyroster-signer/incoming/"), true},
+		{"root_redirect_refused", block("S=/var/lib/keyroster-signer", `runuser -u keyroster-signer -- cat /media/transfer/x >"$S/incoming/y"`), true},
+		{"root_rm_under_incoming_refused", block("S=/var/lib/keyroster-signer", `rm -f "$S/incoming/bundle.json"`), true},
+		{"runuser_form_accepted", block("S=/var/lib/keyroster-signer",
+			`runuser -u keyroster-signer -- rm -f "$S/incoming/bundle.json" \`, `  "$S/incoming/policy.json"`,
+			`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/incoming/bundle.json" <"/media/transfer/succ/bundle.json"`,
+			`runuser -u keyroster-signer -- cat "$S/incoming/user-g2.json" >/media/transfer/user-g2.json`,
+			`rm -f "$S/restore-recovery-pending"`, `exec 9<"$S/signer.lock"`), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := signerDirLinkSafety(c.text); (len(got) != 0) != c.bad {
+				t.Fatalf("signerDirLinkSafety refused %q, want refused %t", got, c.bad)
+			}
+		})
+	}
+	t.Run("runbook_blocks_pass", func(t *testing.T) {
+		data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "ca-rotation.md")))
+		if bad := signerDirLinkSafety(data); len(bad) != 0 {
+			t.Fatalf("ca-rotation.md runs, as root, below the signer's state directory:\n%s", strings.Join(bad, "\n"))
+		}
+		for _, want := range []string{`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"'`, "runuser -u keyroster-signer -- rm -f"} {
+			if !strings.Contains(data, want) {
+				t.Errorf("ca-rotation.md lacks %q", want)
 			}
 		}
 	})
