@@ -105,18 +105,27 @@ type caFlagValue struct {
 	gen        uint32
 }
 
+// usageError is a usage refusal of root sign's CA flags: the text root
+// sign prints after "root sign: ", in the output contract's words, which
+// name the flags' forms (03-12b).
+type usageError string
+
+func (u usageError) Error() string { return string(u) }
+
+func usagef(format string, args ...any) error { return usageError(fmt.Sprintf(format, args...)) }
+
 // parseCAFlag splits one value of flag; sep is '=' or ':'. A usage error is
 // returned as the text root sign prints after "root sign: ".
 func parseCAFlag(flag, value string, sep byte) (caFlagValue, error) {
 	role, rest, found := strings.Cut(value, string(sep))
 	notGen := func() error {
-		return fmt.Errorf("%s %s: want ROLE:GEN with GEN a decimal generation number from 1 to 4294967295", flag, value)
+		return usagef("%s %s: want ROLE:GEN with GEN a decimal generation number from 1 to 4294967295", flag, value)
 	}
 	if sep == ':' && !found {
 		return caFlagValue{}, notGen()
 	}
 	if !slices.Contains(caChangeRoles, role) {
-		return caFlagValue{}, fmt.Errorf("%s %s: the role is not one of user, host and machine", flag, value)
+		return caFlagValue{}, usagef("%s %s: the role is not one of user, host and machine", flag, value)
 	}
 	v := caFlagValue{role: role, rest: rest}
 	if sep == ':' {
@@ -190,25 +199,25 @@ func parseCAChanges(next, fingerprint, retire []string) (*caChanges, error) {
 	}
 	for _, role := range order {
 		if named[role] > 1 {
-			return nil, fmt.Errorf("at most one CA change per role: %s is named more than once", role)
+			return nil, usagef("at most one CA change per role: %s is named more than once", role)
 		}
 	}
 	for _, role := range caChangeRoles {
 		if fpNamed[role] > 1 {
-			return nil, fmt.Errorf("at most one CA change per role: %s is named more than once", role)
+			return nil, usagef("at most one CA change per role: %s is named more than once", role)
 		}
 	}
 	for _, role := range caChangeRoles {
 		if _, ok := c.next[role]; ok {
 			if _, ok := c.fingerprint[role]; !ok {
-				return nil, fmt.Errorf("--ca-next %s needs --ca-next-fingerprint %s=SHA256:...", role, role)
+				return nil, usagef("--ca-next %s needs --ca-next-fingerprint %s=SHA256:...", role, role)
 			}
 		}
 	}
 	for _, role := range caChangeRoles {
 		if _, ok := c.fingerprint[role]; ok {
 			if _, ok := c.next[role]; !ok {
-				return nil, fmt.Errorf("--ca-next-fingerprint %s needs --ca-next %s=FILE", role, role)
+				return nil, usagef("--ca-next-fingerprint %s needs --ca-next %s=FILE", role, role)
 			}
 		}
 	}

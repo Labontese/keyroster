@@ -379,7 +379,7 @@ func checkInvariants(t *testing.T, kind, got string) {
 		switch {
 		case count("Root set: ") != 1:
 			t.Errorf("invariant: %d \"Root set: \" lines, want exactly 1", count("Root set: "))
-		case !(unchanged == 1 && changed == 0) && !(unchanged == 0 && changed >= 1):
+		case (unchanged != 1 || changed != 0) && (unchanged != 0 || changed == 0):
 			t.Errorf("invariant: %d \"CA entries: unchanged\" lines and %d \"CA <role> gen \" lines; want one and none, or none and at least one", unchanged, changed)
 		default:
 			for i, l := range lines {
