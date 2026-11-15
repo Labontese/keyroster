@@ -3,6 +3,7 @@ package signer
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -153,6 +154,51 @@ func TestPrepareGeneration(t *testing.T) {
 		unchanged(t, e, leaves, rows)
 		if n := e.be.provisionCount(); n != 0 {
 			t.Fatalf("the backend was asked to create %d keys before the log was checked", n)
+		}
+	})
+	// PR #102 review (I2): the stored bundle and policy are the inputs of
+	// the distinctness check, so a trust_bundle row the log does not
+	// record is refused before any key is selected or created.
+	t.Run("unlogged_policy_row_refused", func(t *testing.T) {
+		e := newGenEnv(t)
+		admin := held(e, e.fx.Admins[0])
+		// The installed policy with admin 0's key replaced, so that the
+		// row no longer names it: the row is edited and the log is left
+		// as it is.
+		_, p := installedDocs(t, e.db)
+		p.Admins[0].Key = trust.FormatKey(newEd25519(t).PublicKey())
+		pol, err := p.Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.exec(t, `UPDATE trust_bundle SET policy = ? WHERE version = (SELECT max(version) FROM trust_bundle)`, pol)
+		refusedWith(t, e, keystore.RoleUser, admin, errLogMismatch)
+		refusedWith(t, e, keystore.RoleUser, "", errLogMismatch)
+		if n := e.be.provisionCount(); n != 0 {
+			t.Fatalf("the backend was asked to create %d keys over an unlogged policy row", n)
+		}
+	})
+	t.Run("bundle_row_without_install_leaf_refused", func(t *testing.T) {
+		fx := NewFixture(t, 1, 1)
+		e := &genEnv{fx: fx, dbPath: filepath.Join(t.TempDir(), "signer.db"), be: newGenBackend(fx)}
+		db, err := signerdb.Open(e.dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		e.db = db
+		cas, err := InitCA(ctx, db, e.be, "test", map[string]string{}, fx.Selection(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The signed genesis documents, stored by SQL: the log records no
+		// bundle_install entry.
+		b, bs, p, ps := SignDocs(t, fx.GenesisBundle(t, cas, fx.Policy()), fx.Policy(), fx.Root)
+		e.exec(t, `INSERT INTO trust_bundle (version, bundle, bundle_sigs, policy, policy_sigs, installed_at_us) VALUES (1, ?, ?, ?, ?, 1)`, b, bs, p, ps)
+		refusedWith(t, e, keystore.RoleUser, "", errLogMismatch)
+		refusedWith(t, e, keystore.RoleUser, held(e, fx.Admins[0]), errLogMismatch)
+		if n := e.be.provisionCount(); n != 0 {
+			t.Fatalf("the backend was asked to create %d keys over a bundle row without a bundle_install entry", n)
 		}
 	})
 	t.Run("location_persisted_and_passed", func(t *testing.T) {
