@@ -4889,6 +4889,103 @@ func TestVerifyCAGeneration(t *testing.T) {
 		f.addBundle(f.signDocs(f.successor(g, withNext(k, 2)), f.policy(), f.root))
 		ok(t, f)
 	})
+	// chain is the bundle after g (version g's plus 1), with edit applied,
+	// signed by f's root (03-12b).
+	chain := func(f *fixture, g docs, edit func(*trust.Bundle)) docs {
+		b := f.successor(g, func(b *trust.Bundle) {
+			b.CAs = slices.Clone(b.CAs)
+			if edit != nil {
+				edit(b)
+			}
+		})
+		b.Version = g.version + 1
+		return f.signDocs(b, f.policy(), f.root)
+	}
+	// retire is the abort of the user CA generation gen.
+	retire := func(gen uint32) func(*trust.Bundle) {
+		return func(b *trust.Bundle) {
+			for i := range b.CAs {
+				if b.CAs[i].Role == trust.RoleUser && b.CAs[i].Generation == gen {
+					b.CAs[i].State = "retired"
+				}
+			}
+		}
+	}
+	// nextAfter adds generation gen of the user CA with key pub as next,
+	// after the last user entry.
+	nextAfter := func(pub ssh.PublicKey, gen uint32) func(*trust.Bundle) {
+		return func(b *trust.Bundle) {
+			at := 0
+			for i, c := range b.CAs {
+				if c.Role == trust.RoleUser {
+					at = i + 1
+				}
+			}
+			b.CAs = slices.Insert(b.CAs, at, trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(pub), Alg: pub.Type(), Custody: "agent", State: "next", Generation: gen})
+		}
+	}
+	// issueBy logs one certificate signed by ca instead of the active user
+	// CA.
+	issueBy := func(f *fixture, ca ssh.Signer) {
+		active := f.ca
+		f.ca = ca
+		f.addIssue()
+		f.ca = active
+	}
+	refusedWith := func(t *testing.T, f *fixture, text string) {
+		t.Helper()
+		_, err := f.verify(join(f.lines()), nil)
+		if err == nil || !strings.Contains(err.Error(), text) {
+			t.Fatalf("Verify = %v, want a refusal naming %q", err, text)
+		}
+	}
+	// nextInForce is a bare fixture whose bundle in force (version 2) adds
+	// the logged generation 2 of user, k, as next.
+	nextInForce := func(t *testing.T) (*fixture, docs, ssh.Signer) {
+		t.Helper()
+		f := newBareFixture(t, "ed25519")
+		g := f.signDocs(f.genesis(), f.policy(), f.root)
+		f.addBundle(g)
+		k := newSigner(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, k.PublicKey()))
+		v2 := chain(f, g, nextAfter(k.PublicKey(), 2))
+		f.addBundle(v2)
+		return f, v2, k
+	}
+	t.Run("abort_ok", func(t *testing.T) {
+		f, v2, _ := nextInForce(t)
+		f.addBundle(chain(f, v2, retire(2)))
+		f.addIssue()
+		ok(t, f)
+	})
+	t.Run("next_after_abort_ok", func(t *testing.T) {
+		f, v2, _ := nextInForce(t)
+		v3 := chain(f, v2, retire(2))
+		f.addBundle(v3)
+		k3 := key(t)
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 3, k3))
+		f.addBundle(chain(f, v3, nextAfter(k3, 3)))
+		f.addIssue()
+		ok(t, f)
+	})
+	t.Run("issue_by_next_refused", func(t *testing.T) {
+		// The signer never signs with a next key: audit refuses an issue
+		// entry signed by one.
+		f, _, k := nextInForce(t)
+		f.addIssue()
+		ok(t, f)
+		issueBy(f, k)
+		refusedWith(t, f, "not by the role's active CA")
+	})
+	t.Run("abort_key_never_signed", func(t *testing.T) {
+		f, v2, k := nextInForce(t)
+		f.addIssue()
+		f.addBundle(chain(f, v2, retire(2)))
+		f.addIssue()
+		ok(t, f) // the control: the active key before and after the abort
+		issueBy(f, k)
+		refusedWith(t, f, "not by the role's active CA")
+	})
 	t.Run("active_not_logged_refused_when_ca_init_precedes", func(t *testing.T) {
 		f, g := initFixture(t, nil)
 		other := key(t)

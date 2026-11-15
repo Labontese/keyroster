@@ -459,7 +459,8 @@ func TestSignerRestartMixedBundle(t *testing.T) {
 		if code, out := runSigner(t, args...); code != 0 {
 			t.Fatalf("ca-init exited %d:\n%s", code, out)
 		}
-		install(t, st, genesisFiles(t, st))
+		g := genesisFiles(t, st)
+		install(t, st, g)
 		outFile := filepath.Join(t.TempDir(), "user-g2.json")
 		code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--out", outFile)
 		if code != 0 {
@@ -492,20 +493,24 @@ func TestSignerRestartMixedBundle(t *testing.T) {
 			}
 		}
 		check(t, st, ssh.FingerprintSHA256(pub1), ssh.FingerprintSHA256(pub2))
+		// With generation 2 next in the bundle in force (03-12b): one more
+		// production-factor decrypt of generation 2, no new key.
+		installNext(t, st, g, genesisChain(t, g), pf)
+		check(t, st, ssh.FingerprintSHA256(pub1), ssh.FingerprintSHA256(pub2))
 	})
 	t.Run("agent", func(t *testing.T) {
 		st := newRotateState(t)
-		install(t, st, genesisFiles(t, st))
-		fp2 := st.addKey(t)
-		if code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--key", fp2,
-			"--out", filepath.Join(t.TempDir(), "user-g2.json")); code != 0 {
-			t.Fatalf("ca-rotate prepare exited %d:\n%s", code, out)
-		}
+		g := genesisFiles(t, st)
+		install(t, st, g)
+		fp2, pf := prepareNext(t, st, "user")
 		user, _ := st.caPubKeys(t).Key(trust.RoleUser)
 		pub1, err := trust.ParseKey(user.Key)
 		if err != nil {
 			t.Fatal(err)
 		}
+		check(t, st, ssh.FingerprintSHA256(pub1), fp2)
+		// With generation 2 next in the bundle in force (03-12b).
+		installNext(t, st, g, genesisChain(t, g), pf)
 		check(t, st, ssh.FingerprintSHA256(pub1), fp2)
 	})
 }
