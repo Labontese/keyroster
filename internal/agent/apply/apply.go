@@ -1031,13 +1031,12 @@ func (e *engine) forward(ctx context.Context) error {
 				// agent's, and its refusals name a configuration in which
 				// sshd may not read the agent's files (a foreign trust
 				// setting, no sshd_config.d), may not take its keys (FIPS)
-				// or cannot be self-tested (no loopback listener). A
-				// narrowed user_ca_keys is then not known to narrow what
-				// sshd trusts, and dropDue, which never writes the drop-in,
-				// would commit as last-good a generation running under a
-				// drop-in the agent did not write. The drop waits for the
-				// operator's repair, as every KRL does; check reports the
-				// drop-in's drift and trust_expired meanwhile.
+				// or cannot be self-tested (no loopback listener). A due
+				// drop waits while the drop-in is not the agent's, at every
+				// route (dropDue's own check), so dropDue would only return
+				// err here. The drop waits for the operator's repair, as
+				// every KRL does; check reports the drop-in's drift and
+				// trust_expired meanwhile.
 				return err
 			}
 			if e.cfg.DryRun {
@@ -1322,6 +1321,16 @@ func (e *engine) forward(ctx context.Context) error {
 // a removal and needs none of that, so none of it runs, and host
 // certificates, probe pairs and a Phase 2 takeover are not touched. Nothing
 // runs in a dry run, before a first install, or when nothing is due.
+//
+// Nor while the drop-in on disk is not the agent's (dropInIsWanted, the
+// comparison preflightApply makes; PR #108 review), whatever the route.
+// dropDue never writes the drop-in, so its commit would make last-good a
+// generation running under a drop-in the agent did not write, and the
+// commit removes dropin.prev. A narrowed user_ca_keys is then not known to
+// narrow what sshd trusts either. A drop-in that does not read counts as
+// not the agent's. The drop waits, and cause is returned unchanged, until a
+// run repairs the drop-in or the operator does; check reports the drop-in's
+// drift and trust_expired meanwhile.
 func (e *engine) dropDue(ctx context.Context, stored *state.Stored, cause error) error {
 	if e.cfg.DryRun || stored == nil || stored.Bundle == nil {
 		return cause
@@ -1332,6 +1341,9 @@ func (e *engine) dropDue(ctx context.Context, stored *state.Stored, cause error)
 	}
 	lg, err := e.resolveLink(e.l.LastGood())
 	if err != nil || lg.kind != linkAgent {
+		return cause
+	}
+	if ok, err := e.dropInIsWanted(); err != nil || !ok {
 		return cause
 	}
 	cur, curLink, err := e.readCurrent()

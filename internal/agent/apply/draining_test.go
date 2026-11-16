@@ -493,9 +493,12 @@ func TestDrainingDropRefusedGeneration(t *testing.T) {
 // disk is not the agent's, a due drop waits at every route, as it does at
 // the preflight: a capture that does not verify, and a generation the host
 // refuses. The apply returns the error, and user_ca_keys, last-good,
-// dropin.prev, the drop-in and the latch stay as they were.
+// dropin.prev and the drop-in stay as they were. The drop writes no latch:
+// with a capture that does not verify none is written, and a refused
+// generation's latch is the one forward's own render wrote before the host
+// refused it, as on the preflight route.
 func TestDrainingDropWaitsForDropIn(t *testing.T) {
-	waits := func(t *testing.T, h *testHost, kind error) {
+	waits := func(t *testing.T, h *testHost, kind error, wantLatch []byte) {
 		t.Helper()
 		appendFile(t, h.l.DropIn(), "# managed by ansible\n")
 		prev := []byte("# an earlier drop-in\n")
@@ -519,22 +522,22 @@ func TestDrainingDropWaitsForDropIn(t *testing.T) {
 		if got := readFile(t, h.l.DropIn()); got != dropIn {
 			t.Fatalf("DROPIN: the drop-in = %q, want %q unchanged", got, dropIn)
 		}
-		if b := latchFile(t, h); b != nil {
-			t.Fatalf("DROPIN: the latch = %q, want none written", b)
+		if b := latchFile(t, h); !bytes.Equal(b, wantLatch) {
+			t.Fatalf("DROPIN: the latch = %q, want %q", b, wantLatch)
 		}
 	}
 	t.Run("capture_not_verified", func(t *testing.T) {
 		h, _ := newDrainingHost(t)
 		h.installed("role:ops")
 		h.publishUnverifiedKRL()
-		waits(t, h, state.ErrKRL)
+		waits(t, h, state.ErrKRL, nil)
 	})
 	t.Run("generation_refused", func(t *testing.T) {
-		h, _ := newDrainingHost(t)
+		h, old := newDrainingHost(t)
 		h.installed("role:ops")
 		h.run.queryCode = 255
 		h.publishKRL(7)
-		waits(t, h, ErrKRLRejected)
+		waits(t, h, ErrKRLRejected, latchText(t, latchKey{fp(old), drainAt}))
 	})
 }
 
