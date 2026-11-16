@@ -147,6 +147,9 @@ func generationFacts(gens []signerdb.CAGeneration, b *trust.Bundle) []doctor.Gen
 			for _, ca := range b.CAs {
 				if ca.Key == key {
 					gf.State = ca.State
+					if ca.State == "draining" {
+						gf.TrustedUntil = ca.TrustedUntil // 03-12c
+					}
 				}
 			}
 			if b.OpsKey.Key == key || b.Log.Key == key {
