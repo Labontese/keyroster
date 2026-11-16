@@ -10,6 +10,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -147,9 +148,9 @@ func (h *HostError) Unwrap() error { return h.Err }
 // rendered, the bundle's CA keys and the verified KRL, with no principals
 // files and no host, so certificate logins fail closed, as on the signer
 // (T-02-15); authorized_keys and the console are unaffected.
-func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
+func Render(v *state.Verified, hostKeys []ssh.PublicKey, at RenderAt) (*Generation, error) {
 	if v.DirectoryUnauthorized != nil {
-		return renderTrust(v)
+		return renderTrust(v, at)
 	}
 	if v.Directory == nil {
 		return nil, &HostError{Err: errNoDirectory, Unmatched: fingerprints(hostKeys)}
@@ -165,7 +166,7 @@ func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
 	if host.Status != directory.StatusActive {
 		return nil, &HostError{Err: fmt.Errorf("%w: host %s is %s in directory version %d", ErrHostNotInDirectory, host.Name, host.Status, v.Directory.Version)}
 	}
-	g, err := renderTrust(v)
+	g, err := renderTrust(v, at)
 	if err != nil {
 		return nil, err
 	}
@@ -222,12 +223,12 @@ func hostsForKeys(d *directory.Directory, hostKeys []ssh.PublicKey) []*directory
 // a verified bundle's CA keys never wait for a directory. It returns the
 // generation and the host status; a refusal of any other kind is returned
 // as is.
-func RenderFallback(v *state.Verified, hostKeys []ssh.PublicKey, lastHost string, lastGood *Generation, refusal error) (*Generation, string, error) {
+func RenderFallback(v *state.Verified, hostKeys []ssh.PublicKey, lastHost string, lastGood *Generation, refusal error, at RenderAt) (*Generation, string, error) {
 	if v.Directory == nil {
 		if lastGood == nil || !errors.Is(refusal, ErrHostNotInDirectory) {
 			return nil, "", refusal
 		}
-		g, err := renderTrust(v)
+		g, err := renderTrust(v, at)
 		if err != nil {
 			return nil, "", err
 		}
@@ -254,7 +255,7 @@ func RenderFallback(v *state.Verified, hostKeys []ssh.PublicKey, lastHost string
 			status = HostDisabled
 		}
 	}
-	g, err := renderTrust(v)
+	g, err := renderTrust(v, at)
 	if err != nil {
 		return nil, "", err
 	}
@@ -275,9 +276,17 @@ func keepPrincipals(g, lastGood *Generation) {
 	}
 }
 
+// RenderAt is what a render reads besides the verified state (03-12c):
+// Now is the engine's clock, and Dropped, when set, names the CA entries
+// the render leaves out (the agent's drop latch fills it).
+type RenderAt struct {
+	Now     time.Time
+	Dropped func(trust.CAEntry) bool
+}
+
 // renderTrust is the part of a generation that does not depend on the
 // host entry: user_ca_keys and revoked.krl.
-func renderTrust(v *state.Verified) (*Generation, error) {
+func renderTrust(v *state.Verified, _ RenderAt) (*Generation, error) {
 	g := &Generation{Files: map[string][]byte{}}
 	var ca bytes.Buffer
 	for _, role := range []string{trust.RoleUser, trust.RoleMachine} {

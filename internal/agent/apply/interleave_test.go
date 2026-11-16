@@ -410,7 +410,7 @@ func (m *modelHost) record(n uint64) {
 // render writes the generation for s.
 func (m *modelHost) render(s spec) *Generation {
 	m.t.Helper()
-	g, err := Render(m.u.verified(m.t, s), []ssh.PublicKey{m.u.host})
+	g, err := Render(m.u.verified(m.t, s), []ssh.PublicKey{m.u.host}, RenderAt{Now: newFakeClock().Now()})
 	if err != nil {
 		m.t.Fatal(err)
 	}
@@ -614,11 +614,11 @@ func TestSwapInterleaving(t *testing.T) {
 	t.Run("collapsed_single_swap", func(t *testing.T) {
 		t.Parallel()
 		collapses := func(a, b spec) bool {
-			m, err := Render(u.verified(t, a), []ssh.PublicKey{u.host})
+			m, err := Render(u.verified(t, a), []ssh.PublicKey{u.host}, RenderAt{Now: newFakeClock().Now()})
 			if err != nil {
 				t.Fatal(err)
 			}
-			n, err := Render(u.verified(t, b), []ssh.PublicKey{u.host})
+			n, err := Render(u.verified(t, b), []ssh.PublicKey{u.host}, RenderAt{Now: newFakeClock().Now()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -831,7 +831,7 @@ func TestIntermediate(t *testing.T) {
 		}
 	})
 	t.Run("every_generation_field_classified", func(t *testing.T) {
-		g, err := Render(u.verified(t, randomSpec(&prng{s: 11})), []ssh.PublicKey{u.host})
+		g, err := Render(u.verified(t, randomSpec(&prng{s: 11})), []ssh.PublicKey{u.host}, RenderAt{Now: newFakeClock().Now()})
 		if err != nil {
 			t.Fatal(err)
 		}

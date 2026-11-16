@@ -1287,7 +1287,9 @@ func (e *engine) keepKRL(g, cur *Generation, curLink link) {
 // otherwise they are dropped first, so a fallback renders the trust files
 // alone and still reports the host status.
 func (e *engine) render(v *state.Verified, cur *Generation, curLink link) (*Generation, error) {
-	g, err := Render(v, e.keys)
+	// 03-12c: one clock reading for both renders of this call.
+	at := RenderAt{Now: e.clock.Now()}
+	g, err := Render(v, e.keys, at)
 	if err == nil {
 		if v.DirectoryUnauthorized != nil {
 			// F03 (03-08f): Render's trust-only generation names no host;
@@ -1344,7 +1346,7 @@ func (e *engine) render(v *state.Verified, cur *Generation, curLink link) (*Gene
 			return ok && class == FilePrincipals
 		})
 	}
-	g, status, ferr := RenderFallback(v, e.keys, lastHost, lgGen, err)
+	g, status, ferr := RenderFallback(v, e.keys, lastHost, lgGen, err, at)
 	if ferr != nil {
 		return nil, ferr
 	}
