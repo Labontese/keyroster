@@ -2496,9 +2496,13 @@ steps into the rotation.
    for the next end from the accepted bundle, also after a restart with an
    empty spool and after a failed apply; an end that a failed apply
    missed is applied again after the retry delay. While the drop-in
-   differs from the agent's own and the apply's preflight refuses the
-   host's configuration, the drop waits until that is repaired, as every
-   KRL does: `check` reports the drift and `trust_expired`. The agent
+   differs from the agent's own, the drop waits when the spool does not
+   read, offers a document the agent refuses or offers one whose
+   generation the host refuses, and when the apply's preflight refuses
+   the host's configuration: the agent commits no narrowing under a
+   drop-in it did not write. It lands with the next apply that goes
+   through, which rewrites the drop-in, as every KRL does; `check`
+   reports the drift and `trust_expired` meanwhile. The agent
    records every key it drops and never takes one back: a clock stepped
    back, a rollback or `keyroster-agent reset-directory` does not bring it
    back. A clock stepped forward drops the keys being drained early, for
