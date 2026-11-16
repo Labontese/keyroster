@@ -4,6 +4,7 @@ package apply
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -58,6 +59,29 @@ func latchFile(t *testing.T, h *testHost) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// syntheticLatch is a canonical latch of n keys with made-up SHA-256
+// fingerprints of a real one's length, sorted (PR #107 review).
+func syntheticLatch(t *testing.T, n int) []byte {
+	t.Helper()
+	keys := make([]latchKey, n)
+	for i := range keys {
+		keys[i] = latchKey{Fingerprint: fmt.Sprintf("SHA256:%043d", i), TrustedUntil: drainAt}
+	}
+	return latchText(t, keys...)
+}
+
+// latchUnderBound is the most synthetic keys whose latch is at most
+// maxTrustLatch bytes; one more key, of any fingerprint, is above it.
+func latchUnderBound(t *testing.T) int {
+	t.Helper()
+	one, two := len(syntheticLatch(t, 1)), len(syntheticLatch(t, 2))
+	n := 1 + (maxTrustLatch-one)/(two-one)
+	if len(syntheticLatch(t, n)) > maxTrustLatch || len(syntheticLatch(t, n+1)) <= maxTrustLatch {
+		t.Fatalf("LATCH: %d synthetic keys are %d bytes and %d are %d; want the bound %d between them", n, len(syntheticLatch(t, n)), n+1, len(syntheticLatch(t, n+1)), maxTrustLatch)
+	}
+	return n
 }
 
 // TestLatch (03-12c): the drop latch trust-dropped.json, its fail-closed
@@ -117,7 +141,13 @@ func TestLatch(t *testing.T) {
 				}
 			}},
 			{"oversize", func(t *testing.T, h *testHost) {
-				writeLatchFile(t, h, append(bytes.TrimSuffix(valid, []byte("}\n")), []byte(strings.Repeat(" ", 64<<10)+"}\n")...), 0o600)
+				// PR #107 review: canonical and parsable, so only the 64 KiB
+				// bound refuses it.
+				big := syntheticLatch(t, latchUnderBound(t)+1)
+				if _, err := parseLatch(big); err != nil {
+					t.Fatalf("LATCH: the oversize latch does not parse: %v", err)
+				}
+				writeLatchFile(t, h, big, 0o600)
 			}},
 			{"non_canonical", func(t *testing.T, h *testHost) {
 				writeLatchFile(t, h, []byte("{\"version\": 1, \"keys\": []}\n"), 0o600)
@@ -189,6 +219,21 @@ func TestLatch(t *testing.T) {
 		st, err := os.Stat(h.l.State(trustLatchFile))
 		if err != nil || !st.ModTime().Equal(old) || !bytes.Equal(latchFile(t, h), want) {
 			t.Fatalf("LATCH: a record with nothing new rewrote the latch: %v, %v", st, err)
+		}
+	})
+	t.Run("record_refuses_above_the_bound", func(t *testing.T) {
+		// PR #107 review: a record that would take the latch above 64 KiB
+		// fails, and the latch stays as it was.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		full := syntheticLatch(t, latchUnderBound(t))
+		writeLatchFile(t, h, full, 0o600)
+		doc := f.withBundle(3, f.drainingCA(trust.RoleUser, seedKey(t, seedDrainOld), drainAt))
+		if err := lockedEngine(h).recordDropped(verifiedOf(t, doc.Body), past); err == nil || !strings.Contains(err.Error(), "above 65536") {
+			t.Fatalf("LATCH: a record above the bound: %v, want the refusal", err)
+		}
+		if got := latchFile(t, h); !bytes.Equal(got, full) {
+			t.Fatalf("LATCH: the refused record changed the latch to %d bytes", len(got))
 		}
 	})
 	t.Run("path_is_allowed", func(t *testing.T) {
