@@ -154,12 +154,14 @@ trust the key in `host status` arrives in 03-12d.
 
 Abort when the `next` key is wrong, its fingerprint was not the one read
 aloud after all, or it may be compromised. Run the same ceremony on the
-bundle in force (the one ceremony 1 installed) as `--prev`, with its
-recorded SHA-256, and the abort flag instead of the two next flags:
+bundle in force as `--prev`: the successor ceremony 1 signed and
+installed, in `/media/transfer/succ` with its policy and `.sigs` files,
+with the SHA-256 recorded for it, not ceremony 1's own `--prev` directory.
+Pass the abort flag instead of the two next flags:
 
 ```
-keyroster root sign --prev /media/transfer/prev --prev-sha256 <recorded sha256> \
-  --roots roots.pub --threshold <N> --policy /media/transfer/prev/policy.json \
+keyroster root sign --prev /media/transfer/succ --prev-sha256 <recorded sha256 of succ/bundle.json> \
+  --roots roots.pub --threshold <N> --policy /media/transfer/succ/policy.json \
   --out-dir /media/transfer/abort --agent-key SHA256:<root> \
   --ca-retire user:2
 ```
