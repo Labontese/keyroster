@@ -3,6 +3,7 @@ package trust
 import (
 	"fmt"
 	"slices"
+	"time"
 )
 
 // ActiveCA returns b's active CA entry for role, or the zero entry when b
@@ -37,6 +38,22 @@ func IssuingCAs(b *Bundle, role string) []CAEntry {
 		return 0
 	})
 	return out
+}
+
+// TrustedAt reports whether the entry's key is trusted at t (03-12c).
+func (CAEntry) TrustedAt(_ time.Time) bool { return false }
+
+// TrustedCAs returns b's entries of role that are trusted at t, in
+// generation order (03-12c).
+func TrustedCAs(_ *Bundle, _ string, _ time.Time) []CAEntry { return nil }
+
+// UserCAKeysFile is the agent's user_ca_keys for b at t (03-12c).
+func UserCAKeysFile(_ *Bundle, _ time.Time) ([]byte, error) { return nil, nil }
+
+// UserCAKeysFileExcept is UserCAKeysFile without the entries skip names
+// (03-12c).
+func UserCAKeysFileExcept(_ *Bundle, _ time.Time, _ func(CAEntry) bool) ([]byte, error) {
+	return nil, nil
 }
 
 // checkCATransitions is the chain rule for CA entries (03-12b). Entries

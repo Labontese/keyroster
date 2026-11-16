@@ -424,9 +424,14 @@ func TestInstallNextBundle(t *testing.T) {
 		started(t, e)
 	})
 	t.Run("second_next_while_one_is_next_refused", func(t *testing.T) {
+		// 03-12c: Validate refuses a second next entry of a role when the
+		// bundle is parsed, before the chain rule runs.
 		e, _ := withNext(t)
 		g3 := e.mustPrepare(t, keystore.RoleUser)
-		_ = mustRefusedInstall(t, e, editedSuccessor(t, e.db, func(b *trust.Bundle) { insertCA(b, nextEntry(t, g3)) }, nil, e.fx.Root), trust.ErrVersionChain)
+		err := mustRefusedInstall(t, e, editedSuccessor(t, e.db, func(b *trust.Bundle) { insertCA(b, nextEntry(t, g3)) }, nil, e.fx.Root), trust.ErrInvalid)
+		if !strings.Contains(err.Error(), "more than one next entry") {
+			t.Fatalf("the refusal %q does not hold Validate's text", err)
+		}
 	})
 	t.Run("next_not_a_stored_generation_refused", func(t *testing.T) {
 		e := newGenEnv(t)

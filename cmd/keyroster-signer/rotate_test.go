@@ -648,17 +648,25 @@ func TestCANextTracer(t *testing.T) {
 	// refuse both first.
 	_, pf3 := prepareNext(t, st, "user")
 	leaves := st.count(t, "SELECT count(*) FROM log_leaf")
-	for name, edit := range map[string]func(b *trust.Bundle){
-		"second_next": func(b *trust.Bundle) {
+	// 03-12c: a second next entry is refused by Validate when the bundle
+	// is parsed, before the chain rule runs.
+	for name, c := range map[string]struct {
+		edit func(b *trust.Bundle)
+		want []string
+	}{
+		"second_next": {edit: func(b *trust.Bundle) {
 			b.CAs = slices.Insert(b.CAs, 2, trust.CAEntry{Role: pf3.Role, Key: pf3.Key, Alg: pf3.Alg, Custody: pf3.Custody, State: "next", Generation: pf3.Generation})
-		},
-		"active_changed": func(b *trust.Bundle) { b.CAs[0].Key = pf3.Key },
+		}, want: []string{"more than one next entry"}},
+		"active_changed": {edit: func(b *trust.Bundle) { b.CAs[0].Key = pf3.Key },
+			want: []string{"trust: bundle version or prev hash breaks the chain", "CA user generation"}},
 	} {
 		bad := buildSuccessorDocs(t, v2, nil, nil)
-		edit(bad.b)
+		c.edit(bad.b)
 		code, out := installDocs(t, st, bad, g.root)
-		if code == 0 || !strings.Contains(out, "trust: bundle version or prev hash breaks the chain") || !strings.Contains(out, "CA user generation") {
-			t.Fatalf("%s: install-bundle exited %d, want the chain rule's refusal naming CA user generation:\n%s", name, code, out)
+		for _, w := range c.want {
+			if code != 1 || !strings.Contains(out, w) {
+				t.Fatalf("%s: install-bundle exited %d, want 1 and a refusal holding %q:\n%s", name, code, w, out)
+			}
 		}
 		if v := st.count(t, "SELECT COALESCE(MAX(version), 0) FROM trust_bundle"); v != 2 {
 			t.Fatalf("%s: installed bundle version %d after the refusal, want 2", name, v)

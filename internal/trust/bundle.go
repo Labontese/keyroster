@@ -95,6 +95,11 @@ type CAEntry struct {
 	Custody    string `json:"custody"`
 	State      string `json:"state"`
 	Generation uint32 `json:"generation"`
+	// TrustedUntil is the end of a draining entry's trust, a time in
+	// TimeFormat (03-12c): the one entry field that a state may leave
+	// empty. It is the last field with omitempty, so every entry that is
+	// not draining keeps its exact bytes.
+	TrustedUntil string `json:"trusted_until,omitempty"`
 }
 
 // KeyEntry is a non-CA online key (the ops key, the KRL authority used from

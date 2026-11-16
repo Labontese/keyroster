@@ -258,6 +258,7 @@ var pinnedBundleTypes = map[reflect.Type][]string{
 	reflect.TypeFor[trust.RootKey](): {"Key string key", "Custody string custody"},
 	reflect.TypeFor[trust.CAEntry](): {
 		"Role string role", "Key string key", "Alg string alg", "Custody string custody", "State string state", "Generation uint32 generation",
+		"TrustedUntil string trusted_until,omitempty",
 	},
 	reflect.TypeFor[trust.KeyEntry](): {"Key string key", "Alg string alg", "Custody string custody"},
 	reflect.TypeFor[trust.LogEntry](): {"Key string key", "Alg string alg", "Custody string custody", "Origin string origin"},
@@ -314,6 +315,15 @@ func TestBundleReflectGate(t *testing.T) {
 		"LogEntry.Alg":       func(b *trust.Bundle) { b.Log.Alg = ssh.KeyAlgoED25519 },
 		"LogEntry.Custody":   func(b *trust.Bundle) { b.Log.Custody = "tpm" },
 		"LogEntry.Origin":    func(b *trust.Bundle) { b.Log.Origin += "0" },
+		// 03-12c: another end of the draining entry baseEdits makes.
+		"CAEntry.TrustedUntil": func(b *trust.Bundle) { b.CAs[0].TrustedUntil = "2026-10-21T00:00:00Z" },
+	}
+	// baseEdits gives a mutation a base of its own (03-12c): a
+	// trusted_until shows only on a draining entry.
+	baseEdits := map[string]func(b *trust.Bundle){
+		"CAEntry.TrustedUntil": func(b *trust.Bundle) {
+			b.CAs[0].State, b.CAs[0].TrustedUntil = "draining", "2026-10-20T00:00:00Z"
+		},
 	}
 
 	t.Run("exemptions", func(t *testing.T) {
@@ -364,7 +374,6 @@ func TestBundleReflectGate(t *testing.T) {
 		}
 		return strings.Join(keep, "\n")
 	}
-	want := summary(base())
 	keys := make([]string, 0, len(mutations))
 	for k := range mutations {
 		keys = append(keys, k)
@@ -373,6 +382,10 @@ func TestBundleReflectGate(t *testing.T) {
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {
 			b := base()
+			if edit := baseEdits[key]; edit != nil {
+				edit(b)
+			}
+			want := summary(b)
 			mutations[key](b)
 			if summary(b) == want {
 				t.Errorf("Summary's output does not change when %s changes; %s", key, need)
