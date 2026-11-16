@@ -68,7 +68,11 @@ type RunConfig struct {
 //     (crash recovery), and again Retry after an apply that failed. While
 //     an apply leaves newer versions in the spool than its capture read
 //     (Report.SpoolMore) and moved forward, it runs again at once, at most
-//     maxCatchUpApplies times a round (PR #71 review F9).
+//     maxCatchUpApplies times a round (PR #71 review F9). A draining CA's
+//     end (Report.TrustDue), and a check that found a CA past its end
+//     still in user_ca_keys, make it run whatever the spool holds, also
+//     with no document or a spool that does not read (03-12c, PR #107
+//     review);
 //
 //  4. the drift check (Check, AGENT-05) runs after every round that
 //     applied, and every CheckEvery +- CheckJitter, in this goroutine, so
@@ -138,8 +142,13 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		probeStarted bool
 		// trustDue is the next draining CA's end (03-12c): the timer on
 		// the host's own clock that applies the drop with no new document.
-		// The retry after an error is failedAt's.
+		// A failed apply sets it too (PR #107 review): Report.TrustDue is
+		// always after the apply's clock, so each end is due once.
 		trustDue time.Time
+		// trustExpired: the last check found a CA past its end still in
+		// user_ca_keys (03-12c); the next round applies, after a failed
+		// apply only once Retry has passed (T-03-443).
+		trustExpired bool
 		// forceApply: a new probe pair arrived while an addition is held
 		// (03-10b, D9), so the next round applies at once.
 		forceApply bool
@@ -198,6 +207,7 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 	}
 	check := func() {
 		nextCheck = rc.Clock.Now().Add(jitter(rc.CheckEvery, rc.CheckJitter))
+		trustExpired = false
 		d, err := Check(ctx, rc.Config, l)
 		switch {
 		case errors.Is(err, ErrNotInstalled):
@@ -222,9 +232,7 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		for _, x := range d.TrustExpired {
 			logf("ERROR trust_expired: %s g%d %s ended %s and is still in user_ca_keys; applying", x.Role, x.Generation, x.Fingerprint, x.TrustedUntil)
 		}
-		if len(d.TrustExpired) > 0 && failedAt.IsZero() {
-			forceApply = true
-		}
+		trustExpired = len(d.TrustExpired) > 0
 		status(StatusUpdate{Checked: true, Drift: d})
 	}
 	for {
@@ -246,13 +254,17 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 				logf("answered the fetcher's enrollment request (%s)", l.Outbox()+"/"+EnrollPoPFile)
 			}
 			names, err := spoolDocuments(rc.Spool)
+			// A drop that is due does not depend on the spool (PR #107
+			// review): with no document, or a spool that does not read, the
+			// apply lands it from the accepted state (dropDue).
+			trustNow := (!trustDue.IsZero() && !rc.Clock.Now().Before(trustDue)) ||
+				(trustExpired && (failedAt.IsZero() || time.Since(failedAt) >= rc.Retry))
 			applied, checked := false, false
 			switch {
-			case err != nil:
+			case err != nil && !trustNow:
 				logf("ERROR spool: %v", err)
-			case names != "" && (!haveNames || names != lastNames || catchUp || forceApply || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry) ||
-				(!trustDue.IsZero() && !rc.Clock.Now().Before(trustDue))):
-				catchUp, forceApply = false, false
+			case trustNow || names != "" && (!haveNames || names != lastNames || catchUp || forceApply || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry)):
+				catchUp, forceApply, trustExpired = false, false, false
 				// A check after the round's applies, below.
 				nextCheck = time.Time{}
 				var prev *Report
@@ -264,10 +276,7 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 						rc.Out(r, err)
 					}
 					failedAt = time.Time{}
-					trustDue = time.Time{}
-					if err == nil {
-						trustDue = r.TrustDue
-					}
+					trustDue = r.TrustDue
 					if err != nil {
 						if !quiet {
 							logf("ERROR apply: %v", err)
