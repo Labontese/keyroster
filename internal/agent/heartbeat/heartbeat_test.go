@@ -383,3 +383,93 @@ func TestValidateProbeDetail(t *testing.T) {
 		t.Fatalf("an unknown top-level field: %v", err)
 	}
 }
+
+// statusSHA256Pre0312c is the SHA-256 of trust.CanonicalJSON(full())
+// as the code before 03-12c encodes it (taken at 99cf4ec): a status
+// without bundle_behind keeps those exact bytes.
+const statusSHA256Pre0312c = "ace03ad4dfd6d96c8b0dded8646a0b815a71cf7108a5382dcb8754827a14a90c"
+
+// TestBundleBehind (03-12c): the optional bundle_behind field survives the
+// strict parsers, is absent when nil, is validated field by field, and has
+// no rule against the versions in force, so the server never drops a
+// heartbeat for it.
+func TestBundleBehind(t *testing.T) {
+	behind := func() *BundleBehind {
+		return &BundleBehind{ManifestBundleVersion: 3, AcceptedVersion: 2, Since: "2026-10-28T10:00:00Z", Reason: "not_delivered"}
+	}
+	refused := func(t *testing.T, what, field string, mut func(b *BundleBehind)) {
+		t.Helper()
+		s := full()
+		s.BundleBehind = behind()
+		mut(s.BundleBehind)
+		if err := Validate(&s); !errors.Is(err, ErrFieldInvalid) || Field(err) != field {
+			t.Errorf("%s: %v, want heartbeat_field_invalid naming %s", what, err, field)
+		}
+	}
+	t.Run("optional_roundtrip", func(t *testing.T) {
+		for _, reason := range []string{"unapplied", "not_accepted", "not_delivered", "unknown"} {
+			s := full()
+			s.BundleBehind = behind()
+			s.BundleBehind.Reason = reason
+			b, err := trust.CanonicalJSON(&s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := ParseStatus(b)
+			if err != nil || back.BundleBehind == nil || *back.BundleBehind != *s.BundleBehind {
+				t.Fatalf("reason %s after ParseStatus: %+v, %v", reason, back, err)
+			}
+			hb, err := trust.CanonicalJSON(Heartbeat{Status: s, ClockOffsetS: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h, err := ParseHeartbeat(hb)
+			if err != nil || h.Status.BundleBehind == nil || *h.Status.BundleBehind != *s.BundleBehind {
+				t.Fatalf("reason %s after ParseHeartbeat: %+v, %v", reason, h, err)
+			}
+		}
+		s := full()
+		s.BundleBehind = behind()
+		b, err := trust.CanonicalJSON(&s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const want = `"krl_stale":true,"bundle_behind":{"manifest_bundle_version":3,"accepted_version":2,"since":"2026-10-28T10:00:00Z","reason":"not_delivered"},"seq":`
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("the encoding lacks %s:\n%s", want, b)
+		}
+	})
+	t.Run("absent_when_nil", func(t *testing.T) {
+		b, err := trust.CanonicalJSON(full())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "bundle_behind") || trust.SHA256Hex(b) != statusSHA256Pre0312c {
+			t.Fatalf("a status without bundle_behind is not the pre-03-12c encoding (sha256 %s):\n%s", trust.SHA256Hex(b), b)
+		}
+	})
+	t.Run("reason_outside_the_set_refused", func(t *testing.T) {
+		for _, r := range []string{"", "stale", "Unknown", "not_delivered ", "unapplied:x"} {
+			refused(t, "reason "+r, "bundle_behind.reason", func(b *BundleBehind) { b.Reason = r })
+		}
+	})
+	t.Run("versions_below_one_refused", func(t *testing.T) {
+		refused(t, "manifest version 0", "bundle_behind.manifest_bundle_version", func(b *BundleBehind) { b.ManifestBundleVersion = 0 })
+		refused(t, "accepted version 0", "bundle_behind.accepted_version", func(b *BundleBehind) { b.AcceptedVersion = 0 })
+	})
+	t.Run("since_not_a_timestamp_refused", func(t *testing.T) {
+		for _, since := range []string{"", "yesterday", "2026-10-28T10:00:00.5Z", "2026-10-28 10:00:00Z"} {
+			refused(t, "since "+since, "bundle_behind.since", func(b *BundleBehind) { b.Since = since })
+		}
+	})
+	t.Run("no_cross_field_rule", func(t *testing.T) {
+		for _, c := range []struct{ manifest, accepted uint64 }{{2, 2}, {1, 5}, {9, 7}} {
+			s := full()
+			s.BundleBehind = behind()
+			s.BundleBehind.ManifestBundleVersion, s.BundleBehind.AcceptedVersion = c.manifest, c.accepted
+			if err := Validate(&s); err != nil {
+				t.Errorf("manifest %d, accepted %d against bundle %d in force: %v, want no refusal", c.manifest, c.accepted, s.Bundle.Version, err)
+			}
+		}
+	})
+}

@@ -176,6 +176,10 @@ type Status struct {
 	Stuck          string     `json:"stuck"`
 	KRLStale       bool       `json:"krl_stale"`
 	Unapplied      *Unapplied `json:"unapplied,omitempty"`
+	// BundleBehind is set when the accepted KRL manifest has named a newer
+	// bundle than the accepted one for the grace period (03-12c); omitted
+	// otherwise.
+	BundleBehind *BundleBehind `json:"bundle_behind,omitempty"`
 	// HostCerts, HostKeysSkipped and HostCertDetail are 03-09's (see the
 	// package comment); omitted when empty.
 	HostCerts       []HostCert   `json:"host_certs,omitempty"`
@@ -236,6 +240,18 @@ type Unapplied struct {
 	BundleSHA256    string `json:"bundle_sha256,omitempty"`
 	Directory       uint64 `json:"directory,omitempty"`
 	DirectorySHA256 string `json:"directory_sha256,omitempty"`
+}
+
+// BundleBehind is a host held at an older bundle than the one the
+// ops-signed KRL manifest it accepted names (03-12c): the manifest's bundle
+// version, the accepted bundle's version, since (the first time the
+// accepted manifest named a newer bundle, trust's timestamp format) and why
+// the newer bundle is not in force (BehindReasons).
+type BundleBehind struct {
+	ManifestBundleVersion uint64 `json:"manifest_bundle_version"`
+	AcceptedVersion       uint64 `json:"accepted_version"`
+	Since                 string `json:"since"`
+	Reason                string `json:"reason"`
 }
 
 // Heartbeat is the body of POST /api/v1/agent/heartbeat: the applier's

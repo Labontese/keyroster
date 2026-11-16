@@ -78,6 +78,9 @@ type fixture struct {
 	// krlMachSerials are machine-CA serials every later KRL also revokes:
 	// negative probe certificates (03-10b).
 	krlMachSerials []uint64
+	// manifestBundle is the bundle version every later KRL manifest names
+	// (03-12c); zero means 1.
+	manifestBundle uint64
 }
 
 func newFixture(t testing.TB) *fixture {
@@ -262,7 +265,7 @@ func (f *fixture) krlWithHeader(serials []uint64, keys []ssh.PublicKey, id strin
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	m := &krl.Manifest{InstallationID: id, KRLVersion: f.krlVersion, KRLSHA256: krl.SHA256Hex(b), IssuedAt: "2026-10-01T00:00:00Z", BundleVersion: 1, LogIndex: 3}
+	m := &krl.Manifest{InstallationID: id, KRLVersion: f.krlVersion, KRLSHA256: krl.SHA256Hex(b), IssuedAt: "2026-10-01T00:00:00Z", BundleVersion: max(f.manifestBundle, 1), LogIndex: 3}
 	doc, err := m.Canonical()
 	if err != nil {
 		f.t.Fatal(err)
@@ -909,6 +912,14 @@ func (h *testHost) publishKRL(serials ...uint64) {
 	h.t.Helper()
 	v, files := h.f.krl(serials, nil, "")
 	h.state.KRLs = map[uint64]spool.KRLFiles{v: files}
+}
+
+// publishKRLNaming offers the next KRL version, whose manifest names
+// bundle version bundle (03-12c); every later KRL names it too.
+func (h *testHost) publishKRLNaming(bundle uint64, serials ...uint64) {
+	h.t.Helper()
+	h.f.manifestBundle = bundle
+	h.publishKRL(serials...)
 }
 
 // useBundle makes d, at version, the spool's only bundle (03-12c).

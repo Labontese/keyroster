@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/Labontese/keyroster/internal/agent/execsite"
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	certpkg "github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -74,6 +75,9 @@ type DriftReport struct {
 	// TrustLatch is "unreadable" when the drop latch does not read
 	// (03-12c), report only.
 	TrustLatch string `json:"trust_latch,omitempty"`
+	// BundleBehind is the heartbeat's bundle_behind object (03-12c), read
+	// from the since record and never written by a check; report only.
+	BundleBehind *heartbeat.BundleBehind `json:"bundle_behind,omitempty"`
 }
 
 // DrainingCA is one draining CA entry of the accepted bundle as
