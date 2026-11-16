@@ -893,6 +893,11 @@ func setCeremonyNow(t *testing.T, ts string) {
 	t.Cleanup(func() { ceremonyNow = prev })
 }
 
+// successorInputs are the flags a successor is built from, as root sign's
+// mismatch refusal names them: the CA flags too, given or not (03-12b
+// review).
+const successorInputs = "--prev, --roots, --threshold, --policy, --ca-next, --ca-next-fingerprint and --ca-retire"
+
 // TestRootSignSuccessor (KEY-07, owner decision 1) runs root sign --prev in
 // the homelab rotation shape: a genesis bundle by software roots A and B at
 // threshold 1, signed by A, is succeeded by a bundle naming software roots
@@ -1367,7 +1372,7 @@ func TestRootSignSuccessor(t *testing.T) {
 			t.Fatal(err)
 		}
 		code, _, stderr = sign(t, out, prevPolicy, "2", &a)
-		if code != 1 || !strings.Contains(stderr, "does not match --prev, --roots, --threshold and --policy") {
+		if code != 1 || !strings.Contains(stderr, "does not match "+successorInputs) {
 			t.Fatalf("rerun with --threshold 2: exit %d, stderr %q", code, stderr)
 		}
 		if after, err := os.ReadFile(filepath.Join(out, "bundle.json")); err != nil || !bytes.Equal(after, before) { //nolint:gosec // G304: test file
@@ -1459,6 +1464,12 @@ func TestRootSignSuccessor(t *testing.T) {
 			if !strings.Contains(stdout, want) {
 				t.Fatalf("root sign --ca-next output lacks %q:\n%s", want, stdout)
 			}
+		}
+		// A co-signer who leaves out the CA flags builds another successor,
+		// and the refusal names the CA flags among the inputs (03-12b
+		// review).
+		if code, _, stderr := sign(t, out, prevPolicy, "1", &c); code != 1 || !strings.Contains(stderr, "does not match "+successorInputs+"; refusing to sign a different bundle") {
+			t.Fatalf("root sign by C without the CA flags: exit %d, stderr %q", code, stderr)
 		}
 		if code, _, stderr := sign(t, out, prevPolicy, "1", &c, "--ca-next", "user="+file, "--ca-next-fingerprint", "user="+fp); code != 0 {
 			t.Fatalf("root sign --ca-next by C: exit %d: %s", code, stderr)
