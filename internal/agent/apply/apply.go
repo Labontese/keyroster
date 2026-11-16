@@ -230,6 +230,10 @@ type Report struct {
 	Unapplied *Unapplied `json:"unapplied,omitempty"`
 	Diff      []string   `json:"diff,omitempty"`
 	Errors    []string   `json:"errors"`
+	// TrustDue is the earliest trusted_until of the accepted bundle after
+	// now (03-12c): keyroster-agent run applies again at that time. It is
+	// never printed or kept.
+	TrustDue time.Time `json:"-"`
 }
 
 // Unapplied is Report.Unapplied: the bundle and directory versions the
@@ -1274,6 +1278,18 @@ func (e *engine) keepKRL(g, cur *Generation, curLink link) {
 	e.report.KRLKept = &KRLKept{InForce: krlVersion(cur), Verified: verified, Generation: curLink.n}
 	e.logf("WARNING krl_kept: the verified state's KRL version %d is older than version %d in force in generation %d; keeping version %d", verified, krlVersion(cur), curLink.n, krlVersion(cur))
 }
+
+// hasDraining reports whether b has a draining user or machine CA entry
+// (03-12c).
+func hasDraining(_ *trust.Bundle) bool { return false }
+
+// trustDue is the earliest trusted_until of b strictly after now (03-12c).
+func trustDue(_ *trust.Bundle, _ time.Time) time.Time { return time.Time{} }
+
+// narrowingPending reports whether current holds a line of a draining
+// entry of v's bundle that the render at the engine's clock omits
+// (03-12c).
+func (e *engine) narrowingPending(_ *state.Verified) bool { return false }
 
 // render is Render for this host. When Render refuses because of the
 // host's entry, or because no directory is accepted (F08 (03-08d)), and

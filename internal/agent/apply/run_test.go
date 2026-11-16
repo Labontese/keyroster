@@ -704,3 +704,102 @@ func TestRunHeldNoise(t *testing.T) {
 		}
 	}
 }
+
+// trustLoop is keyroster-agent run on a test host, stepped one iteration
+// at a time, counting the applies it reports (03-12c).
+type trustLoop struct {
+	t       *testing.T
+	applies atomic.Int32
+	iter    chan int32
+	step    chan struct{}
+}
+
+// startTrustLoop starts Run on h with rc, whose Config, Interval, Out and
+// Iteration it sets; Retry and CheckEvery default to an hour and a day.
+func startTrustLoop(t *testing.T, h *testHost, rc RunConfig) *trustLoop {
+	t.Helper()
+	lp := &trustLoop{t: t, iter: make(chan int32), step: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	rc.Config, rc.Interval = h.cfg, time.Millisecond
+	if rc.Retry == 0 {
+		rc.Retry = time.Hour
+	}
+	if rc.CheckEvery == 0 {
+		rc.CheckEvery = 24 * time.Hour
+	}
+	rc.Out = func(*Report, error) { lp.applies.Add(1) }
+	rc.Iteration = func() {
+		select {
+		case lp.iter <- lp.applies.Load():
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case <-lp.step:
+		case <-ctx.Done():
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, rc, h.l) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return lp
+}
+
+// next waits for the loop's next iteration and returns the applies so far.
+func (lp *trustLoop) next() int32 {
+	lp.t.Helper()
+	select {
+	case n := <-lp.iter:
+		return n
+	case <-time.After(30 * time.Second):
+		lp.t.Fatal("TRACER: no loop iteration within 30 s")
+		return 0
+	}
+}
+
+// round lets the loop run one more iteration and returns the applies.
+func (lp *trustLoop) round() int32 {
+	lp.t.Helper()
+	lp.step <- struct{}{}
+	return lp.next()
+}
+
+// idle runs five iterations that must apply nothing more than want.
+func (lp *trustLoop) idle(what string, want int32) {
+	lp.t.Helper()
+	for i := range 5 {
+		if n := lp.round(); n != want {
+			lp.t.Fatalf("TRACER: %s: iteration %d: %d applies, want %d", what, i, n, want)
+		}
+	}
+}
+
+// TestRunTrustDue (03-12c): keyroster-agent run applies when the host's
+// clock reaches a draining CA's end, with no new document, and is idle
+// before and after.
+func TestRunTrustDue(t *testing.T) {
+	t.Run("trust_due_triggers_apply", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TRACER: the first iteration applied %d times, want 1", n)
+		}
+		if got := h.file(CAFile); !strings.Contains(got, caText(old)) {
+			t.Fatalf("TRACER: user_ca_keys before the end = %q, want the draining key's line", got)
+		}
+		lp.idle("before the end", 1)
+		h.clock.advance(2 * time.Hour)
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TRACER: the iteration past the end: %d applies, want 2", n)
+		}
+		if got := h.file(CAFile); strings.Contains(got, caText(old)) || got != caText(h.f.user, h.f.mach) {
+			t.Fatalf("TRACER: user_ca_keys past the end = %q, want the active user and machine keys only", got)
+		}
+		lp.idle("after the drop", 2)
+	})
+}

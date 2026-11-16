@@ -274,6 +274,43 @@ func (f *fixture) krlWithHeader(serials []uint64, keys []ssh.PublicKey, id strin
 	return f.krlVersion, spool.KRLFiles{KRL: b, Manifest: doc, Sig: sig}
 }
 
+// withBundle is a copy of f.bundle at version, with prev the SHA-256 of a
+// fixed string and issued_at 2026-10-20T00:00:00Z, changed by edit,
+// canonical and root-signed (03-12c). A first acceptance runs no chain
+// rule, so it reaches a fresh host as its first bundle.
+func (f *fixture) withBundle(version uint64, edit func(b *trust.Bundle)) spool.Doc {
+	f.t.Helper()
+	b := *f.bundle
+	b.Root.Keys = slices.Clone(f.bundle.Root.Keys)
+	b.CAs = slices.Clone(f.bundle.CAs)
+	b.Version, b.Prev, b.IssuedAt = version, trust.SHA256Hex([]byte("an earlier bundle")), "2026-10-20T00:00:00Z"
+	if edit != nil {
+		edit(&b)
+	}
+	doc := mustCanonical(f.t, &b)
+	if _, err := trust.ParseBundle(doc); err != nil {
+		f.t.Fatalf("test bundle version %d: %v", version, err)
+	}
+	return spool.Doc{Body: doc, Sigs: f.rootSign(trust.NamespaceBundle, doc)}
+}
+
+// drainingCA is a withBundle edit (03-12c): role's one entry becomes
+// generation 1 draining with old's key until end, and generation 2 active
+// with the fixture's key of the role; the other roles are unchanged.
+func (f *fixture) drainingCA(role string, old ssh.Signer, end string) func(b *trust.Bundle) {
+	return func(b *trust.Bundle) {
+		i := slices.IndexFunc(b.CAs, func(c trust.CAEntry) bool { return c.Role == role })
+		if i < 0 {
+			f.t.Fatalf("the bundle has no %s CA", role)
+		}
+		active := b.CAs[i]
+		drain := active
+		drain.Key, drain.State, drain.Generation, drain.TrustedUntil = trust.FormatKey(old.PublicKey()), "draining", 1, end
+		active.Generation = 2
+		b.CAs = slices.Replace(b.CAs, i, i+1, drain, active)
+	}
+}
+
 // genesis is a spool state with the genesis bundle and policy.
 func (f *fixture) genesis() spool.State {
 	return spool.State{
@@ -872,6 +909,11 @@ func (h *testHost) publishKRL(serials ...uint64) {
 	h.t.Helper()
 	v, files := h.f.krl(serials, nil, "")
 	h.state.KRLs = map[uint64]spool.KRLFiles{v: files}
+}
+
+// useBundle makes d, at version, the spool's only bundle (03-12c).
+func (h *testHost) useBundle(version uint64, d spool.Doc) {
+	h.state.Bundles = map[uint64]spool.Doc{version: d}
 }
 
 // write puts the offered state into the spool.
