@@ -147,7 +147,26 @@ func machineCertFor(t *testing.T, e *dirEnv, req *wire.MachineIssueRequest, o re
 		ValidAfter: now - 300, ValidBefore: now + lifetime,
 		Permissions: ssh.Permissions{Extensions: ext, CriticalOptions: o.critical},
 	}
-	if err := c.SignCert(rand.Reader, ca); err != nil { //nolint:forbidigo // a test double of the signer whose answers break one check at a time (03-11b)
+	if len(c.ValidPrincipals) == 0 {
+		// x/crypto's SignCert refuses a certificate with no principals, but
+		// the no-principals answer must still carry a valid CA signature so
+		// that the CLI refuses it for having none and not for its signature.
+		// Sign the bytes SignCert would sign (the certificate without its
+		// signature, less the signature's length prefix) with the CA directly.
+		c.Nonce = make([]byte, 32)
+		if _, err := rand.Read(c.Nonce); err != nil {
+			t.Fatal(err)
+		}
+		c.SignatureKey = ca.PublicKey()
+		unsigned := *c
+		unsigned.Signature = nil
+		body := unsigned.Marshal()
+		sig, err := ca.Sign(rand.Reader, body[:len(body)-4])
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Signature = sig
+	} else if err := c.SignCert(rand.Reader, ca); err != nil { //nolint:forbidigo // a test double of the signer whose answers break one check at a time (03-11b)
 		t.Fatal(err)
 	}
 	if o.claimCA != nil {
