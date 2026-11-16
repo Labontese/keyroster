@@ -233,6 +233,12 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			logf("ERROR trust_expired: %s g%d %s ended %s and is still in user_ca_keys; applying", x.Role, x.Generation, x.Fingerprint, x.TrustedUntil)
 		}
 		trustExpired = len(d.TrustExpired) > 0
+		if d.TrustLatch != "" {
+			// PR #107 review: every check says so, so the repair
+			// (host-setup.md) happens before the next rotation drops a
+			// draining CA key at once instead of at its end.
+			logf("ERROR trust_latch: %s: %s does not read; no draining CA key is in user_ca_keys until it is repaired", d.TrustLatch, l.State(trustLatchFile))
+		}
 		status(StatusUpdate{Checked: true, Drift: d})
 	}
 	for {
