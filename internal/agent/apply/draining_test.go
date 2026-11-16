@@ -698,4 +698,31 @@ func TestTrustDue(t *testing.T) {
 			t.Fatalf("trustDue with a draining host CA = %v, want %v", got, want)
 		}
 	})
+	t.Run("failed_apply_reports_the_next_end", func(t *testing.T) {
+		// PR #108 review: an apply that fails under the lock at the first
+		// of two ends reports the second, not the zero time.
+		g := newFixture(t)
+		h := newTestHost(t, g)
+		const endB = "2026-10-26T14:00:00Z"
+		h.useBundle(3, g.withBundle(3, twoDrainingCA(g, seedKey(t, seedDrainOld), drainAt, seedKey(t, seedDrainOld2), endB)))
+		h.installed("role:ops")
+		h.clock.advance(90 * time.Minute)
+		h.cfg.Fault = func(p string) error {
+			if p == "marker" {
+				return &crash{point: p}
+			}
+			return nil
+		}
+		r, err := h.apply()
+		if !isCrash(err) {
+			t.Fatalf("the apply at the first end: %v, want the crash at the marker", err)
+		}
+		want, perr := time.Parse(trust.TimeFormat, endB)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		if !r.TrustDue.Equal(want) {
+			t.Fatalf("TrustDue after the failed apply = %v, want the second end %v", r.TrustDue, want)
+		}
+	})
 }

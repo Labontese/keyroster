@@ -992,6 +992,62 @@ func TestRunTrustDue(t *testing.T) {
 		}
 		lp.idle("after the drop", 3)
 	})
+	t.Run("restart_with_empty_spool_arms_the_end", func(t *testing.T) {
+		// PR #108 review: a loop that starts with no document applies
+		// nothing, yet its first check arms the next end, so the drop lands
+		// at that end and not at the next check (CheckEvery, a day here).
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		h.resetSpool()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 0 {
+			t.Fatalf("TIMER: the first iteration with no document applied %d times, want 0", n)
+		}
+		lp.idle("before the end", 0)
+		h.clock.advance(2 * time.Hour)
+		if n := lp.round(); n != 1 {
+			t.Fatalf("TIMER: past the end: %d applies, want 1", n)
+		}
+		if got := h.file(CAFile); got != caText(h.f.user, h.f.mach) {
+			t.Fatalf("TIMER: user_ca_keys past the end = %q, want %q (%s dropped)", got, caText(h.f.user, h.f.mach), fp(old))
+		}
+		lp.idle("after the drop", 1)
+	})
+	t.Run("failure_before_the_lock_keeps_the_next_end", func(t *testing.T) {
+		// PR #108 review: at the first end sshd -T fails, so the apply
+		// fails before its lock and the check after it fails too; the
+		// second end is still armed, and Retry (an hour of real time)
+		// never comes.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		a, b := seedKey(t, seedDrainOld), seedKey(t, seedDrainOld2)
+		const endB = "2026-10-26T14:00:00Z"
+		h.useBundle(3, f.withBundle(3, twoDrainingCA(f, a, drainAt, b, endB)))
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TIMER: the first iteration applied %d times, want 1", n)
+		}
+		h.run.rejectDropIn = func([]byte) bool { return true }
+		h.clock.advance(90 * time.Minute)
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TIMER: the failing apply at the first end: %d applies, want 2", n)
+		}
+		h.run.rejectDropIn = nil
+		if got := h.file(CAFile); got != caText(a, b, f.user, f.mach) {
+			t.Fatalf("TIMER: user_ca_keys after the failed apply = %q, want %q", got, caText(a, b, f.user, f.mach))
+		}
+		lp.idle("between the ends", 2)
+		h.clock.advance(time.Hour)
+		if n := lp.round(); n != 3 {
+			t.Fatalf("TIMER: past the second end: %d applies, want 3", n)
+		}
+		if got := h.file(CAFile); got != caText(f.user, f.mach) {
+			t.Fatalf("TIMER: user_ca_keys past the second end = %q, want %q", got, caText(f.user, f.mach))
+		}
+		lp.idle("after both drops", 3)
+	})
 	t.Run("trust_due_covers_host_role", func(t *testing.T) {
 		f := newFixture(t)
 		h := newTestHost(t, f)
