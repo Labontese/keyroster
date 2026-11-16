@@ -310,8 +310,9 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 // every draining entry with its state at the engine's clock, whether g's
 // user_ca_keys holds its line (never for the host role) and whether the
 // drop latch holds its key; trust_expired for a user or machine entry g
-// still holds although its end has passed or the latch blocks it; and
-// trust_latch when the latch does not read. It writes nothing. accepted/
+// still holds although its end has passed or the latch blocks it;
+// trust_latch when the latch does not read; and bundle_behind, read from
+// the since record and never written here. It writes nothing. accepted/
 // that does not load or parse (check takes no apply lock, so a commit may
 // prune a snapshot under it) leaves the lists empty and is not an error.
 func (e *engine) trustReport(g *Generation, r *DriftReport) {
@@ -323,11 +324,12 @@ func (e *engine) trustReport(g *Generation, r *DriftReport) {
 	if err != nil || st == nil || st.Bundle == nil {
 		return
 	}
+	now := e.clock.Now()
+	r.BundleBehind = e.bundleBehind(st, now, false)
 	b, err := trust.ParseBundle(st.Bundle)
 	if err != nil {
 		return
 	}
-	now := e.clock.Now()
 	inFile := lineSet(g.Files[CAFile], caKey)
 	for _, ca := range b.CAs {
 		if ca.State != "draining" {

@@ -268,6 +268,9 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 					s.KRL.IssuedAt = mf.IssuedAt
 				}
 			}
+			// 03-12c: the manifest names a newer bundle than the accepted
+			// one for the grace period (bundle-behind.json keeps since).
+			s.BundleBehind = e.bundleBehind(st, now, true)
 		}
 	}
 	if staleFrom != "" && s.KRL.Version != 0 {
