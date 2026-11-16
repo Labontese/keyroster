@@ -659,6 +659,27 @@ func TestCARotationRunbookLinkSafety(t *testing.T) {
 	})
 }
 
+// TestCARotationRunbookAbortPrev (03-12b review): the abort signs on the
+// bundle in force, ceremony 1's successor in /media/transfer/succ, as the
+// e2e test does (TestCANextAndAbort); ceremony 1's own --prev directory
+// would fail on its SHA-256 or with no such entry.
+func TestCARotationRunbookAbortPrev(t *testing.T) {
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "ca-rotation.md")))
+	win, err := sectionWindow(data, &signingSection{id: "ca_abort_prev", file: "ca-rotation.md", section: "Abort"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := strings.Join(strings.Fields(strings.ReplaceAll(win, "\\\n", " ")), " ")
+	for _, want := range []string{"keyroster root sign --prev /media/transfer/succ --prev-sha256 ", "--policy /media/transfer/succ/policy.json"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("the abort section lacks %q", want)
+		}
+	}
+	if strings.Contains(win, "/media/transfer/prev") {
+		t.Error("the abort section signs on ceremony 1's --prev directory, not on the bundle in force")
+	}
+}
+
 // TestSectionWindowRefusals (03-14b): sectionWindow refuses a duplicated
 // marker, a missing marker and an end before its start.
 func TestSectionWindowRefusals(t *testing.T) {
