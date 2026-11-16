@@ -63,6 +63,31 @@ type DriftReport struct {
 	// LoginGraceObserved is false when an apply held the lock, so the
 	// check left login_grace.json to that apply.
 	LoginGraceObserved bool `json:"login_grace_observed"`
+	// Draining lists every draining CA entry of the accepted bundle
+	// (03-12c), report only.
+	Draining []DrainingCA `json:"draining,omitempty"`
+	// TrustExpired lists the draining user and machine entries that
+	// current's user_ca_keys still holds although their end has passed or
+	// the drop latch holds them (03-12c), report only.
+	TrustExpired []DrainingCA `json:"trust_expired,omitempty"`
+	// TrustLatch is "unreadable" when the drop latch does not read
+	// (03-12c), report only.
+	TrustLatch string `json:"trust_latch,omitempty"`
+}
+
+// DrainingCA is one draining CA entry of the accepted bundle as
+// keyroster-agent check reports it (03-12c): its role, generation, SHA-256
+// fingerprint and end; State is "draining" before the end and
+// "drained (ended <trusted_until>)" from it; InFile when current's
+// user_ca_keys holds its line; Latched when the drop latch holds its key.
+type DrainingCA struct {
+	Role         string `json:"role"`
+	Generation   uint32 `json:"generation"`
+	Fingerprint  string `json:"fingerprint"`
+	TrustedUntil string `json:"trusted_until"`
+	State        string `json:"state"`
+	InFile       bool   `json:"in_file"`
+	Latched      bool   `json:"latched"`
 }
 
 // Drift reports whether anything drifted.
