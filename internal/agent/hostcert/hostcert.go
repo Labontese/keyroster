@@ -807,7 +807,7 @@ type Action struct {
 	// Pub is the host key (nil for a Hold or a Remove).
 	Pub ssh.PublicKey
 	// Code is the hold or defer code, or why a key is requested
-	// (missing, renew, principals_differ, revoked).
+	// (missing, renew, principals_differ, untrusted_ca, revoked).
 	Code string
 	// WriteNothing marks the write-nothing holds (no_generation and
 	// apply_unfinished).
@@ -889,8 +889,10 @@ func BackoffActive(nextAt, now uint64) bool { return nextAt > now && nextAt <= n
 // new certificate, "" when it does not: missing (none, or within
 // min(60, V/6) of ValidBefore), principals_differ, untrusted_ca (signed by
 // a key outside cas, the trusted host CA keys, such as an aborted next
-// key; an empty cas trusts nothing, as VerifyAnswer does), revoked (by the
-// KRL in force), or renew (at or after the entry's RenewAt).
+// key or a draining key past its end; an empty cas trusts nothing, as
+// VerifyAnswer does), revoked (by the KRL in force), or renew (at or after
+// the entry's RenewAt). The agent passes the host CA keys trusted at the
+// run's clock (trust.TrustedCAs, 03-12c).
 func Due(now uint64, e *Entry, c *ssh.Certificate, principals []string, cas []ssh.PublicKey, k *krl.Parsed) string {
 	switch {
 	case c == nil || e == nil:
@@ -918,12 +920,15 @@ func Due(now uint64, e *Entry, c *ssh.Certificate, principals []string, cas []ss
 // longer lists, or sshd no longer serves, is Removed. Renewal is lazy
 // across a CA rotation: a certificate of a CA key that is still in
 // in.CAKeys is kept until it is due (X10), and one of a key that left the
-// set is due at once (untrusted_ca). An empty in.CAKeys makes every
-// certificate due, failing closed as VerifyAnswer does; the requests still
-// wait behind the pending, sticky and back-off checks. The agent passes an
-// empty set only when accepted/ is missing (a dry run), where a host-level
-// hold comes first (the directory is then unauthorized): a stored bundle
-// is verified and holds exactly one active host CA key.
+// set is due at once (untrusted_ca). The agent passes the host CA keys
+// trusted at the run's clock (trust.TrustedCAs, 03-12c), so a certificate
+// of a draining key is kept until it is due and one of a key past its end
+// is due at once. An empty in.CAKeys makes every certificate due, failing
+// closed as VerifyAnswer does; the requests still wait behind the pending,
+// sticky and back-off checks. The agent passes an empty set only when
+// accepted/ is missing (a dry run), where a host-level hold comes first
+// (the directory is then unauthorized): a stored bundle is verified and
+// holds exactly one active host CA key.
 func Decide(in Input) []Action {
 	if code, nothing := HostHold(in); code != "" {
 		return []Action{{Kind: Hold, Code: code, WriteNothing: nothing}}
