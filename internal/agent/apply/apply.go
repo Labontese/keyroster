@@ -1493,6 +1493,15 @@ func (e *engine) storedTrustDue() time.Time {
 	return trustDue(b, e.clock.Now())
 }
 
+// acceptedTrustDue is storedTrustDue outside an apply (PR #108 review):
+// keyroster-agent run's check arms its timer with it, whatever the apply
+// before it or the check itself returned. It reads accepted/ without the
+// apply lock, as Check does.
+func acceptedTrustDue(cfg Config, l Layout) time.Time {
+	e := &engine{cfg: cfg, l: l, clock: cfg.Clock, stateFd: -1}
+	return e.storedTrustDue()
+}
+
 // render is renderAt at the engine's clock with the drop latch (03-12c):
 // one clock reading and one latch for both renders of the call. After a
 // render that succeeds it latches the draining keys the render omitted

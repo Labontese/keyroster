@@ -69,7 +69,8 @@ type RunConfig struct {
 //     an apply leaves newer versions in the spool than its capture read
 //     (Report.SpoolMore) and moved forward, it runs again at once, at most
 //     maxCatchUpApplies times a round (PR #71 review F9). A draining CA's
-//     end (Report.TrustDue), and a check that found a CA past its end
+//     end (Report.TrustDue, and the accepted bundle's next end at every
+//     check, PR #108 review), and a check that found a CA past its end
 //     still in user_ca_keys, make it run whatever the spool holds, also
 //     with no document or a spool that does not read (03-12c, PR #107
 //     review);
@@ -142,8 +143,9 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		probeStarted bool
 		// trustDue is the next draining CA's end (03-12c): the timer on
 		// the host's own clock that applies the drop with no new document.
-		// A failed apply sets it too (PR #107 review): Report.TrustDue is
-		// always after the apply's clock, so each end is due once.
+		// A failed apply sets it too (PR #107 review), and every check
+		// (PR #108 review): both are always after their clock, so each end
+		// is due once.
 		trustDue time.Time
 		// trustExpired: the last check found a CA past its end still in
 		// user_ca_keys (03-12c); the next round applies, after a failed
@@ -207,6 +209,13 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 	}
 	check := func() {
 		nextCheck = rc.Clock.Now().Add(jitter(rc.CheckEvery, rc.CheckJitter))
+		// PR #108 review: every check arms the timer from accepted/, also
+		// when the apply before it failed before its lock (no TrustDue),
+		// after a restart with no document, or when Check fails. The end
+		// is strictly after now, so an end that has passed is never armed
+		// again: trustExpired governs it, after a failed apply only once
+		// Retry has passed (T-03-443).
+		trustDue = acceptedTrustDue(rc.Config, l)
 		trustExpired = false
 		d, err := Check(ctx, rc.Config, l)
 		switch {
