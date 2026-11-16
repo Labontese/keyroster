@@ -174,13 +174,23 @@ func successorSigningSections() []*signingSection {
 			"Agreed policy change", "Previous root keys", "Root keys (threshold",
 			"without `--confirm`", "policy version", "bundle you pinned with", "do not apply there",
 			"SHA256 fingerprint", "the record holds exactly the values",
-			"`admin_quorum`, `admins`, `ca_profiles` and `timelock_seconds`", "with no WARNING"}}
+			"`admin_quorum`, `admins`, `ca_profiles` and `timelock_seconds`", "with no WARNING",
+			"CA entries: unchanged", "Root set:"}}
+	// The CA rotation ceremonies (03-12b): ceremony 1 and the abort carry
+	// the same checks as any successor, plus the CA-change line they
+	// expect and the root-set line.
+	caChecks := func(caLine string, extra ...string) []string {
+		return append([]string{"Policy in force:", "Successor policy: unchanged, every field carried over", "WARNING: this successor changes",
+			"Previous root keys", "Root keys (threshold", "pop hosts=", "pop: none (", "webauthn rp_id ", caLine, "Root set: unchanged",
+			"without `--confirm`", "do not apply there"}, extra...)
+	}
 	return []*signingSection{
 		{id: "genesis_step_4", file: "root-ceremony.md", section: "4. Sign with root A",
 			want: []string{"pop: none", "pop.hosts", "without `--confirm`"}},
 		{id: "rotation_step_3", file: "root-ceremony.md", section: "Rotate the roots",
 			start: "3. **Build the successor", end: "4. **Sign with a current root",
-			want: []string{"Successor policy: unchanged, every field carried over", "without `--confirm`", "do not apply there"}},
+			want: []string{"Successor policy: unchanged, every field carried over", "without `--confirm`", "do not apply there",
+				"CA entries: unchanged", "Root set:"}},
 		{id: "rotation_step_4", file: "root-ceremony.md", section: "Rotate the roots",
 			start: "4. **Sign with a current root", end: "5. **Verify against the paper",
 			want: []string{"checks of step 3", "policy block"}},
@@ -203,7 +213,11 @@ func successorSigningSections() []*signingSection {
 			want: []string{"before each touch"}},
 		{id: "transcript_template", file: "ceremony-transcript-template.md", section: "Ceremony",
 			want: []string{"root rotation / policy change / re-sign", "Agreed policy change (the changed field names", "someone other than its proposer",
-				"checks every value"}},
+				"checks every value", "next CA fingerprint as read from the signer console by"}},
+		{id: "ca_next_sign", file: "ca-rotation.md", section: "Ceremony 1",
+			want: caChecks("none -> next", "fingerprint as read from the signer console")},
+		{id: "ca_abort_sign", file: "ca-rotation.md", section: "Abort",
+			want: caChecks("next -> retired")},
 		{id: "host_setup_pop", file: "host-setup.md", section: "Registering a host in the directory",
 			want: []string{"successor_pop", "CHANGED"}},
 		{id: "machine_identities_pop", file: "machine-identities.md", section: "Renewal needs pop.machines",
@@ -296,6 +310,7 @@ func normalizeSpace(s string) string { return strings.Join(strings.Fields(s), " 
 var policyCheckPrefixes = []string{
 	"Policy in force: v", "Successor policy: unchanged, every field carried over", "WARNING: this successor changes",
 	"Previous root keys (threshold", "Root keys (threshold", "pop hosts=", "pop: none (", "webauthn rp_id ", "pop.hosts is one-way",
+	"Root set: ", "CA entries: unchanged", "none -> next", "next -> retired",
 }
 
 // TestRootCeremonyPolicyChecks (03-14b, F04, F14): every successor-signing
@@ -343,6 +358,372 @@ func TestRootCeremonyPolicyChecks(t *testing.T) {
 			}
 		}
 	})
+}
+
+// signerStateDir is the signer's state directory, which keyroster-signer
+// owns (03-12b).
+const signerStateDir = "/var/lib/keyroster-signer"
+
+var (
+	shellBinding = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=("?)` + regexp.QuoteMeta(signerStateDir) + `("?)$`)
+	// runuserScript is the script argument of a runuser segment's sh -c,
+	// which the signer's own shell runs: the only single-quoted text the
+	// checker treats as opaque.
+	runuserScript = regexp.MustCompile(`^(runuser -u keyroster-signer (?:-- )?sh -c )'[^']*'`)
+	// shellRedirect is a redirect root's shell opens (>, >>, >|, <, &>,
+	// &>>, with an optional fd), its target quoted or not.
+	shellRedirect = regexp.MustCompile(`(?:&>>?|[0-9]*(?:>>|>\||>|<))\s*['"]?([^\s'"|;&<>]+)`)
+	inlineSpan    = regexp.MustCompile("`([^`]+)`")
+)
+
+// signerDirLinkSafety checks the shell lines of text's fenced code blocks
+// for a root write below the signer's state directory, which follows any
+// link keyroster-signer planted there (03-12b, the lesson of 03-12's
+// restore block). It is an allowlist: after joining backslash-continued
+// lines and splitting each line at its unquoted control operators (;, &&,
+// ||, | and &), every command that names the directory, or a variable
+// bound to it earlier in the block, must start with runuser -u
+// keyroster-signer, be an rm -f of direct children of the state directory
+// ("$S/<name>", never one below incoming), or a read-only lock open; and
+// no redirect root's shell opens may name the directory or the variable.
+// Only the script argument of a runuser command's sh -c is opaque (the
+// signer's own shell opens what it names). It returns the refused
+// commands.
+func signerDirLinkSafety(text string) []string {
+	var bad []string
+	for _, block := range fencedBlocks(text) {
+		var vars []string
+		for _, l := range joinContinued(block) {
+			if strings.HasPrefix(l, "#") {
+				continue
+			}
+			for _, cmd := range splitCommands(l) {
+				if m := shellBinding.FindStringSubmatch(cmd); m != nil {
+					vars = append(vars, m[1])
+					continue
+				}
+				if !commandLinkSafe(cmd, vars) {
+					bad = append(bad, cmd)
+				}
+			}
+		}
+	}
+	return bad
+}
+
+// signerDirSpanSafety checks the inline code spans of text's prose, outside
+// the fenced blocks, as signerDirLinkSafety checks a block line, with the
+// variables the blocks bind (03-12b review): a span that names the state
+// directory must be one of the allowed commands.
+func signerDirSpanSafety(text string) []string {
+	var vars []string
+	var prose strings.Builder
+	inBlock := false
+	for _, l := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "```") {
+			inBlock = !inBlock
+			continue
+		}
+		if inBlock {
+			if m := shellBinding.FindStringSubmatch(strings.TrimSpace(l)); m != nil {
+				vars = append(vars, m[1])
+			}
+			continue
+		}
+		prose.WriteString(l + "\n")
+	}
+	var bad []string
+	for _, m := range inlineSpan.FindAllStringSubmatch(prose.String(), -1) {
+		for _, cmd := range splitCommands(strings.Join(strings.Fields(m[1]), " ")) {
+			if !commandLinkSafe(cmd, vars) {
+				bad = append(bad, cmd)
+			}
+		}
+	}
+	return bad
+}
+
+// fencedBlocks returns the lines of each fenced code block of text.
+func fencedBlocks(text string) [][]string {
+	var out [][]string
+	var block []string
+	inBlock := false
+	for _, l := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "```") {
+			if inBlock {
+				out = append(out, block)
+				block = nil
+			}
+			inBlock = !inBlock
+			continue
+		}
+		if inBlock {
+			block = append(block, l)
+		}
+	}
+	return out
+}
+
+// joinContinued joins backslash-continued lines, with runs of white space
+// collapsed.
+func joinContinued(lines []string) []string {
+	var joined []string
+	cur := ""
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		if strings.HasSuffix(t, "\\") {
+			cur += strings.TrimSuffix(t, "\\") + " "
+			continue
+		}
+		joined = append(joined, strings.Join(strings.Fields(cur+t), " "))
+		cur = ""
+	}
+	if cur != "" {
+		joined = append(joined, strings.Join(strings.Fields(cur), " "))
+	}
+	return joined
+}
+
+// splitCommands splits a shell line at its unquoted control operators (;,
+// &&, ||, | and &), leaving the redirects >|, &>, >& and <& whole; quotes
+// and backslash escapes are kept in the commands it returns.
+func splitCommands(l string) []string {
+	var out []string
+	var cur strings.Builder
+	flush := func() {
+		if c := strings.TrimSpace(cur.String()); c != "" {
+			out = append(out, c)
+		}
+		cur.Reset()
+	}
+	quote := byte(0)
+	for i := 0; i < len(l); i++ {
+		c := l[i]
+		split := false
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else if c == '\\' && quote == '"' && i+1 < len(l) {
+				cur.WriteByte(c)
+				i++
+				c = l[i]
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '\\' && i+1 < len(l):
+			cur.WriteByte(c)
+			i++
+			c = l[i]
+		case c == ';':
+			split = true
+		case c == '|' && (i == 0 || l[i-1] != '>'):
+			if i+1 < len(l) && l[i+1] == '|' {
+				i++
+			}
+			split = true
+		case c == '&' && i+1 < len(l) && l[i+1] == '&':
+			i++
+			split = true
+		case c == '&' && (i+1 >= len(l) || l[i+1] != '>') && (i == 0 || (l[i-1] != '>' && l[i-1] != '<')):
+			split = true
+		}
+		if split {
+			flush()
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	flush()
+	return out
+}
+
+// commandLinkSafe reports whether one shell command, with vars bound to the
+// state directory, passes signerDirLinkSafety's allowlist.
+func commandLinkSafe(cmd string, vars []string) bool {
+	if cmd == "" || strings.HasPrefix(cmd, "#") {
+		return true
+	}
+	names := func(s string) bool {
+		for _, dir := range stateDirNames(vars) {
+			if strings.Contains(s, dir) {
+				return true
+			}
+		}
+		return false
+	}
+	visible := runuserScript.ReplaceAllString(cmd, "$1''")
+	if !names(visible) {
+		return true
+	}
+	for _, dir := range stateDirNames(vars) {
+		if regexp.MustCompile(`^exec [0-9]+<"?` + regexp.QuoteMeta(dir) + `/signer\.lock"?$`).MatchString(cmd) {
+			return true
+		}
+	}
+	if stateDirCreate(cmd, vars) {
+		return true
+	}
+	if !strings.HasPrefix(cmd, "runuser -u keyroster-signer ") && !directChildRemoval(cmd, vars) {
+		return false
+	}
+	for _, m := range shellRedirect.FindAllStringSubmatch(visible, -1) {
+		if names(m[1]) {
+			return false
+		}
+	}
+	return true
+}
+
+// stateDirNames are the ways a shell line names the state directory: the
+// literal path, and $V and ${V} for each variable V bound to it.
+func stateDirNames(vars []string) []string {
+	out := []string{signerStateDir}
+	for _, v := range vars {
+		out = append(out, "$"+v, "${"+v+"}")
+	}
+	return out
+}
+
+// stateDirCreate reports whether l is root's creation of the state
+// directory itself, owned by keyroster-signer (signer-install.md step 4):
+// its parent is root's, so no link of keyroster-signer's lies on the path.
+// Nothing below the directory may be named.
+func stateDirCreate(l string, vars []string) bool {
+	op, ok := strings.CutPrefix(l, "install -d -o keyroster-signer -g keyroster-signer -m 0700 ")
+	if !ok {
+		return false
+	}
+	op = strings.Trim(op, `"`)
+	return slices.Contains(stateDirNames(vars), op) || op == signerStateDir+"/"
+}
+
+// directChildRemoval reports whether l is an rm -f whose every operand is a
+// direct child of the state directory ("$S/<name>" for a variable S bound
+// to it, or the literal path), never incoming or anything below it.
+func directChildRemoval(l string, vars []string) bool {
+	ops, ok := strings.CutPrefix(l, "rm -f ")
+	if !ok {
+		return false
+	}
+	for _, op := range strings.Fields(ops) {
+		op = strings.Trim(op, `"`)
+		name := ""
+		for _, dir := range stateDirNames(vars) {
+			if rest, ok := strings.CutPrefix(op, dir+"/"); ok {
+				name = rest
+			}
+		}
+		if name == "" || strings.Contains(name, "/") || name == "incoming" || strings.ContainsAny(name, "*?[") {
+			return false
+		}
+	}
+	return true
+}
+
+// TestCARotationRunbookLinkSafety (03-12b): in ca-rotation.md root runs
+// nothing below the signer's state directory: the files below incoming/
+// are removed, written and read only as keyroster-signer, in the pinned
+// forms, in the fenced blocks and in the prose's inline code spans. The
+// fixture subtests pin what the checker refuses and accepts.
+func TestCARotationRunbookLinkSafety(t *testing.T) {
+	block := func(lines ...string) string { return "```\n" + strings.Join(lines, "\n") + "\n```\n" }
+	const bind = "S=/var/lib/keyroster-signer"
+	for _, c := range []struct {
+		name string
+		text string
+		bad  bool
+	}{
+		{"one_line_root_write_refused", block("install -o keyroster-signer -g keyroster-signer -m 0600 /media/transfer/ceremony/* /var/lib/keyroster-signer/incoming/"), true},
+		{"continuation_line_write_refused", block("install -o keyroster-signer -g keyroster-signer -m 0600 \\", "  /media/transfer/ceremony/* /var/lib/keyroster-signer/incoming/"), true},
+		{"root_redirect_refused", block(bind, `runuser -u keyroster-signer -- cat /media/transfer/x >"$S/incoming/y"`), true},
+		{"root_rm_under_incoming_refused", block(bind, `rm -f "$S/incoming/bundle.json"`), true},
+		// A runuser prefix covers its own command only: root runs what
+		// follows a control operator (03-12b review).
+		{"and_list_after_runuser_refused", block(bind, `runuser -u keyroster-signer -- true && rm -f "$S/incoming/x"`), true},
+		{"semicolon_after_runuser_refused", block(`runuser -u keyroster-signer -- true; chown root /var/lib/keyroster-signer/incoming/x`), true},
+		{"pipe_to_root_tee_refused", block(bind, `runuser -u keyroster-signer -- cat /media/x | tee "$S/incoming/y"`), true},
+		// Root's shell opens a redirect's target, quoted or not.
+		{"single_quoted_redirect_target_refused", block(`runuser -u keyroster-signer -- cat /media/x >'/var/lib/keyroster-signer/incoming/y'`), true},
+		{"noclobber_override_redirect_refused", block(bind, `runuser -u keyroster-signer -- cat /media/x >|"$S/incoming/y"`), true},
+		{"ampersand_redirect_refused", block(bind, `runuser -u keyroster-signer -- cat /media/x &>"$S/incoming/y"`), true},
+		{"inline_span_root_write_refused", block(bind, "true") + "Then run `rm -f \"$S/incoming/x\"` as root.\n", true},
+		{"inline_span_literal_dir_refused", "Then run `chown root /var/lib/keyroster-signer/incoming/x`.\n", true},
+		{"runuser_form_accepted", block(bind,
+			`runuser -u keyroster-signer -- rm -f "$S/incoming/bundle.json" \`, `  "$S/incoming/policy.json"`,
+			`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/incoming/bundle.json" <"/media/transfer/succ/bundle.json"`,
+			`runuser -u keyroster-signer -- cat "$S/incoming/user-g2.json" >/media/transfer/user-g2.json`,
+			`rm -f "$S/restore-recovery-pending"`, `exec 9<"$S/signer.lock"`), false},
+		{"state_dir_create_accepted", block("install -d -o keyroster-signer -g keyroster-signer -m 0700 /var/lib/keyroster-signer"), false},
+		{"incoming_create_by_root_refused", block("install -d -o keyroster-signer -g keyroster-signer -m 0700 /var/lib/keyroster-signer/incoming"), true},
+		{"inline_span_runuser_accepted", block(bind, "true") + "As the signer's user\n(`runuser -u keyroster-signer -- rm -f \"$S/software/user-g2.age\"`), or\nremove it.\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := append(signerDirLinkSafety(c.text), signerDirSpanSafety(c.text)...); (len(got) != 0) != c.bad {
+				t.Fatalf("signerDirLinkSafety refused %q, want refused %t", got, c.bad)
+			}
+		})
+	}
+	t.Run("runbook_blocks_pass", func(t *testing.T) {
+		data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "ca-rotation.md")))
+		if bad := append(signerDirLinkSafety(data), signerDirSpanSafety(data)...); len(bad) != 0 {
+			t.Fatalf("ca-rotation.md runs, as root, below the signer's state directory:\n%s", strings.Join(bad, "\n"))
+		}
+		for _, want := range []string{`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"'`, "runuser -u keyroster-signer -- rm -f"} {
+			if !strings.Contains(data, want) {
+				t.Errorf("ca-rotation.md lacks %q", want)
+			}
+		}
+	})
+}
+
+// TestCARotationRunbookAbortPrev (03-12b review): the abort signs on the
+// bundle in force, ceremony 1's successor in /media/transfer/succ, as the
+// e2e test does (TestCANextAndAbort); ceremony 1's own --prev directory
+// would fail on its SHA-256 or with no such entry.
+func TestCARotationRunbookAbortPrev(t *testing.T) {
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "ca-rotation.md")))
+	win, err := sectionWindow(data, &signingSection{id: "ca_abort_prev", file: "ca-rotation.md", section: "Abort"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := strings.Join(strings.Fields(strings.ReplaceAll(win, "\\\n", " ")), " ")
+	for _, want := range []string{"keyroster root sign --prev /media/transfer/succ --prev-sha256 ", "--policy /media/transfer/succ/policy.json"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("the abort section lacks %q", want)
+		}
+	}
+	if strings.Contains(win, "/media/transfer/prev") {
+		t.Error("the abort section signs on ceremony 1's --prev directory, not on the bundle in force")
+	}
+}
+
+// TestSignerInstallGenesisLinkSafety (03-12b review): in signer-install.md
+// root reads, creates and writes nothing below the signer's state directory
+// in the genesis steps 4 to 6 either: their fenced blocks pass
+// signerDirLinkSafety (their prose names the directory's files as nouns,
+// so its inline spans are not checked), and its runuser forms for the
+// read, the directory and the writes are there.
+func TestSignerInstallGenesisLinkSafety(t *testing.T) {
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
+	for _, section := range []string{"4. Create the state directory", "5. Root ceremony", "6. Install the bundle"} {
+		win, err := sectionWindow(data, &signingSection{id: section, file: "signer-install.md", section: section})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bad := signerDirLinkSafety(win); len(bad) != 0 {
+			t.Errorf("signer-install.md step %s runs, as root, below the signer's state directory:\n%s", section, strings.Join(bad, "\n"))
+		}
+	}
+	for _, want := range []string{
+		"runuser -u keyroster-signer -- cat /var/lib/keyroster-signer/ca-pubkeys.json >/media/transfer/ca-pubkeys.json",
+		`runuser -u keyroster-signer -- sh -c 'umask 077 && mkdir -p "$1"' sh "$S/incoming"`,
+		`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/incoming/$f" <"/media/transfer/ceremony/$f"`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("signer-install.md lacks %q", want)
+		}
+	}
 }
 
 // TestSectionWindowRefusals (03-14b): sectionWindow refuses a duplicated

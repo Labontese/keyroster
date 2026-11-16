@@ -113,7 +113,7 @@ func TestInstallationIDSuccessor(t *testing.T) {
 		{"dropped_id_refused", &prevWithID, prevWithIDBytes, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			next, err := BuildSuccessor(tc.prev, tc.prevBytes, r.policy, rootKeysOf(r.c, r.d), 1, r.policy, rotationIssued, tc.next)
+			next, err := BuildSuccessor(tc.prev, tc.prevBytes, r.policy, SuccessorOptions{Roots: rootKeysOf(r.c, r.d), Threshold: 1, Policy: r.policy, IssuedAt: rotationIssued, InstallationID: tc.next})
 			if tc.wantErr {
 				if !errors.Is(err, ErrVersionChain) || !strings.Contains(err.Error(), "installation_id changed from "+id) {
 					t.Fatalf("BuildSuccessor: %v, want ErrVersionChain naming the change", err)

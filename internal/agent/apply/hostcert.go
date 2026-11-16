@@ -400,11 +400,15 @@ func (e *engine) readHostCertState(ctx context.Context, lg link) (*hostCertState
 		if pol, err := trust.ParsePolicy(stored.Policy); err == nil {
 			in.Policy = pol.Version
 		}
-		if cas, err := krl.RoleCAKeys(bundle, trust.RoleHost); err == nil {
-			for _, b := range cas {
-				if pub, err := ssh.ParsePublicKey(b); err == nil {
-					st.caKeys = append(st.caKeys, pub)
-				}
+		// The answer set is the host CA's active and next keys (03-12b):
+		// an aborted key is no longer an answer authority. The same set
+		// decides whether a kept certificate is still usable
+		// (hostcert.Due: one signed by a key outside it is replaced);
+		// 03-12c replaces it by the time-aware set. Revocation and
+		// recovery still read every state on purpose.
+		for _, ca := range trust.IssuingCAs(bundle, trust.RoleHost) {
+			if pub, err := trust.ParseKey(ca.Key); err == nil {
+				st.caKeys = append(st.caKeys, pub)
 			}
 		}
 	}

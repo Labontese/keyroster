@@ -302,8 +302,9 @@ apply the same rule (`trust.VerifySuccessor`):
   stolen current root and a key the thief creates meet both thresholds.
   `root sign --prev` prints a warning when the bundle in force has root
   threshold 1;
-- the CA, ops and log keys are carried over unchanged (CA rotation comes in
-  Phase 3);
+- the ops and log keys are carried over unchanged, and so are the CA
+  entries unless the successor adds a `next` CA or aborts one
+  (docs/runbooks/ca-rotation.md);
 - the policy is carried over unchanged, or advanced by exactly one version
   chained to the policy in force;
 - no policy admin is a root, new or retired. `root sign --prev` and
@@ -371,6 +372,12 @@ apply the same rule (`trust.VerifySuccessor`):
      policy in force as `--policy`, it reads `Policy in force: ...` and
      `Successor policy: unchanged, every field carried over`. Any other
      block means answer no.
+   - **The CA-change section and the root-set line.** Right after the
+     `signatures needed:` line, `CA entries: unchanged`, then
+     `Root set: CHANGED (added N, removed M)` with the numbers of the
+     agreed rotation. Any `CA <role> gen` line means the ceremony is not
+     what was agreed: answer no (a CA rotation follows
+     docs/runbooks/ca-rotation.md).
 
    A ceremony that both rotates the roots and changes the policy (03-15's
    v4) follows the section written for it. That section compares the new
@@ -684,6 +691,11 @@ You need everything from [What you need](#what-you-need), plus:
      `sha256:` line of step 2's output, which is the new policy's hash.
      The first line of that output (`successor of policy vN, sha256 ...`)
      is the hash of the previous policy.
+   - **The CA-change section and the root-set line.** Right after the
+     `signatures needed:` line, `CA entries: unchanged` and
+     `Root set: unchanged`. Any `CA <role> gen` line means the ceremony is
+     not what was agreed: answer no (a CA rotation follows
+     docs/runbooks/ca-rotation.md).
 
    A ceremony that both rotates the roots and changes the policy (03-15's
    v4) follows the section written for it. That section compares the new

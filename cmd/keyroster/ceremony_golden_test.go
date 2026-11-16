@@ -162,29 +162,87 @@ func (f *goldenFixture) writePolicy(t *testing.T, name string, successor bool, e
 	return path
 }
 
-// display runs root sign --prev with a wrong confirmation: it requires exit
-// 1 with "nothing was signed" and returns stdout, the display a custodian
-// reads before confirming.
-func (f *goldenFixture) display(t *testing.T, policy, out, fp string) string {
+// display runs root sign --prev with a wrong confirmation and the extra
+// flags (the CA changes, 03-12b): it requires exit 1 with "nothing was
+// signed" and returns stdout, the display a custodian reads before
+// confirming.
+func (f *goldenFixture) display(t *testing.T, policy, out, fp string, extra ...string) string {
 	t.Helper()
-	code, stdout, stderr := run(t, "root", "sign", "--prev", f.prev, "--prev-sha256", f.prevSHA, "--roots", f.roots, "--threshold", "2",
-		"--policy", policy, "--out-dir", out, "--agent-key", fp, "--confirm", "00000000")
+	code, stdout, stderr := run(t, append([]string{"root", "sign", "--prev", f.prev, "--prev-sha256", f.prevSHA, "--roots", f.roots, "--threshold", "2",
+		"--policy", policy, "--out-dir", out, "--agent-key", fp, "--confirm", "00000000"}, extra...)...)
 	if code != 1 || !strings.Contains(stderr, "nothing was signed") {
 		t.Fatalf("root sign --prev with a wrong confirmation: exit %d: %s", code, stderr)
 	}
 	return stdout
 }
 
-// signWith runs root sign --prev confirmed with the prefix of out's
-// bundle.json, and requires exit 0.
-func (f *goldenFixture) signWith(t *testing.T, policy, out, fp string) {
+// signWith runs root sign --prev with the extra flags, confirmed with the
+// prefix of out's bundle.json, and requires exit 0.
+func (f *goldenFixture) signWith(t *testing.T, policy, out, fp string, extra ...string) {
 	t.Helper()
 	confirm := fileSHA256(t, filepath.Join(out, "bundle.json"))[:8]
-	code, _, stderr := run(t, "root", "sign", "--prev", f.prev, "--prev-sha256", f.prevSHA, "--roots", f.roots, "--threshold", "2",
-		"--policy", policy, "--out-dir", out, "--agent-key", fp, "--confirm", confirm)
+	code, _, stderr := run(t, append([]string{"root", "sign", "--prev", f.prev, "--prev-sha256", f.prevSHA, "--roots", f.roots, "--threshold", "2",
+		"--policy", policy, "--out-dir", out, "--agent-key", fp, "--confirm", confirm}, extra...)...)
 	if code != 0 {
 		t.Fatalf("root sign --prev by %s: exit %d: %s", fp, code, stderr)
 	}
+}
+
+// caNextFile writes the prepare file of the user CA generation 2 with the
+// key of seed n, as keyroster-signer ca-rotate prepare writes it, and
+// returns its path and the key's fingerprint (03-12b).
+func (f *goldenFixture) caNextFile(t *testing.T, n byte) (string, string) {
+	t.Helper()
+	key := seedPub(t, n)
+	pub, err := trust.ParseKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := trust.CanonicalJSON(struct {
+		Role       string `json:"role"`
+		Generation uint32 `json:"generation"`
+		Key        string `json:"key"`
+		Alg        string `json:"alg"`
+		Custody    string `json:"custody"`
+	}{"user", 2, key, pub.Type(), "software"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.dir, "user-g2.json")
+	writeTestFile(t, path, data)
+	return path, ssh.FingerprintSHA256(pub)
+}
+
+// nextInForce makes the bundle in force version 2, the successor of the
+// fixture's that adds the user CA generation 2 with the key of seed n as
+// next, issued at 2026-10-06T00:00:00Z under the same policy and signed by
+// A and B (03-12b).
+func (f *goldenFixture) nextInForce(t *testing.T, n byte) {
+	t.Helper()
+	rootA, rootB := seedKey(1), seedKey(2)
+	prevData := readTestFile(t, filepath.Join(f.prev, "bundle.json"))
+	prev, err := trust.ParseBundle(prevData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := *prev
+	b.Version, b.Prev, b.IssuedAt = 2, trust.SHA256Hex(prevData), "2026-10-06T00:00:00Z"
+	b.CAs = append([]trust.CAEntry{prev.CAs[0], {Role: "user", Key: seedPub(t, n), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "next", Generation: 2}}, prev.CAs[1:]...)
+	if err := b.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := b.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(f.dir, "prev2")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(dir, "bundle.json"), data)
+	writeTestFile(t, filepath.Join(dir, "policy.json"), f.genesisPolicy)
+	signGoldenDocs(t, dir, rootA, rootB)
+	f.prev, f.prevSHA = dir, trust.SHA256Hex(data)
 }
 
 // verifyPrev runs trust verify --prev on out, requires exit 0 and returns
@@ -292,6 +350,47 @@ func checkInvariants(t *testing.T, kind, got string) {
 		t.Errorf("invariant: the installation id line (line %d) does not follow the Bundle SHA-256 line (%d)", inst+1, sha+1)
 	case policyAt >= 0 && inst > policyAt, signedBy >= 0 && inst > signedBy:
 		t.Errorf("invariant: the installation id line (line %d) is not before the policy block (%d) and the first signer line (%d)", inst+1, policyAt+1, signedBy+1)
+	}
+
+	// The CA-change section and the root-set line (03-12b): a successor
+	// output holds exactly one "Root set: " line, and either exactly one
+	// "CA entries: unchanged" line and no "CA <role> gen " line, or none
+	// and at least one, all after the "Successor of trust bundle" line and
+	// before the "Trust bundle version" line, with the root-set line last
+	// of them. A genesis output holds none of them.
+	caLine := func(l string) bool {
+		return strings.HasPrefix(l, "CA user gen ") || strings.HasPrefix(l, "CA host gen ") || strings.HasPrefix(l, "CA machine gen ")
+	}
+	unchanged, changed := 0, 0
+	for _, l := range lines {
+		if l == "CA entries: unchanged" {
+			unchanged++
+		}
+		if caLine(l) {
+			changed++
+		}
+	}
+	if kind == kindGenesis {
+		if n := count("Root set: ") + unchanged + changed; n != 0 {
+			t.Errorf("invariant: a genesis output has %d CA-change or root-set lines, want none", n)
+		}
+	} else {
+		rootSet, succ, tbv := first("Root set: "), first("Successor of trust bundle"), first("Trust bundle version")
+		switch {
+		case count("Root set: ") != 1:
+			t.Errorf("invariant: %d \"Root set: \" lines, want exactly 1", count("Root set: "))
+		case (unchanged != 1 || changed != 0) && (unchanged != 0 || changed == 0):
+			t.Errorf("invariant: %d \"CA entries: unchanged\" lines and %d \"CA <role> gen \" lines; want one and none, or none and at least one", unchanged, changed)
+		default:
+			for i, l := range lines {
+				if l != "CA entries: unchanged" && !caLine(l) && !strings.HasPrefix(l, "Root set: ") {
+					continue
+				}
+				if succ < 0 || tbv < 0 || i < succ || i > tbv || i > rootSet {
+					t.Errorf("invariant: line %d %q is not after the Successor of trust bundle line (%d), before the Trust bundle version line (%d) and at or before the root-set line (%d)", i+1, l, succ+1, tbv+1, rootSet+1)
+				}
+			}
+		}
 	}
 
 	block := first("Policy in force:")
@@ -442,6 +541,42 @@ func TestCeremonyGolden(t *testing.T) {
 		})
 		t.Run("trust_verify", func(t *testing.T) {
 			checkCeremony(t, kindSuccessorTrustVerify, "successor_pop.trust_verify", tv, true)
+		})
+	})
+
+	t.Run("successor_ca_next", func(t *testing.T) {
+		f := newGoldenFixture(t)
+		setCeremonyNow(t, "2026-10-06T00:00:00Z")
+		file, fp := f.caNextFile(t, 40)
+		ca := []string{"--ca-next", "user=" + file, "--ca-next-fingerprint", "user=" + fp}
+		pol, out := filepath.Join(f.prev, "policy.json"), filepath.Join(f.dir, "out")
+		rs := f.display(t, pol, out, f.fpA, ca...)
+		f.signWith(t, pol, out, f.fpA, ca...)
+		f.signWith(t, pol, out, f.fpB, ca...)
+		tv := f.verifyPrev(t, out)
+		t.Run("root_sign", func(t *testing.T) {
+			checkCeremony(t, kindSuccessorRootSign, "successor_ca_next.root_sign", rs, true)
+		})
+		t.Run("trust_verify", func(t *testing.T) {
+			checkCeremony(t, kindSuccessorTrustVerify, "successor_ca_next.trust_verify", tv, true)
+		})
+	})
+
+	t.Run("successor_ca_abort", func(t *testing.T) {
+		f := newGoldenFixture(t)
+		f.nextInForce(t, 40)
+		setCeremonyNow(t, "2026-10-07T00:00:00Z")
+		ca := []string{"--ca-retire", "user:2"}
+		pol, out := filepath.Join(f.prev, "policy.json"), filepath.Join(f.dir, "out")
+		rs := f.display(t, pol, out, f.fpA, ca...)
+		f.signWith(t, pol, out, f.fpA, ca...)
+		f.signWith(t, pol, out, f.fpB, ca...)
+		tv := f.verifyPrev(t, out)
+		t.Run("root_sign", func(t *testing.T) {
+			checkCeremony(t, kindSuccessorRootSign, "successor_ca_abort.root_sign", rs, true)
+		})
+		t.Run("trust_verify", func(t *testing.T) {
+			checkCeremony(t, kindSuccessorTrustVerify, "successor_ca_abort.trust_verify", tv, true)
 		})
 	})
 

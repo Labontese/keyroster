@@ -236,3 +236,147 @@ func TestSummaryFieldsCovered(t *testing.T) {
 		})
 	}
 }
+
+// pinnedBundleTypes pins the fields of trust.Bundle and of every type
+// reachable from it (03-12b, the Bundle reflect gate): a new field fails
+// TestBundleReflectGate until it is pinned here and has a mutation, so
+// that Summary shows the root holders every field a root signature vouches
+// for.
+var pinnedBundleTypes = map[reflect.Type][]string{
+	reflect.TypeFor[trust.Bundle](): {
+		"Version uint64 version",
+		"Prev string prev",
+		"IssuedAt string issued_at",
+		"Root trust.RootSet root",
+		"CAs []trust.CAEntry cas",
+		"OpsKey trust.KeyEntry ops_key",
+		"Log trust.LogEntry log",
+		"PolicySHA256 string policy_sha256",
+		"InstallationID string installation_id,omitempty",
+	},
+	reflect.TypeFor[trust.RootSet](): {"Keys []trust.RootKey keys", "Threshold uint32 threshold"},
+	reflect.TypeFor[trust.RootKey](): {"Key string key", "Custody string custody"},
+	reflect.TypeFor[trust.CAEntry](): {
+		"Role string role", "Key string key", "Alg string alg", "Custody string custody", "State string state", "Generation uint32 generation",
+	},
+	reflect.TypeFor[trust.KeyEntry](): {"Key string key", "Alg string alg", "Custody string custody"},
+	reflect.TypeFor[trust.LogEntry](): {"Key string key", "Alg string alg", "Custody string custody", "Origin string origin"},
+}
+
+// bundleReflectExempt are the bundle fields Summary does not print, each
+// with the reason. It holds exactly one name.
+var bundleReflectExempt = map[string]string{
+	"Bundle.InstallationID": "installationLine (cmd/keyroster/root.go) prints it after the summary, and 03-14c's ceremony goldens pin it",
+}
+
+// TestBundleReflectGate (03-12b): Summary's output, without its
+// Bundle SHA-256 line, changes for every field of trust.Bundle and the
+// types it reaches, except the one exempt field. Summary does not
+// validate, so a mutation need not give a valid bundle.
+func TestBundleReflectGate(t *testing.T) {
+	const need = "a new bundle field needs a Summary line and a TestBundleReflectGate mutation"
+	other := func(n byte) string {
+		pub, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{n}, ed25519.SeedSize)).Public())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return trust.FormatKey(pub)
+	}
+	mutations := map[string]func(b *trust.Bundle){
+		"Bundle.Version":  func(b *trust.Bundle) { b.Version++ },
+		"Bundle.Prev":     func(b *trust.Bundle) { b.Prev = trust.SHA256Hex([]byte("another bundle")) },
+		"Bundle.IssuedAt": func(b *trust.Bundle) { b.IssuedAt = "2026-10-06T00:00:00Z" },
+		"Bundle.Root":     func(b *trust.Bundle) { b.Root = trust.RootSet{Keys: b.Root.Keys[:1], Threshold: 1} },
+		"Bundle.CAs":      func(b *trust.Bundle) { b.CAs = b.CAs[:2] },
+		"Bundle.OpsKey": func(b *trust.Bundle) {
+			b.OpsKey = trust.KeyEntry{Key: other(31), Alg: ssh.KeyAlgoED25519, Custody: "software"}
+		},
+		"Bundle.Log": func(b *trust.Bundle) {
+			b.Log = trust.LogEntry{Key: other(32), Alg: ssh.KeyAlgoED25519, Custody: "software", Origin: b.Log.Origin}
+		},
+		"Bundle.PolicySHA256": func(b *trust.Bundle) { b.PolicySHA256 = trust.SHA256Hex([]byte("another policy")) },
+		"RootSet.Keys": func(b *trust.Bundle) {
+			b.Root.Keys = append(b.Root.Keys, trust.RootKey{Key: other(33), Custody: "software"})
+		},
+		"RootSet.Threshold":  func(b *trust.Bundle) { b.Root.Threshold++ },
+		"RootKey.Key":        func(b *trust.Bundle) { b.Root.Keys[0].Key = other(34) },
+		"RootKey.Custody":    func(b *trust.Bundle) { b.Root.Keys[0].Custody = "fido" },
+		"CAEntry.Role":       func(b *trust.Bundle) { b.CAs[0].Role = trust.RoleMachine },
+		"CAEntry.Key":        func(b *trust.Bundle) { b.CAs[0].Key = other(35) },
+		"CAEntry.Alg":        func(b *trust.Bundle) { b.CAs[0].Alg = ssh.KeyAlgoED25519 },
+		"CAEntry.Custody":    func(b *trust.Bundle) { b.CAs[0].Custody = "tpm" },
+		"CAEntry.State":      func(b *trust.Bundle) { b.CAs[0].State = "next" },
+		"CAEntry.Generation": func(b *trust.Bundle) { b.CAs[0].Generation = 2 },
+		"KeyEntry.Key":       func(b *trust.Bundle) { b.OpsKey.Key = other(36) },
+		"KeyEntry.Alg":       func(b *trust.Bundle) { b.OpsKey.Alg = ssh.KeyAlgoED25519 },
+		"KeyEntry.Custody":   func(b *trust.Bundle) { b.OpsKey.Custody = "tpm" },
+		"LogEntry.Key":       func(b *trust.Bundle) { b.Log.Key = other(37) },
+		"LogEntry.Alg":       func(b *trust.Bundle) { b.Log.Alg = ssh.KeyAlgoED25519 },
+		"LogEntry.Custody":   func(b *trust.Bundle) { b.Log.Custody = "tpm" },
+		"LogEntry.Origin":    func(b *trust.Bundle) { b.Log.Origin += "0" },
+	}
+
+	t.Run("exemptions", func(t *testing.T) {
+		if len(bundleReflectExempt) != 1 || bundleReflectExempt["Bundle.InstallationID"] == "" {
+			t.Fatalf("bundleReflectExempt = %v, want exactly Bundle.InstallationID", bundleReflectExempt)
+		}
+	})
+	reached := map[reflect.Type]bool{}
+	walkPolicyTypes(reflect.TypeFor[trust.Bundle](), map[reflect.Type]bool{}, func(typ reflect.Type) {
+		reached[typ] = true
+		want, ok := pinnedBundleTypes[typ]
+		if !ok {
+			t.Errorf("unpinned bundle type %s: pin its fields; %s", typ, need)
+			return
+		}
+		if got := policyFieldList(typ); !slices.Equal(got, want) {
+			t.Errorf("bundle type %s has fields %q, pinned %q; %s", typ, got, want, need)
+		}
+		for i := range typ.NumField() {
+			key := typ.Name() + "." + typ.Field(i).Name
+			if _, ok := mutations[key]; !ok && bundleReflectExempt[key] == "" {
+				t.Errorf("no Summary case for %s; %s", key, need)
+			}
+		}
+	})
+	for typ := range pinnedBundleTypes {
+		if !reached[typ] {
+			t.Errorf("pinned type not reached: %s; the walk must reach every type reachable from trust.Bundle", typ)
+		}
+	}
+
+	base := func() *trust.Bundle {
+		b, err := trust.ParseBundle(readVector(t, "bundle_genesis_v1.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	p := summaryPolicy(t, "policy_genesis_v1.json", nil)
+	// summary is Summary without the Bundle SHA-256 line, which any field
+	// changes.
+	summary := func(b *trust.Bundle) string {
+		var keep []string
+		for _, l := range strings.Split(Summary(b, p), "\n") {
+			if !strings.HasPrefix(l, "Bundle SHA-256:") {
+				keep = append(keep, l)
+			}
+		}
+		return strings.Join(keep, "\n")
+	}
+	want := summary(base())
+	keys := make([]string, 0, len(mutations))
+	for k := range mutations {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			b := base()
+			mutations[key](b)
+			if summary(b) == want {
+				t.Errorf("Summary's output does not change when %s changes; %s", key, need)
+			}
+		})
+	}
+}

@@ -183,6 +183,9 @@ func verifySuccessorBundle(stdout io.Writer, prevDir, prevSHA string, bundle, bu
 		return err
 	}
 	_, _ = fmt.Fprintf(stdout, "Successor of trust bundle v%d, sha256 %s\n", prev.Version, trust.SHA256Hex(prevBundle))
+	// What the successor does to the CA entries and the root set, before
+	// the summary, as root sign prints it (03-12b).
+	_, _ = io.WriteString(stdout, rootceremony.CAChanges(prev, next)+rootceremony.RootSetLine(prev, next))
 	_, _ = io.WriteString(stdout, rootceremony.Summary(next, p))
 	// root sign's installation line, after the summary and before the
 	// policy block (03-14c, render-05).

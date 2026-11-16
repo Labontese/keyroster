@@ -23,7 +23,7 @@ import (
 // under the fixture's genesis policy.
 func (f *fixture) successorUnder(prev *trust.Bundle, prevDoc, polDoc []byte, issuedAt string) (*trust.Bundle, spool.Doc) {
 	f.t.Helper()
-	b, err := trust.BuildSuccessor(prev, prevDoc, polDoc, prev.Root.Keys, 1, polDoc, issuedAt, testInstallation)
+	b, err := trust.BuildSuccessor(prev, prevDoc, polDoc, trust.SuccessorOptions{Roots: prev.Root.Keys, Threshold: 1, Policy: polDoc, IssuedAt: issuedAt, InstallationID: testInstallation})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -90,13 +90,14 @@ func mustAcceptedBundle1(t *testing.T, h *testHost, dir uint64) {
 // recordBelowWait is TestSpoolWindowWideningWait's recordAbove shape for
 // this file (03-08k). KRL 5, signed by the fixture's ops key K1, is applied
 // first: the swap the widening apply waits after. Bundle 2 keeps the policy
-// and adds a next CA x; bundle 3 rotates the policy to admin bob, drops x
-// and adds a CA line ssh-keygen refuses, and with recordOps names recordOps
-// as its ops key. Apply 1 records {Bundle: 3}. With aboveOps, bundle 4 is a
-// root-signed successor of bundle 3 under the next policy (admin bob kept)
-// that names aboveOps, and verifies in full. Directory 2, signed under bundle
-// 1's policy, widens deploy to role:q, so the next apply holds at the bundle
-// in force below the record and waits.
+// and adds a next CA x; bundle 3 rotates the policy to admin bob and
+// retires x, and with recordOps names recordOps as its ops key; bundle 4
+// keeps policy 2 and bundle 3's ops key and adds a next CA line ssh-keygen
+// refuses (03-12b: one CA change per version). Apply 1 records {Bundle: 4}.
+// With aboveOps, bundle 5 is a root-signed successor of bundle 4 under the
+// next policy (admin bob kept) that names aboveOps, and verifies in full.
+// Directory 2, signed under bundle 1's policy, widens deploy to role:q, so
+// the next apply holds at the bundle in force below the record and waits.
 func recordBelowWait(t *testing.T, recordOps, aboveOps ssh.Signer) *testHost {
 	t.Helper()
 	f := newFixture(t)
@@ -108,25 +109,22 @@ func recordBelowWait(t *testing.T, recordOps, aboveOps ssh.Signer) *testHost {
 	h.mustApply()
 	b2, d2 := f.successorNextUnder(f.bundle, f.bundleDoc, f.policyDoc, "2026-10-02T00:00:00Z", seedKey(t, 25))
 	rejected := seedKey(t, 21)
-	d3, p2 := f.rotationDropping(b2, d2.Body, "2026-10-03T00:00:00Z", rejected, recordOps)
-	h.state.Bundles[2], h.state.Bundles[3], h.state.Policies[2] = d2, d3, p2
+	b3, d3, p2 := f.rotationRetiring(b2, d2.Body, "2026-10-03T00:00:00Z", recordOps)
+	b4, d4 := f.successorNextUnder(b3, d3.Body, p2.Body, "2026-10-03T01:00:00Z", rejected)
+	h.state.Bundles[2], h.state.Bundles[3], h.state.Bundles[4], h.state.Policies[2] = d2, d3, d4, p2
 	line := trust.FormatKey(rejected.PublicKey())
 	h.run.rejectCA = func(l string) bool { return l == line }
 	if _, err := h.apply(); !errors.Is(err, ErrCALineRejected) {
 		t.Fatalf("apply 1: %v, want ca_line_rejected", err)
 	}
-	mustRecord(t, h, 3, 0)
+	mustRecord(t, h, 4, 0)
 	if aboveOps != nil {
-		b3, err := trust.ParseBundle(d3.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
 		pol2, err := trust.ParsePolicy(p2.Body)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, d4, p3 := f.rotationOps(b3, d3.Body, p2.Body, pol2, pol2.Admins, "2026-10-04T00:00:00Z", aboveOps)
-		h.state.Bundles[4], h.state.Policies[3] = d4, p3
+		_, d5, p3 := f.rotationOps(b4, d4.Body, p2.Body, pol2, pol2.Admins, "2026-10-04T00:00:00Z", aboveOps)
+		h.state.Bundles[5], h.state.Policies[3] = d5, p3
 	}
 	h.publishDir(h.spec("role:ops", "role:q"))
 	return h
@@ -224,15 +222,15 @@ func TestKRLSigner(t *testing.T) {
 	})
 	t.Run("record_signed_krl_during_a_wait_lands", func(t *testing.T) {
 		t.Parallel()
-		// The record's bundle 3 names K2, and KRL 8 is signed by K2. A poll
+		// The record's bundle 4 names K2, and KRL 8 is signed by K2. A poll
 		// reads from the record, and its capture brings nothing beyond it:
-		// its KRL step verifies KRL 8 under bundle 3, and the KRL-alone
+		// its KRL step verifies KRL 8 under bundle 4, and the KRL-alone
 		// pass, which fails under bundle 1, takes it under the capture's
-		// fully verified bundle 3.
+		// fully verified bundle 4.
 		runWait(t, waitCase{
 			build:   func(t *testing.T) *testHost { return recordBelowWait(t, seedKey(t, 22), nil) },
 			publish: func(h *testHost) { h.f.ops = seedKey(h.t, 22); h.publishKRL(5, 8) },
-			want:    waitWant{bundle: 1, dir: 2, lands: true, revoked: []uint64{5, 8}, record: 3},
+			want:    waitWant{bundle: 1, dir: 2, lands: true, revoked: []uint64{5, 8}, record: 4},
 		}, "poll", "forward")
 	})
 
@@ -507,14 +505,14 @@ func TestKRLSigner(t *testing.T) {
 	// --- a poll from the record ---
 	t.Run("retired_key_krl_during_a_wait_from_the_record_is_refused", func(t *testing.T) {
 		t.Parallel()
-		// The record's bundle 3 names K2, and KRL 8 is signed by the key in
+		// The record's bundle 4 names K2, and KRL 8 is signed by the key in
 		// force, K1, which bundle 3 retired. In poll, the KRL step refuses
 		// KRL 8 before the KRL-alone call; in forward, the held step commits
 		// without it.
 		runWait(t, waitCase{
 			build:   func(t *testing.T) *testHost { return recordBelowWait(t, seedKey(t, 22), nil) },
 			publish: func(h *testHost) { h.publishKRL(5, 8) },
-			want:    waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{8}, record: 3, retired: true},
+			want:    waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{8}, record: 4, retired: true},
 		}, "poll", "forward")
 	})
 
@@ -591,18 +589,18 @@ func TestKRLSigner(t *testing.T) {
 	})
 	t.Run("retired_key_krl_during_a_wait_above_the_record_is_refused", func(t *testing.T) {
 		t.Parallel()
-		// The record's bundle 3 keeps K1, and bundle 4 above it, verified by
-		// the widening apply, names K2. In a poll bundle 4 is known only
+		// The record's bundle 4 keeps K1, and bundle 5 above it, verified by
+		// the widening apply, names K2. In a poll bundle 5 is known only
 		// from the pending capture: the higher of the record's bundle and
 		// the pending capture's.
 		runWait(t, waitCase{
 			build:   func(t *testing.T) *testHost { return recordBelowWait(t, nil, seedKey(t, 22)) },
 			publish: func(h *testHost) { h.publishKRL(5, 8) },
 			during: func(_ *testing.T, h *testHost) {
-				delete(h.state.Bundles, 4)
+				delete(h.state.Bundles, 5)
 				delete(h.state.Policies, 3)
 			},
-			want: waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{8}, record: 3, retired: true},
+			want: waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{8}, record: 4, retired: true},
 		}, "poll", "forward")
 	})
 	t.Run("retired_key_krl_after_a_krl_alone_supersede_is_refused", func(t *testing.T) {
@@ -707,19 +705,19 @@ func TestKRLSigner(t *testing.T) {
 	})
 	t.Run("retired_key_krl_after_a_poll_from_the_record_is_refused", func(t *testing.T) {
 		t.Parallel()
-		// recordBelowWait's record branch: bundle 4 (K2), above the
-		// record's bundle 3 (K1), is offered only at poll 1, which reads
+		// recordBelowWait's record branch: bundle 5 (K2), above the
+		// record's bundle 4 (K1), is offered only at poll 1, which reads
 		// from the record and supersedes nothing. Poll 2 no longer offers
 		// it and offers KRL 8, which K1 signed.
 		h := recordBelowWait(t, nil, seedKey(t, 22))
-		d4, p3 := h.state.Bundles[4], h.state.Policies[3]
-		delete(h.state.Bundles, 4)
+		d5, p3 := h.state.Bundles[5], h.state.Policies[3]
+		delete(h.state.Bundles, 5)
 		delete(h.state.Policies, 3)
 		before := mustAcceptedNow(t, h)
 		log, err := runPolls(t, h,
-			func() { h.state.Bundles[4], h.state.Policies[3] = d4, p3 },
-			func() { delete(h.state.Bundles, 4); delete(h.state.Policies, 3); h.publishKRL(5, 8) })
-		mustWaitOutcome(t, h, err, log, before.KRLVersion, waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{8}, record: 3, retired: true})
+			func() { h.state.Bundles[5], h.state.Policies[3] = d5, p3 },
+			func() { delete(h.state.Bundles, 5); delete(h.state.Policies, 3); h.publishKRL(5, 8) })
+		mustWaitOutcome(t, h, err, log, before.KRLVersion, waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{8}, record: 4, retired: true})
 	})
 	t.Run("krl_alone_supersede_keeps_what_an_earlier_poll_verified", func(t *testing.T) {
 		t.Parallel()

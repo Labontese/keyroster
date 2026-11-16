@@ -887,9 +887,11 @@ func BackoffActive(nextAt, now uint64) bool { return nextAt > now && nextAt <= n
 
 // Due returns why key k with installed certificate c (nil: none) needs a
 // new certificate, "" when it does not: missing (none, or within
-// min(60, V/6) of ValidBefore), principals_differ, revoked (by the KRL in
-// force), or renew (at or after the entry's RenewAt).
-func Due(now uint64, e *Entry, c *ssh.Certificate, principals []string, k *krl.Parsed) string {
+// min(60, V/6) of ValidBefore), principals_differ, untrusted_ca (signed by
+// a key outside cas, the trusted host CA keys, such as an aborted next
+// key; an empty cas trusts nothing, as VerifyAnswer does), revoked (by the
+// KRL in force), or renew (at or after the entry's RenewAt).
+func Due(now uint64, e *Entry, c *ssh.Certificate, principals []string, cas []ssh.PublicKey, k *krl.Parsed) string {
 	switch {
 	case c == nil || e == nil:
 		return "missing"
@@ -897,6 +899,8 @@ func Due(now uint64, e *Entry, c *ssh.Certificate, principals []string, k *krl.P
 		return "missing"
 	case !samePrincipals(c.ValidPrincipals, principals):
 		return "principals_differ"
+	case c.SignatureKey == nil || !slices.ContainsFunc(cas, func(ca ssh.PublicKey) bool { return bytes.Equal(ca.Marshal(), c.SignatureKey.Marshal()) }):
+		return "untrusted_ca"
 	case Revoked(k, c):
 		return "revoked"
 	case now >= e.RenewAt:
@@ -912,8 +916,14 @@ func Due(now uint64, e *Entry, c *ssh.Certificate, principals []string, k *krl.P
 // when it is due, Defer while a request is pending, the back-off runs or a
 // sticky refusal holds, else Request. Every committed key the entry no
 // longer lists, or sshd no longer serves, is Removed. Renewal is lazy
-// across a CA rotation: a certificate of a CA key that is still trusted is
-// kept until it is due (X10).
+// across a CA rotation: a certificate of a CA key that is still in
+// in.CAKeys is kept until it is due (X10), and one of a key that left the
+// set is due at once (untrusted_ca). An empty in.CAKeys makes every
+// certificate due, failing closed as VerifyAnswer does; the requests still
+// wait behind the pending, sticky and back-off checks. The agent passes an
+// empty set only when accepted/ is missing (a dry run), where a host-level
+// hold comes first (the directory is then unauthorized): a stored bundle
+// is verified and holds exactly one active host CA key.
 func Decide(in Input) []Action {
 	if code, nothing := HostHold(in); code != "" {
 		return []Action{{Kind: Hold, Code: code, WriteNothing: nothing}}
@@ -939,7 +949,7 @@ func Decide(in Input) []Action {
 			out = append(out, Action{Kind: Defer, Key: k, Pub: pub, Code: DeferAlgorithmDisabled})
 			continue
 		}
-		why := Due(now, Find(in.Committed, k), in.Installed[k], in.Entry.Principals, in.KRL)
+		why := Due(now, Find(in.Committed, k), in.Installed[k], in.Entry.Principals, in.CAKeys, in.KRL)
 		if why == "" {
 			out = append(out, Action{Kind: Keep, Key: k, Pub: pub})
 			continue

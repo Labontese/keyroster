@@ -162,10 +162,14 @@ runuser -u keyroster-signer -g keyroster-signer -G tss -- \
 keys inside the TPM and prints the manufacturer and custody, for example
 `TPM manufacturer: IBM → custody vtpm`. It writes
 `/var/lib/keyroster-signer/ca-pubkeys.json`. Copy that file (public keys
-only) to the transfer USB:
+only) to the transfer USB. Read it as the signer's user, which owns the
+state directory and could replace the file by a link to a file only root
+may read:
 
 ```
-install -m 0644 /var/lib/keyroster-signer/ca-pubkeys.json /media/transfer/ca-pubkeys.json
+# The signer's user opens the file; root's shell opens only the target
+# on the medium, which is root's.
+runuser -u keyroster-signer -- cat /var/lib/keyroster-signer/ca-pubkeys.json >/media/transfer/ca-pubkeys.json
 sha256sum /media/transfer/ca-pubkeys.json   # record in the transcript
 ```
 
@@ -179,11 +183,20 @@ will authorize issuance with their own SSH key. The software roots print a
 ## 6. Install the bundle
 
 Copy the signed bundle and policy where the signer's user can read them,
-and pin the root fingerprints **from the paper transcript**:
+and pin the root fingerprints **from the paper transcript**. Root creates
+and writes nothing below the state directory, which the signer's user owns
+and could fill with links: `incoming` and its files are created as that
+user, a stale file of an earlier attempt is removed as that user first,
+and root's shell only opens the files on the medium:
 
 ```
-install -d -o keyroster-signer -g keyroster-signer -m 0700 /var/lib/keyroster-signer/incoming
-install -o keyroster-signer -g keyroster-signer -m 0600 /media/transfer/ceremony/* /var/lib/keyroster-signer/incoming/
+S=/var/lib/keyroster-signer
+runuser -u keyroster-signer -- sh -c 'umask 077 && mkdir -p "$1"' sh "$S/incoming"
+runuser -u keyroster-signer -- rm -f "$S/incoming/bundle.json" "$S/incoming/bundle.json.sigs" \
+  "$S/incoming/policy.json" "$S/incoming/policy.json.sigs"
+for f in bundle.json bundle.json.sigs policy.json policy.json.sigs; do
+  runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/incoming/$f" <"/media/transfer/ceremony/$f"
+done
 runuser -u keyroster-signer -g keyroster-signer -G tss -- \
   keyroster-signer install-bundle --state-dir /var/lib/keyroster-signer \
   --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
@@ -411,12 +424,12 @@ to the signer's passphrase, and refuses unless its fingerprint is the
 one `--key` names. `prepare` records the new
 generation as a row and a `ca_generation` audit-log entry in one
 transaction, writes the prepare file (the new public key, its generation,
-algorithm and custody) for the root ceremony that 03-12b adds, and prints
+algorithm and custody) for the root ceremony in docs/runbooks/ca-rotation.md, and prints
 `role <role> generation <N> <fingerprint> <alg> <custody>`. Read that
 fingerprint aloud from the signer console to the second person. It
 changes nothing that a host or a client trusts: the bundle in force still
 names the old key, and the ceremony and the rest of the rotation are in
-`docs/runbooks/ca-rotation.md` (added by 03-12b).
+`docs/runbooks/ca-rotation.md`.
 
 The refusals, by name, and what to do:
 

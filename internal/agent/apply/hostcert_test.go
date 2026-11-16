@@ -340,6 +340,79 @@ func TestHostCertStep(t *testing.T) {
 			t.Fatalf("a step with nothing due did %+v", r)
 		}
 	})
+	for _, c := range []struct {
+		name  string
+		abort bool
+	}{{"hostcert_answer_aborted_ca_refused", true}, {"hostcert_answer_next_ca_accepted", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			// The bundle in force lists the host CA generation 1 active and
+			// generation 2 next, or, after the abort, retired (03-12b), and
+			// the answer's certificate is signed by generation 2's key: the
+			// answer set is the active and next keys.
+			h := newHostCertHost(t)
+			k2 := seedKey(t, 27)
+			for v, d := range h.f.roleNextChain(trust.RoleHost, k2, c.abort) {
+				h.state.Bundles[v] = d
+			}
+			h.publishDir(h.hostSpec(h.sshd.pub))
+			h.mustApply()
+			if a, err := h.accepted(); err != nil || a.BundleVersion != uint64(len(h.state.Bundles)) {
+				t.Fatalf("accepted/ %+v (%v), want the newest bundle in force", a, err)
+			}
+			h.mustHostCerts()
+			gen1 := h.f.host
+			h.f.host = k2
+			for k, req := range h.outboxRequests() {
+				pub, err := ssh.ParsePublicKey(req.HostKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				id := hex.EncodeToString(req.RequestID[:])
+				h.writeAnswer(k, hostcert.Answer{RequestID: id, Certificate: h.issue(pub, id).Marshal()})
+			}
+			h.f.host = gen1
+			r, err := h.hostCerts()
+			if c.abort {
+				if len(h.record().Committed) != 0 || len(h.certFiles()) != 0 {
+					t.Fatalf("an answer signed by the aborted host CA key was installed: %+v (%v), record %+v", r, err, h.record())
+				}
+				return
+			}
+			if err != nil || len(r.Installed) != 1 || len(h.record().Committed) != 1 {
+				t.Fatalf("an answer signed by the next host CA key: %+v (%v), want it installed", r, err)
+			}
+		})
+	}
+	t.Run("hostcert_kept_cert_of_aborted_ca_replaced", func(t *testing.T) {
+		// A certificate installed while its host CA key was next is kept
+		// while the key is next, and replaced once the abort is in force
+		// (03-12b).
+		h := newHostCertHost(t)
+		k2 := seedKey(t, 27)
+		chain := h.f.roleNextChain(trust.RoleHost, k2, true)
+		h.state.Bundles[2] = chain[2]
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.mustHostCerts()
+		gen1 := h.f.host
+		h.f.host = k2
+		h.answer()
+		h.f.host = gen1
+		if r := h.mustHostCerts(); len(r.Installed) != 1 {
+			t.Fatalf("an answer signed by the next host CA key: %+v, want it installed", r)
+		}
+		if r := h.mustHostCerts(); len(r.Requested) != 0 {
+			t.Fatalf("a certificate of the next host CA key was replaced while the key is next: %+v", r)
+		}
+		h.state.Bundles[3] = chain[3]
+		h.mustApply()
+		if a, err := h.accepted(); err != nil || a.BundleVersion != 3 {
+			t.Fatalf("accepted/ %+v (%v), want the abort bundle in force", a, err)
+		}
+		if r := h.mustHostCerts(); len(r.Requested) != 1 {
+			t.Fatalf("a kept certificate of the aborted host CA key: %+v, want a replacement request", r)
+		}
+	})
 	hostCertStepCases(t)
 	hostCertStepCases2(t)
 }

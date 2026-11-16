@@ -340,8 +340,9 @@ var errIssuedBeforePrev = fmt.Errorf("%w", ErrVersionChain)
 // one; policy is prevPolicy unchanged or chained to it as the next
 // version, and a changed policy keeps pop.hosts once set
 // (CheckPoPSuccessor); a root in both prev and next keeps its custody
-// label; and no policy admin is a root of next or of prev. It returns the
-// parsed policy.
+// label; the CA entries change only as checkCATransitions allows, by
+// adding one next entry or aborting one per role (03-12b); and no policy
+// admin is a root of next or of prev. It returns the parsed policy.
 func checkSuccessorChain(prev *Bundle, prevCanonical, prevPolicy []byte, next *Bundle, policy []byte) (*Policy, error) {
 	if prev == nil {
 		return nil, fmt.Errorf("%w: no previous bundle", ErrVersionChain)
@@ -394,6 +395,9 @@ func checkSuccessorChain(prev *Bundle, prevCanonical, prevPolicy []byte, next *B
 		}
 	}
 	if err := checkCarriedCustody(prev, next); err != nil {
+		return nil, err
+	}
+	if err := checkCATransitions(prev, next); err != nil {
 		return nil, err
 	}
 	// A root that next retires may still exist, so it must not become an

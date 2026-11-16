@@ -174,6 +174,37 @@ func TestDecide(t *testing.T) {
 			t.Fatalf("a certificate of a still-trusted older CA key: %+v, want kept until due", a)
 		}
 	})
+	t.Run("kept_cert_of_withdrawn_ca_due", func(t *testing.T) {
+		// A certificate signed by a next CA key is kept while that key is
+		// in the set, and due as untrusted_ca once the key left it (an
+		// abort, 03-12b): the same request path as an expired one.
+		next := newKey(t)
+		c := e.issue(t, t0, 2592000, next)
+		in := e.input(t0+1, c, nil)
+		in.CAKeys = []ssh.PublicKey{e.ca.PublicKey(), next.PublicKey()}
+		if a := only(t, Decide(in)); a.Kind != Keep {
+			t.Fatalf("a certificate of the next CA key while it is next: %+v, want kept", a)
+		}
+		in.CAKeys = []ssh.PublicKey{e.ca.PublicKey()}
+		if a := only(t, Decide(in)); a.Kind != Request || a.Code != "untrusted_ca" {
+			t.Fatalf("a certificate of an aborted CA key: %+v, want a request untrusted_ca", a)
+		}
+	})
+	t.Run("empty_ca_set_trusts_nothing", func(t *testing.T) {
+		// An empty set trusts no certificate, as VerifyAnswer does; the
+		// request it makes due waits behind the key's back-off.
+		c := e.issue(t, t0, 2592000, e.ca)
+		in := e.input(t0+1, c, nil)
+		in.CAKeys = nil
+		if a := only(t, Decide(in)); a.Kind != Request || a.Code != "untrusted_ca" {
+			t.Fatalf("no CA key in the set: %+v, want a request untrusted_ca", a)
+		}
+		in = e.input(t0+1, c, &Attempts{Version: AttemptsVersion, Keys: []Attempt{{KeySHA256: k, NextAt: t0 + 60}}})
+		in.CAKeys = nil
+		if a := only(t, Decide(in)); a.Kind != Defer || a.Code != DeferBackoff {
+			t.Fatalf("no CA key in the set during a back-off: %+v, want deferred", a)
+		}
+	})
 	for _, h := range []struct {
 		name string
 		edit func(*Input)

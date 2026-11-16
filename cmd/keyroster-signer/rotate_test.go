@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -458,7 +459,8 @@ func TestSignerRestartMixedBundle(t *testing.T) {
 		if code, out := runSigner(t, args...); code != 0 {
 			t.Fatalf("ca-init exited %d:\n%s", code, out)
 		}
-		install(t, st, genesisFiles(t, st))
+		g := genesisFiles(t, st)
+		install(t, st, g)
 		outFile := filepath.Join(t.TempDir(), "user-g2.json")
 		code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--out", outFile)
 		if code != 0 {
@@ -491,22 +493,199 @@ func TestSignerRestartMixedBundle(t *testing.T) {
 			}
 		}
 		check(t, st, ssh.FingerprintSHA256(pub1), ssh.FingerprintSHA256(pub2))
+		// With generation 2 next in the bundle in force (03-12b): one more
+		// production-factor decrypt of generation 2, no new key.
+		installNext(t, st, g, genesisChain(t, g), pf)
+		check(t, st, ssh.FingerprintSHA256(pub1), ssh.FingerprintSHA256(pub2))
 	})
 	t.Run("agent", func(t *testing.T) {
 		st := newRotateState(t)
-		install(t, st, genesisFiles(t, st))
-		fp2 := st.addKey(t)
-		if code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--key", fp2,
-			"--out", filepath.Join(t.TempDir(), "user-g2.json")); code != 0 {
-			t.Fatalf("ca-rotate prepare exited %d:\n%s", code, out)
-		}
+		g := genesisFiles(t, st)
+		install(t, st, g)
+		fp2, pf := prepareNext(t, st, "user")
 		user, _ := st.caPubKeys(t).Key(trust.RoleUser)
 		pub1, err := trust.ParseKey(user.Key)
 		if err != nil {
 			t.Fatal(err)
 		}
 		check(t, st, ssh.FingerprintSHA256(pub1), fp2)
+		// With generation 2 next in the bundle in force (03-12b).
+		installNext(t, st, g, genesisChain(t, g), pf)
+		check(t, st, ssh.FingerprintSHA256(pub1), fp2)
 	})
+}
+
+// prepareNext adds a fresh key to st's agent and runs ca-rotate prepare
+// for role with it, which must succeed; it returns the fingerprint and
+// the prepare file, read strictly (03-12b).
+func prepareNext(t *testing.T, st *rotateState, role string) (string, prepareFile) {
+	t.Helper()
+	fp := st.addKey(t)
+	out := filepath.Join(t.TempDir(), role+"-next.json")
+	if code, msg := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", role, "--key", fp, "--out", out); code != 0 {
+		t.Fatalf("ca-rotate prepare exited %d:\n%s", code, msg)
+	}
+	data, err := os.ReadFile(out) //nolint:gosec // G304: the test's own prepare file
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pf prepareFile
+	if err := trust.DecodeStrict(data, &pf); err != nil {
+		t.Fatalf("prepare file %q: %v", data, err)
+	}
+	return fp, pf
+}
+
+// chainDocs is a bundle in force with its canonical bytes, and its policy.
+type chainDocs struct {
+	b      *trust.Bundle
+	canon  []byte
+	p      *trust.Policy
+	polDoc []byte
+}
+
+// genesisChain is g's genesis bundle and policy as a chainDocs.
+func genesisChain(t *testing.T, g genesisDocs) chainDocs {
+	t.Helper()
+	canon, err := g.b.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := g.p.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return chainDocs{b: g.b, canon: canon, p: g.p, polDoc: pol}
+}
+
+// buildSuccessorDocs builds the successor of c under its policy with the
+// CA changes next and retire (trust.BuildSuccessor), issued a second after
+// c, and returns it as a chainDocs.
+func buildSuccessorDocs(t *testing.T, c chainDocs, next []trust.CAEntry, retire []trust.CARef) chainDocs {
+	t.Helper()
+	issued, err := time.Parse(trust.TimeFormat, c.b.IssuedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := trust.BuildSuccessor(c.b, c.canon, c.polDoc, trust.SuccessorOptions{
+		Roots: c.b.Root.Keys, Threshold: 1, Policy: c.polDoc,
+		IssuedAt: issued.Add(time.Second).Format(trust.TimeFormat), InstallationID: c.b.InstallationID,
+		CANext: next, CARetire: retire,
+	})
+	if err != nil {
+		t.Fatalf("BuildSuccessor: %v", err)
+	}
+	canon, err := b.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return chainDocs{b: b, canon: canon, p: c.p, polDoc: c.polDoc}
+}
+
+// installDocs signs c with root and runs install-bundle on it; it returns
+// the exit code and the output.
+func installDocs(t *testing.T, st *rotateState, c chainDocs, root ssh.Signer) (int, string) {
+	t.Helper()
+	bundle, policy := writeSignedDocs(t, c.b, c.p, root)
+	return runSigner(t, "install-bundle", "--state-dir", st.dir, "--bundle", bundle, "--policy", policy)
+}
+
+// installNext builds the successor of c that adds the prepare file pf as a
+// next entry, requires that the builder added it, installs it signed by g's
+// root, which must succeed, and returns it (03-12b).
+func installNext(t *testing.T, st *rotateState, g genesisDocs, c chainDocs, pf prepareFile) chainDocs {
+	t.Helper()
+	add := trust.CAEntry{Role: pf.Role, Key: pf.Key, Alg: pf.Alg, Custody: pf.Custody, State: "next", Generation: pf.Generation}
+	next := buildSuccessorDocs(t, c, []trust.CAEntry{add}, nil)
+	if len(next.b.CAs) != len(c.b.CAs)+1 || !slices.Contains(next.b.CAs, add) {
+		t.Fatalf("BuildSuccessor ignored CANext: the successor lists %+v", next.b.CAs)
+	}
+	if code, out := installDocs(t, st, next, g.root); code != 0 {
+		t.Fatalf("install-bundle of the successor adding %s generation %d as next exited %d:\n%s", pf.Role, pf.Generation, code, out)
+	}
+	return next
+}
+
+// TestCANextTracer (03-12b): ceremony 1 and abort end to end on one
+// signer. A prepared user key is added as next by a root-signed successor,
+// which installs; doctor passes, the signer restarts and still signs with
+// generation 1, and the export verifies. A second next entry and a changed
+// active key are refused by the chain rule with nothing written, and the
+// abort installs and verifies.
+func TestCANextTracer(t *testing.T) {
+	st := newRotateState(t)
+	g := genesisFiles(t, st)
+	install(t, st, g)
+	_, export0, err := exportAndVerify(t, st, g.rootFP)
+	if err != nil {
+		t.Fatalf("audit verify of the genesis export: %v", err)
+	}
+	installs0 := strings.Count(export0, `"kind":"bundle_install"`)
+
+	fp, pf := prepareNext(t, st, "user")
+	v1 := genesisChain(t, g)
+	v2 := installNext(t, st, g, v1, pf)
+	if len(v2.b.CAs) != 4 || v2.b.CAs[1].State != "next" || v2.b.CAs[1].Generation != 2 {
+		t.Fatalf("BuildSuccessor ignored CANext: %+v", v2.b.CAs)
+	}
+
+	code, out := runSigner(t, "doctor", "--state-dir", st.dir)
+	if code != 0 {
+		t.Fatalf("doctor after the next install exited %d:\n%s", code, out)
+	}
+	if !strings.Contains(out, "next g2 "+fp) {
+		t.Fatalf("doctor's generations line lacks next g2 %s:\n%s", fp, out)
+	}
+	userCA, _ := st.caPubKeys(t).Key(trust.RoleUser)
+	if got := trust.FormatKey(startSigner(t, st).CAPublicKey(wire.CARoleUser)); got != userCA.Key {
+		t.Fatalf("the restarted signer serves user CA %s, want generation 1 %s", got, userCA.Key)
+	}
+	if _, _, err := exportAndVerify(t, st, g.rootFP); err != nil {
+		t.Fatalf("audit verify after the next install: %v", err)
+	}
+
+	// Edited on the bundle struct before signing: BuildSuccessor would
+	// refuse both first.
+	_, pf3 := prepareNext(t, st, "user")
+	leaves := st.count(t, "SELECT count(*) FROM log_leaf")
+	for name, edit := range map[string]func(b *trust.Bundle){
+		"second_next": func(b *trust.Bundle) {
+			b.CAs = slices.Insert(b.CAs, 2, trust.CAEntry{Role: pf3.Role, Key: pf3.Key, Alg: pf3.Alg, Custody: pf3.Custody, State: "next", Generation: pf3.Generation})
+		},
+		"active_changed": func(b *trust.Bundle) { b.CAs[0].Key = pf3.Key },
+	} {
+		bad := buildSuccessorDocs(t, v2, nil, nil)
+		edit(bad.b)
+		code, out := installDocs(t, st, bad, g.root)
+		if code == 0 || !strings.Contains(out, "trust: bundle version or prev hash breaks the chain") || !strings.Contains(out, "CA user generation") {
+			t.Fatalf("%s: install-bundle exited %d, want the chain rule's refusal naming CA user generation:\n%s", name, code, out)
+		}
+		if v := st.count(t, "SELECT COALESCE(MAX(version), 0) FROM trust_bundle"); v != 2 {
+			t.Fatalf("%s: installed bundle version %d after the refusal, want 2", name, v)
+		}
+		if n := st.count(t, "SELECT count(*) FROM log_leaf"); n != leaves {
+			t.Fatalf("%s: %d leaves after the refusal, want %d", name, n, leaves)
+		}
+	}
+
+	v3 := buildSuccessorDocs(t, v2, nil, []trust.CARef{{Role: "user", Generation: 2}})
+	if code, out := installDocs(t, st, v3, g.root); code != 0 {
+		t.Fatalf("install-bundle of the abort exited %d:\n%s", code, out)
+	}
+	if v3.b.CAs[1].State != "retired" {
+		t.Fatalf("the abort successor lists %+v, want user generation 2 retired", v3.b.CAs)
+	}
+	startSigner(t, st)
+	if code, out := runSigner(t, "doctor", "--state-dir", st.dir); code != 0 {
+		t.Fatalf("doctor after the abort exited %d:\n%s", code, out)
+	}
+	_, export, err := exportAndVerify(t, st, g.rootFP)
+	if err != nil {
+		t.Fatalf("audit verify after the abort: %v", err)
+	}
+	if n := strings.Count(export, `"kind":"bundle_install"`); n != installs0+2 {
+		t.Fatalf("the export holds %d bundle_install entries, want %d", n, installs0+2)
+	}
 }
 
 // TestPrepareFileFormat (03-12) pins the prepare file's bytes, which the
