@@ -859,7 +859,10 @@ func TestRunTrustDue(t *testing.T) {
 		lp.idle("after the failed apply at the end", 2)
 	})
 	// PR #107 review: the timer applies with no document in the spool, and
-	// with a spool that does not read.
+	// with a spool that does not read. The first pins Run's trigger only:
+	// an empty spool is a capture that verifies as unchanged, so forward's
+	// own narrowing lands the drop, not dropDue. The second goes through
+	// dropDue (a capture that does not read).
 	for _, c := range []struct {
 		name  string
 		spoil func(t *testing.T, h *testHost)

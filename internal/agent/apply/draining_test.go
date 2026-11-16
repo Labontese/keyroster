@@ -320,6 +320,95 @@ func TestDrainingDropRefusedCapture(t *testing.T) {
 			t.Fatalf("FALLBACK: accepted/ %+v (%v), want bundle 3 and directory 1 unchanged", a, err)
 		}
 	})
+	t.Run("never_adds_a_principal_line", func(t *testing.T) {
+		// PR #108 review: current lacks a principal line that the accepted
+		// state renders; the drop leaves it out.
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		p := filepath.Join(PrincipalsDir, "deploy")
+		setCurrentFile(t, h, p, strings.ReplaceAll(h.file(p), "role:ops\n", ""))
+		refused(t, h, old, caText(h.f.user, h.f.mach))
+		if got := h.principals("deploy"); len(got) != 0 {
+			t.Fatalf("FALLBACK: deploy's principals after the drop = %v, want none", got)
+		}
+	})
+	t.Run("unreadable_latch_blocks_every_draining_entry", func(t *testing.T) {
+		// PR #108 review: past a's end and inside b's window, a latch that
+		// does not read blocks both, and the drop never overwrites it.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		a, b := seedKey(t, seedDrainOld), seedKey(t, seedDrainOld2)
+		h.useBundle(3, f.withBundle(3, twoDrainingCA(f, a, drainAt, b, "2026-10-26T14:00:00Z")))
+		h.installed("role:ops")
+		writeLatchFile(t, h, []byte("not json"), 0o600)
+		h.clock.advance(90 * time.Minute)
+		h.publishUnverifiedKRL()
+		if _, err := h.apply(); !errors.Is(err, state.ErrKRL) {
+			t.Fatalf("FALLBACK: the refused capture with the latch unreadable: %v, want krl_not_verified", err)
+		}
+		if got := h.file(CAFile); got != caText(f.user, f.mach) {
+			t.Fatalf("FALLBACK: user_ca_keys = %q, want %q (both draining keys blocked)", got, caText(f.user, f.mach))
+		}
+		if got := latchFile(t, h); string(got) != "not json" {
+			t.Fatalf("FALLBACK: the latch = %q, want the unreadable bytes left as they were", got)
+		}
+	})
+	t.Run("capture_error_with_unapplied_record", func(t *testing.T) {
+		// PR #108 review: the capture chained from an unapplied record does
+		// not read at all; the drop lands and the record stays.
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		publishRun(h, 2, 2)
+		if _, err := h.apply(); !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("FALLBACK: directory 2 above the caps: %v, want generation_too_large", err)
+		}
+		mustRecord(t, h, 0, 2)
+		if err := os.RemoveAll(h.spool); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(h.spool, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h.clock.advance(2 * time.Hour)
+		if _, err := Apply(t.Context(), h.cfg, h.l); err == nil {
+			t.Fatal("FALLBACK: the apply with a spool that does not read succeeded; want its error")
+		}
+		if got := h.file(CAFile); got != caText(h.f.user, h.f.mach) {
+			t.Fatalf("FALLBACK: user_ca_keys = %q, want %q (%s dropped)", got, caText(h.f.user, h.f.mach), fp(old))
+		}
+		if h.lastGood() != h.current() {
+			t.Fatalf("FALLBACK: last-good %d, current %d; want the drop committed", h.lastGood(), h.current())
+		}
+		mustRecord(t, h, 0, 2)
+	})
+	t.Run("touches_nothing_else", func(t *testing.T) {
+		// PR #108 review: the drop writes no drop-in, no host certificate
+		// and no takeover plan.
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		snap := func() string {
+			var b strings.Builder
+			dropIn, err := os.ReadFile(h.l.DropIn())
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.Write(dropIn)
+			ents, _ := os.ReadDir(h.l.HostCertDir())
+			for _, e := range ents {
+				c, _ := os.ReadFile(filepath.Join(h.l.HostCertDir(), e.Name()))
+				b.WriteString("\n" + e.Name() + "\n" + string(c))
+			}
+			if _, err := os.Lstat(h.l.State(adoptFile)); !os.IsNotExist(err) {
+				b.WriteString("\nadopt plan present")
+			}
+			return b.String()
+		}
+		before := snap()
+		refused(t, h, old, caText(h.f.user, h.f.mach))
+		if after := snap(); after != before {
+			t.Fatalf("FALLBACK: the drop-in, the host certificates or the takeover plan changed:\nbefore %q\nafter  %q", before, after)
+		}
+	})
 	t.Run("nothing_due_changes_nothing", func(t *testing.T) {
 		h, old := newDrainingHost(t)
 		h.installed("role:ops")
