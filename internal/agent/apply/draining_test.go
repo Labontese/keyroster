@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/sshsig"
@@ -330,6 +331,72 @@ func TestDrainingDropRefusedCapture(t *testing.T) {
 		if h.current() != before || h.genCount() != gens || !strings.Contains(h.file(CAFile), caText(old)) || latchFile(t, h) != nil {
 			t.Fatalf("FALLBACK: inside the window: current %d (before %d), %d generations (before %d), user_ca_keys %q; want nothing changed", h.current(), before, h.genCount(), gens, h.file(CAFile))
 		}
+	})
+}
+
+// TestDrainingDropRefusedGeneration (PR #108 review): a draining CA past
+// its end leaves current's user_ca_keys also when the capture verifies but
+// the host refuses the generation it renders, by its KRL or by a CA line
+// on a KRL-only change. The apply returns the refusal, the KRL in force
+// stays current's byte for byte, no line is added, and the refused
+// candidate's generation number is not used again.
+func TestDrainingDropRefusedGeneration(t *testing.T) {
+	// refused applies past old's end and checks that the drop landed from
+	// the accepted state, with kind returned and the KRL in force kept.
+	refused := func(t *testing.T, h *testHost, old ssh.Signer, kind error, wantCA string) {
+		t.Helper()
+		before, krlBefore := h.current(), h.file(KRLFile)
+		h.clock.advance(2 * time.Hour)
+		if _, err := h.apply(); !errors.Is(err, kind) {
+			t.Fatalf("REFUSED: the apply past the end: %v, want %v", err, kind)
+		}
+		if got := h.file(CAFile); got != wantCA {
+			t.Fatalf("REFUSED: user_ca_keys after the refused generation = %q, want %q", got, wantCA)
+		}
+		if h.file(KRLFile) != krlBefore {
+			t.Fatal("REFUSED: the KRL in force changed; want current's, byte for byte")
+		}
+		if b := latchFile(t, h); !strings.Contains(string(b), fp(old)) {
+			t.Fatalf("REFUSED: the latch = %q, want it to hold %s", b, fp(old))
+		}
+		if h.lastGood() != h.current() || h.current() != before+2 {
+			t.Fatalf("REFUSED: current %d, last-good %d (before %d); want the drop committed as generation %d, after the refused candidate's", h.current(), h.lastGood(), before, before+2)
+		}
+	}
+	t.Run("krl_rejected_by_keygen", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		if h.file(KRLFile) != "" {
+			t.Fatal("REFUSED: the first install holds a KRL; want none, so the drop's own check queries none")
+		}
+		// current lacks the machine CA's line, which the accepted bundle
+		// renders: the drop only removes.
+		setCurrentCA(t, h, caText(old, h.f.user))
+		h.run.queryCode = 255
+		h.publishKRL(7)
+		refused(t, h, old, ErrKRLRejected, caText(h.f.user))
+	})
+	t.Run("krl_drops_key_entry", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		v, files := h.f.krl(nil, []ssh.PublicKey{seedKey(t, 122).PublicKey()}, "")
+		h.state.KRLs = map[uint64]spool.KRLFiles{v: files}
+		h.mustApply()
+		// The next KRL no longer lists the explicitly revoked key.
+		h.publishKRL(7)
+		refused(t, h, old, ErrKRLDropsKeyEntry, caText(h.f.user, h.f.mach))
+	})
+	t.Run("ca_line_rejected_on_krl_only_change", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		// The full render adds the machine CA's line back, and the host's
+		// ssh-keygen refuses it; with the bundle and the directory
+		// unchanged there is no KRL-alone pass.
+		setCurrentCA(t, h, caText(old, h.f.user))
+		machine := trust.FormatKey(h.f.mach.PublicKey())
+		h.run.rejectCA = func(line string) bool { return line == machine }
+		h.publishKRL(7)
+		refused(t, h, old, ErrCALineRejected, caText(h.f.user))
 	})
 }
 

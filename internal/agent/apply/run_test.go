@@ -964,6 +964,34 @@ func TestRunTrustDue(t *testing.T) {
 		}
 		lp.idle("after both drops", 4)
 	})
+	t.Run("refused_krl_drops_on_timer", func(t *testing.T) {
+		// PR #108 review: the spool keeps a capture that verifies and whose
+		// KRL the host refuses; Retry (an hour of real time) never comes in
+		// this test, so only the timer can apply, and its apply drops the
+		// line.
+		h, old := newDrainingHost(t)
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TIMER: the first iteration applied %d times, want 1", n)
+		}
+		h.run.queryCode = 255
+		h.publishKRL(7)
+		h.write()
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TIMER: the refused KRL: %d applies, want 2", n)
+		}
+		lp.idle("before the end", 2)
+		h.clock.advance(2 * time.Hour)
+		if n := lp.round(); n != 3 {
+			t.Fatalf("TIMER: past the end: %d applies, want 3", n)
+		}
+		if got := h.file(CAFile); got != caText(h.f.user, h.f.mach) {
+			t.Fatalf("TIMER: user_ca_keys past the end = %q, want %q (%s dropped)", got, caText(h.f.user, h.f.mach), fp(old))
+		}
+		lp.idle("after the drop", 3)
+	})
 	t.Run("trust_due_covers_host_role", func(t *testing.T) {
 		f := newFixture(t)
 		h := newTestHost(t, f)
