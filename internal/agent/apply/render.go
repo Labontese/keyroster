@@ -4,7 +4,6 @@ package apply
 
 import (
 	"bytes"
-	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -136,8 +135,10 @@ func (h *HostError) Unwrap() error { return h.Err }
 // directory.HostForKey finds for any of them (every match must name the
 // same host, else host_keys_disagree; none, or a disabled one, is
 // host_not_in_directory and installs nothing new). user_ca_keys holds the
-// bundle's active and next user and machine CA keys, one trust.FormatKey
-// line each, sorted by role (user, then machine) and generation;
+// bundle's user and machine CA keys that are trusted at at.Now (active and
+// next, and draining until its end, 03-12c), less the entries at.Dropped
+// names, one plain trust.FormatKey line each, sorted by role (user, then
+// machine) and generation;
 // principals/<account> is directory.RenderPrincipalsFile for each account
 // of the host's host group, the one renderer, through one
 // directory.PrincipalsRenderer, which canonicalises and hashes the
@@ -285,27 +286,17 @@ type RenderAt struct {
 }
 
 // renderTrust is the part of a generation that does not depend on the
-// host entry: user_ca_keys and revoked.krl.
-func renderTrust(v *state.Verified, _ RenderAt) (*Generation, error) {
-	g := &Generation{Files: map[string][]byte{}}
-	var ca bytes.Buffer
-	for _, role := range []string{trust.RoleUser, trust.RoleMachine} {
-		var entries []trust.CAEntry
-		for _, c := range v.Bundle.CAs {
-			if c.Role == role && (c.State == "active" || c.State == "next") {
-				entries = append(entries, c)
-			}
-		}
-		slices.SortFunc(entries, func(a, b trust.CAEntry) int { return cmp.Compare(a.Generation, b.Generation) })
-		for _, c := range entries {
-			pub, err := trust.ParseKey(c.Key)
-			if err != nil {
-				return nil, fmt.Errorf("the bundle's %s CA key: %w", role, err)
-			}
-			ca.WriteString(trust.FormatKey(pub) + "\n")
-		}
+// host entry: user_ca_keys and revoked.krl. The CA file is
+// trust.UserCAKeysFileExcept at at.Now (03-12c): the bundle's keys trusted
+// at that time, one plain line each, without the entries at.Dropped names;
+// its error names the bundle's CA key that does not parse.
+func renderTrust(v *state.Verified, at RenderAt) (*Generation, error) {
+	ca, err := trust.UserCAKeysFileExcept(v.Bundle, at.Now, at.Dropped)
+	if err != nil {
+		return nil, err
 	}
-	g.Files[CAFile] = ca.Bytes()
+	g := &Generation{Files: map[string][]byte{}}
+	g.Files[CAFile] = ca
 	g.Files[KRLFile] = append([]byte{}, v.Next.KRL...)
 	return g, nil
 }

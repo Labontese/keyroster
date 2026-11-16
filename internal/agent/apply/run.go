@@ -136,6 +136,10 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		probeDue     time.Time
 		probeAnswers string
 		probeStarted bool
+		// trustDue is the next draining CA's end (03-12c): the timer on
+		// the host's own clock that applies the drop with no new document.
+		// The retry after an error is failedAt's.
+		trustDue time.Time
 		// forceApply: a new probe pair arrived while an addition is held
 		// (03-10b, D9), so the next round applies at once.
 		forceApply bool
@@ -234,7 +238,8 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			switch {
 			case err != nil:
 				logf("ERROR spool: %v", err)
-			case names != "" && (!haveNames || names != lastNames || catchUp || forceApply || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry)):
+			case names != "" && (!haveNames || names != lastNames || catchUp || forceApply || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry) ||
+				(!trustDue.IsZero() && !rc.Clock.Now().Before(trustDue))):
 				catchUp, forceApply = false, false
 				// A check after the round's applies, below.
 				nextCheck = time.Time{}
@@ -247,6 +252,10 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 						rc.Out(r, err)
 					}
 					failedAt = time.Time{}
+					trustDue = time.Time{}
+					if err == nil {
+						trustDue = r.TrustDue
+					}
 					if err != nil {
 						if !quiet {
 							logf("ERROR apply: %v", err)

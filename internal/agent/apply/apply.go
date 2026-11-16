@@ -382,6 +382,11 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 				e.logf("WARNING writing %s: %v", filepath.Join(l.Outbox(), enroll.AcceptedFile), aerr)
 			}
 		}
+		if e.locked {
+			// 03-12c: the next draining CA's end, for keyroster-agent
+			// run's timer; every return path of the run carries it.
+			r.TrustDue = e.storedTrustDue()
+		}
 		_ = unix.Close(e.stateFd)
 		// The heartbeat's status after every apply (03-08, AGENT-07);
 		// a status that cannot be written only delays what the host
@@ -391,6 +396,10 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 				e.logf("WARNING writing %s: %v", filepath.Join(l.Outbox(), heartbeat.StatusFile), serr)
 			}
 		}
+	}
+	if err != nil {
+		// 03-12c: after an error Run's retry governs the next attempt.
+		r.TrustDue = time.Time{}
 	}
 	return r, err
 }
@@ -935,7 +944,10 @@ func (e *engine) forward(ctx context.Context) error {
 		// F03 (03-08f): while the stored directory is unauthorized, an
 		// unchanged capture is rendered too, so principals installed before
 		// are removed; a render equal to current is the no-op below.
-		if !v.Changed() && v.DirectoryUnauthorized == nil && !held {
+		// 03-12c: so is an unchanged capture with a pending narrowing (a
+		// draining CA's end has passed while current still holds its
+		// line), which the render lands as a plain narrowing swap.
+		if !v.Changed() && v.DirectoryUnauthorized == nil && !held && !e.narrowingPending(v) {
 			// The no-op includes the drop-in's spec (03-09, D1): one that
 			// differs from wantDropIn is repaired first.
 			if err := e.repairNoOp(ctx, v, nil); err != nil {
@@ -1279,17 +1291,90 @@ func (e *engine) keepKRL(g, cur *Generation, curLink link) {
 	e.logf("WARNING krl_kept: the verified state's KRL version %d is older than version %d in force in generation %d; keeping version %d", verified, krlVersion(cur), curLink.n, krlVersion(cur))
 }
 
-// hasDraining reports whether b has a draining user or machine CA entry
-// (03-12c).
-func hasDraining(_ *trust.Bundle) bool { return false }
+// hasDraining reports whether b has a draining user or machine CA entry,
+// the roles of user_ca_keys (03-12c).
+func hasDraining(b *trust.Bundle) bool {
+	return slices.ContainsFunc(b.CAs, func(c trust.CAEntry) bool {
+		return c.State == "draining" && (c.Role == trust.RoleUser || c.Role == trust.RoleMachine)
+	})
+}
 
-// trustDue is the earliest trusted_until of b strictly after now (03-12c).
-func trustDue(_ *trust.Bundle, _ time.Time) time.Time { return time.Time{} }
+// trustDue is the earliest trusted_until of b strictly after now, over the
+// draining entries of every role, or the zero time (03-12c). An end equal
+// to now is not due again: the render at now already omits its key.
+func trustDue(b *trust.Bundle, now time.Time) time.Time {
+	var due time.Time
+	for _, c := range b.CAs {
+		if c.State != "draining" {
+			continue
+		}
+		end, err := time.Parse(trust.TimeFormat, c.TrustedUntil)
+		if err != nil || !end.After(now) {
+			continue
+		}
+		if due.IsZero() || end.Before(due) {
+			due = end
+		}
+	}
+	return due
+}
 
-// narrowingPending reports whether current holds a line of a draining
-// entry of v's bundle that the render at the engine's clock omits
-// (03-12c).
-func (e *engine) narrowingPending(_ *state.Verified) bool { return false }
+// narrowingPending reports whether current holds the line of a draining
+// user or machine entry of v's bundle that the render at the engine's
+// clock omits (03-12c): an unchanged capture is then rendered again, and
+// the render lands as a plain narrowing swap. It is defined on draining
+// entries only, so a kept rollback state that holds an aborted key's line
+// (03-10d, 03-12b) keeps its own path, and a trusted line that current
+// lacks (a held next key) is never a trigger. A bundle without a draining
+// entry reads nothing, so every such bundle takes its old path.
+func (e *engine) narrowingPending(v *state.Verified) bool {
+	if v.Bundle == nil || !hasDraining(v.Bundle) {
+		return false
+	}
+	cur, curLink, err := e.readCurrent()
+	if err != nil || cur == nil || curLink.kind != linkAgent {
+		return false
+	}
+	want, err := trust.UserCAKeysFile(v.Bundle, e.clock.Now())
+	if err != nil {
+		return false
+	}
+	rendered := lineSet(want, caKey)
+	omitted := map[string]bool{}
+	for _, c := range v.Bundle.CAs {
+		if c.State != "draining" || (c.Role != trust.RoleUser && c.Role != trust.RoleMachine) {
+			continue
+		}
+		pub, err := trust.ParseKey(c.Key)
+		if err != nil {
+			continue
+		}
+		if k, ok := caKey(trust.FormatKey(pub)); ok && !rendered[k] {
+			omitted[k] = true
+		}
+	}
+	for _, l := range lines(cur.Files[CAFile]) {
+		if k, ok := caKey(l); ok && omitted[k] {
+			return true
+		}
+	}
+	return false
+}
+
+// storedTrustDue is trustDue of the accepted bundle at the engine's clock
+// (03-12c), or the zero time when accepted/ holds no bundle or does not
+// read.
+func (e *engine) storedTrustDue() time.Time {
+	st, err := e.loadStored()
+	if err != nil || st == nil || st.Bundle == nil {
+		return time.Time{}
+	}
+	b, err := trust.ParseBundle(st.Bundle)
+	if err != nil {
+		return time.Time{}
+	}
+	return trustDue(b, e.clock.Now())
+}
 
 // render is Render for this host. When Render refuses because of the
 // host's entry, or because no directory is accepted (F08 (03-08d)), and
