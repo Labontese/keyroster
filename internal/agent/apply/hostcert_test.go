@@ -383,6 +383,36 @@ func TestHostCertStep(t *testing.T) {
 			}
 		})
 	}
+	t.Run("hostcert_kept_cert_of_aborted_ca_replaced", func(t *testing.T) {
+		// A certificate installed while its host CA key was next is kept
+		// while the key is next, and replaced once the abort is in force
+		// (03-12b).
+		h := newHostCertHost(t)
+		k2 := seedKey(t, 27)
+		chain := h.f.roleNextChain(trust.RoleHost, k2, true)
+		h.state.Bundles[2] = chain[2]
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.mustHostCerts()
+		gen1 := h.f.host
+		h.f.host = k2
+		h.answer()
+		h.f.host = gen1
+		if r := h.mustHostCerts(); len(r.Installed) != 1 {
+			t.Fatalf("an answer signed by the next host CA key: %+v, want it installed", r)
+		}
+		if r := h.mustHostCerts(); len(r.Requested) != 0 {
+			t.Fatalf("a certificate of the next host CA key was replaced while the key is next: %+v", r)
+		}
+		h.state.Bundles[3] = chain[3]
+		h.mustApply()
+		if a, err := h.accepted(); err != nil || a.BundleVersion != 3 {
+			t.Fatalf("accepted/ %+v (%v), want the abort bundle in force", a, err)
+		}
+		if r := h.mustHostCerts(); len(r.Requested) != 1 {
+			t.Fatalf("a kept certificate of the aborted host CA key: %+v, want a replacement request", r)
+		}
+	})
 	hostCertStepCases(t)
 	hostCertStepCases2(t)
 }
