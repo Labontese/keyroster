@@ -4,6 +4,7 @@ package apply
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/agent/state"
+	"github.com/Labontese/keyroster/internal/krl"
+	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
@@ -53,13 +56,34 @@ func caText(keys ...ssh.Signer) string {
 // built by hand stands for current (03-12c).
 func setCurrentCA(t *testing.T, h *testHost, text string) {
 	t.Helper()
-	p := filepath.Join(h.l.Current(), CAFile)
+	setCurrentFile(t, h, CAFile, text)
+}
+
+// setCurrentFile replaces current's file name with text (PR #107 review).
+func setCurrentFile(t *testing.T, h *testHost, name, text string) {
+	t.Helper()
+	p := filepath.Join(h.l.Current(), name)
 	if err := os.Chmod(p, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// publishUnverifiedKRL offers the next KRL version with a manifest
+// signature that does not verify: the ops key signed other bytes, so the
+// capture is refused with krl_not_verified (PR #107 review).
+func (h *testHost) publishUnverifiedKRL() {
+	h.t.Helper()
+	h.publishKRL()
+	files := h.state.KRLs[h.f.krlVersion]
+	sig, err := sshsig.Sign(rand.Reader, h.f.ops, krl.Namespace, []byte("not the manifest"))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	files.Sig = sig
+	h.state.KRLs[h.f.krlVersion] = files
 }
 
 // verifiedOf is a verified state holding the bundle doc (03-12c).
@@ -200,6 +224,111 @@ func TestDrainingDrop(t *testing.T) {
 		h.mustApply()
 		if got := h.file(CAFile); got != caText(h.f.user, h.f.mach) {
 			t.Fatalf("DRAIN: the next apply's user_ca_keys = %q, want %q", got, caText(h.f.user, h.f.mach))
+		}
+	})
+}
+
+// TestDrainingDropRefusedCapture (PR #107 review): a draining CA past its
+// end leaves current's user_ca_keys even when the capture does not verify;
+// the apply still returns the capture's refusal, the KRL in force and
+// every other part of current stay as they are, nothing is added, and a
+// refused capture with no drop due changes nothing.
+func TestDrainingDropRefusedCapture(t *testing.T) {
+	// refused is the apply of an unverified KRL past the draining CA's end:
+	// it must return krl_not_verified and land the drop, latched and
+	// committed.
+	refused := func(t *testing.T, h *testHost, old ssh.Signer, want string) {
+		t.Helper()
+		h.clock.advance(2 * time.Hour)
+		h.publishUnverifiedKRL()
+		if _, err := h.apply(); !errors.Is(err, state.ErrKRL) {
+			t.Fatalf("FALLBACK: the refused capture past the end: %v, want krl_not_verified", err)
+		}
+		if got := h.file(CAFile); got != want {
+			t.Fatalf("FALLBACK: user_ca_keys after the refused capture = %q, want %q", got, want)
+		}
+		if b := latchFile(t, h); !strings.Contains(string(b), fp(old)) {
+			t.Fatalf("FALLBACK: the latch = %q, want it to hold %s", b, fp(old))
+		}
+		if h.lastGood() != h.current() {
+			t.Fatalf("FALLBACK: last-good %d, current %d; want the drop committed", h.lastGood(), h.current())
+		}
+	}
+	t.Run("drop_lands_and_refusal_returned", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		before := h.current()
+		krlBefore := h.file(KRLFile)
+		refused(t, h, old, caText(h.f.user, h.f.mach))
+		if h.current() == before || h.file(KRLFile) != krlBefore || !slices.Equal(h.principals("deploy"), []string{"role:ops"}) {
+			t.Fatalf("FALLBACK: current %d (before %d), KRL changed %t, principals %v; want one narrowing swap of user_ca_keys only", h.current(), before, h.file(KRLFile) != krlBefore, h.principals("deploy"))
+		}
+	})
+	t.Run("krl_above_accepted_kept", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		// A failed apply of KRL 1 (revoking 7) keeps it in current, above
+		// accepted/'s none (PR #67 round 2).
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.setStall(true)
+		h.publishKRL(7)
+		if _, err := h.apply(); err == nil || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("FALLBACK: the failed apply of KRL 1: %v, current revokes 7: %t", err, h.krlRevokes(h.l.Current(), 7))
+		}
+		h.sshd.setStall(false)
+		krlBefore := h.file(KRLFile)
+		refused(t, h, old, caText(h.f.user, h.f.mach))
+		if h.file(KRLFile) != krlBefore {
+			t.Fatal("FALLBACK: the KRL in force changed; want current's, byte for byte")
+		}
+	})
+	t.Run("krl_below_accepted_not_moved", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.publishKRL(7)
+		h.installed("role:ops")
+		// A hand-built current whose KRL is below accepted/'s: the fallback
+		// moves no KRL, in either direction.
+		setCurrentFile(t, h, KRLFile, "")
+		refused(t, h, old, caText(h.f.user, h.f.mach))
+		if got := h.file(KRLFile); got != "" {
+			t.Fatalf("FALLBACK: the KRL in force became %d bytes; want current's empty one", len(got))
+		}
+	})
+	t.Run("never_adds_a_line", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		// current lacks the machine CA's line, which the accepted bundle
+		// renders: the fallback only removes.
+		setCurrentCA(t, h, caText(old, h.f.user))
+		refused(t, h, old, caText(h.f.user))
+	})
+	t.Run("unapplied_record_ahead_accepted_bundle_decides", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		// Directory 2 is above the generation caps: it is recorded as
+		// unapplied, and the next capture is chained from the record.
+		publishRun(h, 2, 2)
+		h.publishKRL(6)
+		if _, err := h.apply(); !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("FALLBACK: directory 2 above the caps: %v, want generation_too_large", err)
+		}
+		mustRecord(t, h, 0, 2)
+		refused(t, h, old, caText(h.f.user, h.f.mach))
+		mustRecord(t, h, 0, 2)
+		if a, err := h.accepted(); err != nil || a.DirectoryVersion != 1 || a.BundleVersion != 3 {
+			t.Fatalf("FALLBACK: accepted/ %+v (%v), want bundle 3 and directory 1 unchanged", a, err)
+		}
+	})
+	t.Run("nothing_due_changes_nothing", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		before, gens := h.current(), h.genCount()
+		h.publishUnverifiedKRL()
+		if _, err := h.apply(); !errors.Is(err, state.ErrKRL) {
+			t.Fatalf("FALLBACK: the refused capture inside the window: %v, want krl_not_verified", err)
+		}
+		if h.current() != before || h.genCount() != gens || !strings.Contains(h.file(CAFile), caText(old)) || latchFile(t, h) != nil {
+			t.Fatalf("FALLBACK: inside the window: current %d (before %d), %d generations (before %d), user_ca_keys %q; want nothing changed", h.current(), before, h.genCount(), gens, h.file(CAFile))
 		}
 	})
 }

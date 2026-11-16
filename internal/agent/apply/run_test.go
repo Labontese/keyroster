@@ -858,6 +858,112 @@ func TestRunTrustDue(t *testing.T) {
 		}
 		lp.idle("after the failed apply at the end", 2)
 	})
+	// PR #107 review: the timer applies with no document in the spool, and
+	// with a spool that does not read.
+	for _, c := range []struct {
+		name  string
+		spoil func(t *testing.T, h *testHost)
+	}{
+		{"empty_spool_drops_on_timer", func(_ *testing.T, h *testHost) { h.resetSpool() }},
+		{"unreadable_spool_drops_on_timer", func(t *testing.T, h *testHost) {
+			if err := os.RemoveAll(h.spool); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.spool, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, old := newDrainingHost(t)
+			h.publishDir(h.spec("role:ops"))
+			h.write()
+			lp := startTrustLoop(t, h, RunConfig{})
+			if n := lp.next(); n != 1 {
+				t.Fatalf("TIMER: the first iteration applied %d times, want 1", n)
+			}
+			c.spoil(t, h)
+			lp.idle("before the end", 1)
+			h.clock.advance(2 * time.Hour)
+			if n := lp.round(); n != 2 {
+				t.Fatalf("TIMER: the iteration past the end: %d applies, want 2", n)
+			}
+			if got := h.file(CAFile); strings.Contains(got, caText(old)) || got != caText(h.f.user, h.f.mach) {
+				t.Fatalf("TIMER: user_ca_keys past the end = %q, want the active user and machine keys only", got)
+			}
+			lp.idle("after the drop", 2)
+		})
+	}
+	t.Run("failed_drop_retried_after_retry_with_empty_spool", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		var failing atomic.Bool
+		h.cfg.Fault = func(p string) error {
+			if p == "marker" && failing.Load() {
+				return &crash{point: p}
+			}
+			return nil
+		}
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{Retry: 50 * time.Millisecond})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TIMER: the first iteration applied %d times, want 1", n)
+		}
+		h.resetSpool()
+		failing.Store(true)
+		h.clock.advance(2 * time.Hour)
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TIMER: the failing apply at the end: %d applies, want 2", n)
+		}
+		failing.Store(false)
+		// Only the check's trust_expired can apply now, once Retry has
+		// passed: no document is in the spool and no end is due.
+		time.Sleep(200 * time.Millisecond)
+		if n := lp.round(); n != 3 {
+			t.Fatalf("TIMER: the iteration after Retry: %d applies, want 3", n)
+		}
+		if got := h.file(CAFile); strings.Contains(got, caText(old)) {
+			t.Fatalf("TIMER: user_ca_keys after the retry = %q, want the drop", got)
+		}
+		lp.idle("after the drop", 3)
+	})
+	t.Run("refused_capture_drops_each_end", func(t *testing.T) {
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		a, b := seedKey(t, seedDrainOld), seedKey(t, seedDrainOld2)
+		const endB = "2026-10-26T14:00:00Z"
+		h.useBundle(3, f.withBundle(3, twoDrainingCA(f, a, drainAt, b, endB)))
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TIMER: the first iteration applied %d times, want 1", n)
+		}
+		// Every later capture is refused; Retry (an hour of real time) never
+		// comes in this test, so only the timer can apply.
+		h.publishUnverifiedKRL()
+		h.write()
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TIMER: the refused capture: %d applies, want 2", n)
+		}
+		lp.idle("inside both windows", 2)
+		h.clock.advance(90 * time.Minute)
+		if n := lp.round(); n != 3 {
+			t.Fatalf("TIMER: past the first end: %d applies, want 3", n)
+		}
+		if got := h.file(CAFile); got != caText(b, f.user, f.mach) {
+			t.Fatalf("TIMER: user_ca_keys past the first end = %q, want %q", got, caText(b, f.user, f.mach))
+		}
+		lp.idle("between the ends", 3)
+		h.clock.advance(time.Hour)
+		if n := lp.round(); n != 4 {
+			t.Fatalf("TIMER: past the second end: %d applies, want 4", n)
+		}
+		if got := h.file(CAFile); got != caText(f.user, f.mach) {
+			t.Fatalf("TIMER: user_ca_keys past the second end = %q, want %q", got, caText(f.user, f.mach))
+		}
+		lp.idle("after both drops", 4)
+	})
 	t.Run("trust_due_covers_host_role", func(t *testing.T) {
 		f := newFixture(t)
 		h := newTestHost(t, f)
