@@ -51,8 +51,9 @@ type behindDoc struct {
 // record: written when the manifest first names a newer bundle, rewritten
 // with the same since when a still newer version is named, and removed once
 // the manifest names no version above the accepted one. Without write (a
-// check) it only reads. A missing or unreadable record counts as absent and
-// only restarts the grace; it never fails the status.
+// check) it only reads. A missing or unreadable record, or one whose since
+// is after now, counts as absent and only restarts the grace; it never
+// fails the status.
 func (e *engine) bundleBehind(st *state.Stored, now time.Time, write bool) *heartbeat.BundleBehind {
 	var named uint64
 	if st != nil && st.BundleVersion != 0 && len(st.KRLManifest) > 0 {
@@ -71,7 +72,16 @@ func (e *engine) bundleBehind(st *state.Stored, now time.Time, write bool) *hear
 	since := now.UTC().Truncate(time.Second)
 	rec, _ := e.readBehind()
 	if rec != nil {
-		since, _ = time.Parse(time.RFC3339, rec.Since) // checked by readBehind
+		t, _ := time.Parse(time.RFC3339, rec.Since) // checked by readBehind
+		if t.After(now) {
+			// PR #107 review: a since after now (the clock was ahead at
+			// the first sight and was set right since) counts as unreadable:
+			// the grace restarts now, and a status build rewrites the
+			// record.
+			rec = nil
+		} else {
+			since = t
+		}
 	}
 	if write && (rec == nil || rec.ManifestBundleVersion != named) {
 		if err := e.writeBehind(behindDoc{ManifestBundleVersion: named, Since: since.UTC().Format(trust.TimeFormat)}); err != nil {
