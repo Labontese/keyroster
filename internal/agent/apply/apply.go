@@ -267,6 +267,9 @@ type engine struct {
 	pins *state.Pins
 	dump Dump
 	keys []ssh.PublicKey
+	// latch is the drop latch as readLatch read it, and as recordDropped
+	// last wrote it (03-12c).
+	latch *Latch
 
 	grace          int // the LoginGraceTime bound in force (ObserveLoginGrace)
 	rawGrace       int // sshd -T's logingracetime at start
@@ -1335,7 +1338,9 @@ func (e *engine) narrowingPending(v *state.Verified) bool {
 	if err != nil || cur == nil || curLink.kind != linkAgent {
 		return false
 	}
-	want, err := trust.UserCAKeysFile(v.Bundle, e.clock.Now())
+	// The render's own file: a key past its end or held by the drop latch
+	// is omitted, so either counts.
+	want, err := trust.UserCAKeysFileExcept(v.Bundle, e.clock.Now(), e.readLatch().Blocks)
 	if err != nil {
 		return false
 	}
@@ -1376,7 +1381,24 @@ func (e *engine) storedTrustDue() time.Time {
 	return trustDue(b, e.clock.Now())
 }
 
-// render is Render for this host. When Render refuses because of the
+// render is renderAt at the engine's clock with the drop latch (03-12c):
+// one clock reading and one latch for both renders of the call. After a
+// render that succeeds it latches the draining keys the render omitted
+// (recordDropped), so the latch is on disk before the marker, the
+// generation or the swap; a latch that cannot be written fails the call.
+func (e *engine) render(v *state.Verified, cur *Generation, curLink link) (*Generation, error) {
+	at := RenderAt{Now: e.clock.Now(), Dropped: e.readLatch().Blocks}
+	g, err := e.renderAt(v, cur, curLink, at)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.recordDropped(v, at.Now); err != nil {
+		return nil, err
+	}
+	return g, nil
+}
+
+// renderAt is Render for this host at at. When Render refuses because of the
 // host's entry, or because no directory is accepted (F08 (03-08d)), and
 // the host already has trust files (a last-good of the agent's), the apply
 // goes on with RenderFallback (owner decision 2026-10-26, PR #67): the KRL
@@ -1387,9 +1409,7 @@ func (e *engine) storedTrustDue() time.Time {
 // (state.Stored.PrincipalsUnder against e.accepted, PR #82 review, D-1):
 // otherwise they are dropped first, so a fallback renders the trust files
 // alone and still reports the host status.
-func (e *engine) render(v *state.Verified, cur *Generation, curLink link) (*Generation, error) {
-	// 03-12c: one clock reading for both renders of this call.
-	at := RenderAt{Now: e.clock.Now()}
+func (e *engine) renderAt(v *state.Verified, cur *Generation, curLink link, at RenderAt) (*Generation, error) {
 	g, err := Render(v, e.keys, at)
 	if err == nil {
 		if v.DirectoryUnauthorized != nil {
