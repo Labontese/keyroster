@@ -3,6 +3,7 @@ package trust
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -40,20 +41,76 @@ func IssuingCAs(b *Bundle, role string) []CAEntry {
 	return out
 }
 
-// TrustedAt reports whether the entry's key is trusted at t (03-12c).
-func (CAEntry) TrustedAt(_ time.Time) bool { return false }
+// TrustedAt reports whether the entry's key is trusted at t, the one rule
+// every reader of a time-aware CA set applies (03-12c): an active or next
+// entry always; a draining one while t is strictly before its
+// trusted_until, and never when that end does not parse; a retired one
+// never.
+func (e CAEntry) TrustedAt(t time.Time) bool {
+	switch e.State {
+	case "active", "next":
+		return true
+	case "draining":
+		if checkTimestamp(e.TrustedUntil) != nil {
+			return false
+		}
+		end, err := time.Parse(TimeFormat, e.TrustedUntil)
+		return err == nil && t.Before(end)
+	}
+	return false
+}
 
-// TrustedCAs returns b's entries of role that are trusted at t, in
-// generation order (03-12c).
-func TrustedCAs(_ *Bundle, _ string, _ time.Time) []CAEntry { return nil }
+// TrustedCAs returns b's entries of role for which TrustedAt(t) holds, in
+// generation order (03-12c). IssuingCAs stays the set that may sign.
+func TrustedCAs(b *Bundle, role string, t time.Time) []CAEntry {
+	var out []CAEntry
+	for _, ca := range b.CAs {
+		if ca.Role == role && ca.TrustedAt(t) {
+			out = append(out, ca)
+		}
+	}
+	slices.SortStableFunc(out, func(x, y CAEntry) int {
+		switch {
+		case x.Generation < y.Generation:
+			return -1
+		case x.Generation > y.Generation:
+			return 1
+		}
+		return 0
+	})
+	return out
+}
 
-// UserCAKeysFile is the agent's user_ca_keys for b at t (03-12c).
-func UserCAKeysFile(_ *Bundle, _ time.Time) ([]byte, error) { return nil, nil }
+// UserCAKeysFile is the agent's user_ca_keys for b at t (03-12c): one
+// FormatKey line and a newline per entry of TrustedCAs(b, user, t), then
+// of TrustedCAs(b, machine, t), and nothing else. The file holds plain key
+// lines only, because TrustedUserCAKeys takes no options and one line that
+// sshd cannot parse hides every CA after it. A key that does not parse is
+// an error, never a shorter file, since a skipped key narrows. A draining
+// entry is carried unchanged by checkCATransitions, which refuses every
+// change to it.
+func UserCAKeysFile(b *Bundle, t time.Time) ([]byte, error) {
+	return UserCAKeysFileExcept(b, t, nil)
+}
 
-// UserCAKeysFileExcept is UserCAKeysFile without the entries skip names
-// (03-12c).
-func UserCAKeysFileExcept(_ *Bundle, _ time.Time, _ func(CAEntry) bool) ([]byte, error) {
-	return nil, nil
+// UserCAKeysFileExcept is UserCAKeysFile without the entries for which
+// skip, when it is not nil, is true (03-12c): the agent passes its drop
+// latch.
+func UserCAKeysFileExcept(b *Bundle, t time.Time, skip func(CAEntry) bool) ([]byte, error) {
+	var w strings.Builder
+	for _, role := range []string{RoleUser, RoleMachine} {
+		for _, ca := range TrustedCAs(b, role, t) {
+			if skip != nil && skip(ca) {
+				continue
+			}
+			pub, err := ParseKey(ca.Key)
+			if err != nil {
+				return nil, fmt.Errorf("the bundle's %s CA key generation %d: %w", role, ca.Generation, err)
+			}
+			w.WriteString(FormatKey(pub) + "\n")
+		}
+	}
+	return []byte(w.String()), nil
 }
 
 // checkCATransitions is the chain rule for CA entries (03-12b). Entries
