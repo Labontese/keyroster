@@ -365,88 +365,93 @@ func TestRootCeremonyPolicyChecks(t *testing.T) {
 const signerStateDir = "/var/lib/keyroster-signer"
 
 var (
-	shellBinding  = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=("?)` + regexp.QuoteMeta(signerStateDir) + `("?)$`)
-	singleQuoted  = regexp.MustCompile(`'[^']*'`)
-	shellRedirect = regexp.MustCompile(`[0-9]*(>>|>|<)\s*("?)([^\s"';|&]+)`)
+	shellBinding = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=("?)` + regexp.QuoteMeta(signerStateDir) + `("?)$`)
+	// runuserScript is the script argument of a runuser segment's sh -c,
+	// which the signer's own shell runs: the only single-quoted text the
+	// checker treats as opaque.
+	runuserScript = regexp.MustCompile(`^(runuser -u keyroster-signer (?:-- )?sh -c )'[^']*'`)
+	// shellRedirect is a redirect root's shell opens (>, >>, >|, <, &>,
+	// &>>, with an optional fd), its target quoted or not.
+	shellRedirect = regexp.MustCompile(`(?:&>>?|[0-9]*(?:>>|>\||>|<))\s*['"]?([^\s'"|;&<>]+)`)
+	inlineSpan    = regexp.MustCompile("`([^`]+)`")
 )
 
 // signerDirLinkSafety checks the shell lines of text's fenced code blocks
 // for a root write below the signer's state directory, which follows any
 // link keyroster-signer planted there (03-12b, the lesson of 03-12's
 // restore block). It is an allowlist: after joining backslash-continued
-// lines, every line that names the directory, or a variable bound to it
-// earlier in the block, must be a command that starts with runuser -u
-// keyroster-signer, an rm -f of direct children of the state directory
-// ("$S/<name>", never one below incoming), or a read-only lock open; and,
-// with single-quoted text removed (the signer's own shell opens what is
-// quoted there), no redirect the root shell performs may name the
-// directory or the variable. It returns the refused lines.
+// lines and splitting each line at its unquoted control operators (;, &&,
+// ||, | and &), every command that names the directory, or a variable
+// bound to it earlier in the block, must start with runuser -u
+// keyroster-signer, be an rm -f of direct children of the state directory
+// ("$S/<name>", never one below incoming), or a read-only lock open; and
+// no redirect root's shell opens may name the directory or the variable.
+// Only the script argument of a runuser command's sh -c is opaque (the
+// signer's own shell opens what it names). It returns the refused
+// commands.
 func signerDirLinkSafety(text string) []string {
 	var bad []string
-	inBlock := false
-	var block []string
-	check := func(lines []string) {
-		var joined []string
-		cur := ""
-		for _, l := range lines {
-			t := strings.TrimSpace(l)
-			if strings.HasSuffix(t, "\\") {
-				cur += strings.TrimSuffix(t, "\\") + " "
+	for _, block := range fencedBlocks(text) {
+		var vars []string
+		for _, l := range joinContinued(block) {
+			if strings.HasPrefix(l, "#") {
 				continue
 			}
-			joined = append(joined, strings.Join(strings.Fields(cur+t), " "))
-			cur = ""
-		}
-		if cur != "" {
-			joined = append(joined, strings.Join(strings.Fields(cur), " "))
-		}
-		vars := []string{}
-		for _, l := range joined {
-			if l == "" || strings.HasPrefix(l, "#") {
-				continue
-			}
-			if m := shellBinding.FindStringSubmatch(l); m != nil {
-				vars = append(vars, m[1])
-				continue
-			}
-			names := func(s string) bool {
-				for _, dir := range stateDirNames(vars) {
-					if strings.Contains(s, dir) {
-						return true
-					}
+			for _, cmd := range splitCommands(l) {
+				if m := shellBinding.FindStringSubmatch(cmd); m != nil {
+					vars = append(vars, m[1])
+					continue
 				}
-				return false
-			}
-			if !names(l) {
-				continue
-			}
-			unquoted := singleQuoted.ReplaceAllString(l, "''")
-			lockOpen := false
-			for _, dir := range stateDirNames(vars) {
-				if regexp.MustCompile(`^exec [0-9]+<"?` + regexp.QuoteMeta(dir) + `/signer\.lock"?$`).MatchString(l) {
-					lockOpen = true
-				}
-			}
-			allowed := lockOpen || strings.HasPrefix(l, "runuser -u keyroster-signer ") || directChildRemoval(l, vars)
-			if !allowed {
-				bad = append(bad, l)
-				continue
-			}
-			if lockOpen {
-				continue
-			}
-			for _, m := range shellRedirect.FindAllStringSubmatch(unquoted, -1) {
-				if names(m[3]) {
-					bad = append(bad, l)
-					break
+				if !commandLinkSafe(cmd, vars) {
+					bad = append(bad, cmd)
 				}
 			}
 		}
 	}
+	return bad
+}
+
+// signerDirSpanSafety checks the inline code spans of text's prose, outside
+// the fenced blocks, as signerDirLinkSafety checks a block line, with the
+// variables the blocks bind (03-12b review): a span that names the state
+// directory must be one of the allowed commands.
+func signerDirSpanSafety(text string) []string {
+	var vars []string
+	var prose strings.Builder
+	inBlock := false
+	for _, l := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "```") {
+			inBlock = !inBlock
+			continue
+		}
+		if inBlock {
+			if m := shellBinding.FindStringSubmatch(strings.TrimSpace(l)); m != nil {
+				vars = append(vars, m[1])
+			}
+			continue
+		}
+		prose.WriteString(l + "\n")
+	}
+	var bad []string
+	for _, m := range inlineSpan.FindAllStringSubmatch(prose.String(), -1) {
+		for _, cmd := range splitCommands(strings.Join(strings.Fields(m[1]), " ")) {
+			if !commandLinkSafe(cmd, vars) {
+				bad = append(bad, cmd)
+			}
+		}
+	}
+	return bad
+}
+
+// fencedBlocks returns the lines of each fenced code block of text.
+func fencedBlocks(text string) [][]string {
+	var out [][]string
+	var block []string
+	inBlock := false
 	for _, l := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(l), "```") {
 			if inBlock {
-				check(block)
+				out = append(out, block)
 				block = nil
 			}
 			inBlock = !inBlock
@@ -456,7 +461,115 @@ func signerDirLinkSafety(text string) []string {
 			block = append(block, l)
 		}
 	}
-	return bad
+	return out
+}
+
+// joinContinued joins backslash-continued lines, with runs of white space
+// collapsed.
+func joinContinued(lines []string) []string {
+	var joined []string
+	cur := ""
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		if strings.HasSuffix(t, "\\") {
+			cur += strings.TrimSuffix(t, "\\") + " "
+			continue
+		}
+		joined = append(joined, strings.Join(strings.Fields(cur+t), " "))
+		cur = ""
+	}
+	if cur != "" {
+		joined = append(joined, strings.Join(strings.Fields(cur), " "))
+	}
+	return joined
+}
+
+// splitCommands splits a shell line at its unquoted control operators (;,
+// &&, ||, | and &), leaving the redirects >|, &>, >& and <& whole; quotes
+// and backslash escapes are kept in the commands it returns.
+func splitCommands(l string) []string {
+	var out []string
+	var cur strings.Builder
+	flush := func() {
+		if c := strings.TrimSpace(cur.String()); c != "" {
+			out = append(out, c)
+		}
+		cur.Reset()
+	}
+	quote := byte(0)
+	for i := 0; i < len(l); i++ {
+		c := l[i]
+		split := false
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else if c == '\\' && quote == '"' && i+1 < len(l) {
+				cur.WriteByte(c)
+				i++
+				c = l[i]
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '\\' && i+1 < len(l):
+			cur.WriteByte(c)
+			i++
+			c = l[i]
+		case c == ';':
+			split = true
+		case c == '|' && (i == 0 || l[i-1] != '>'):
+			if i+1 < len(l) && l[i+1] == '|' {
+				i++
+			}
+			split = true
+		case c == '&' && i+1 < len(l) && l[i+1] == '&':
+			i++
+			split = true
+		case c == '&' && (i+1 >= len(l) || l[i+1] != '>') && (i == 0 || (l[i-1] != '>' && l[i-1] != '<')):
+			split = true
+		}
+		if split {
+			flush()
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	flush()
+	return out
+}
+
+// commandLinkSafe reports whether one shell command, with vars bound to the
+// state directory, passes signerDirLinkSafety's allowlist.
+func commandLinkSafe(cmd string, vars []string) bool {
+	if cmd == "" || strings.HasPrefix(cmd, "#") {
+		return true
+	}
+	names := func(s string) bool {
+		for _, dir := range stateDirNames(vars) {
+			if strings.Contains(s, dir) {
+				return true
+			}
+		}
+		return false
+	}
+	visible := runuserScript.ReplaceAllString(cmd, "$1''")
+	if !names(visible) {
+		return true
+	}
+	for _, dir := range stateDirNames(vars) {
+		if regexp.MustCompile(`^exec [0-9]+<"?` + regexp.QuoteMeta(dir) + `/signer\.lock"?$`).MatchString(cmd) {
+			return true
+		}
+	}
+	if !strings.HasPrefix(cmd, "runuser -u keyroster-signer ") && !directChildRemoval(cmd, vars) {
+		return false
+	}
+	for _, m := range shellRedirect.FindAllStringSubmatch(visible, -1) {
+		if names(m[1]) {
+			return false
+		}
+	}
+	return true
 }
 
 // stateDirNames are the ways a shell line names the state directory: the
@@ -491,11 +604,6 @@ func directChildRemoval(l string, vars []string) bool {
 	}
 	return true
 }
-
-// signerDirSpanSafety checks the inline code spans of text's prose, outside
-// the fenced blocks, as signerDirLinkSafety checks a block line, with the
-// variables the blocks bind (03-12b review).
-func signerDirSpanSafety(text string) []string { return nil }
 
 // TestCARotationRunbookLinkSafety (03-12b): in ca-rotation.md root runs
 // nothing below the signer's state directory: the files below incoming/
