@@ -136,6 +136,29 @@ func TestBehind(t *testing.T) {
 			t.Fatalf("BEHIND: with bundle 2 accepted the record stays: %q", b)
 		}
 	})
+	t.Run("behind_future_since_restarts_grace", func(t *testing.T) {
+		// PR #107 review: a since after now (the clock was ahead at the
+		// first sight and was then set right) only restarts the grace.
+		h := behindHost(t)
+		sawManifest(t, h, 2)
+		ahead := h.clock.Now().Add(24 * time.Hour).UTC().Truncate(time.Second).Format(trust.TimeFormat)
+		if err := os.WriteFile(h.l.State("bundle-behind.json"), mustCanonical(t, behindDoc{ManifestBundleVersion: 2, Since: ahead}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if rec, err := h.engine().readBehind(); err != nil || rec == nil || rec.Since != ahead {
+			t.Fatalf("BEHIND: the record a day ahead does not read: %+v, %v", rec, err)
+		}
+		restart := h.clock.Now().UTC().Truncate(time.Second)
+		writeStatus(t, h, StatusUpdate{})
+		h.clock.advance(3 * time.Hour)
+		b := writeStatus(t, h, StatusUpdate{}).BundleBehind
+		if b == nil || b.Since != restart.Format(trust.TimeFormat) {
+			t.Fatalf("BEHIND: 3 hours after a since a day ahead: %+v, want bundle_behind with since %s", b, restart.Format(trust.TimeFormat))
+		}
+		if rec := string(behindRecord(t, h)); strings.Contains(rec, ahead) {
+			t.Fatalf("BEHIND: the record still holds the since a day ahead: %s", rec)
+		}
+	})
 	t.Run("behind_reason_unapplied", func(t *testing.T) {
 		// Bundle 2 verifies but a CA line ssh-keygen refuses keeps it from
 		// applying, as krlsigner_test.go's ca_line_rejected cases arrange.
