@@ -413,6 +413,112 @@ func TestHostCertStep(t *testing.T) {
 			t.Fatalf("a kept certificate of the aborted host CA key: %+v, want a replacement request", r)
 		}
 	})
+	// The answer set and Due's membership set are the host CA keys
+	// trusted at the run's clock (03-12c). drainingHost's first bundle is
+	// version 3 with the host CA generation 1 draining (old's key) until
+	// end and generation 2 active; byOld answers every outbox request with
+	// a certificate signed by old.
+	drainingHost := func(t *testing.T, end string) (*hostCertHost, ssh.Signer) {
+		t.Helper()
+		h := newHostCertHost(t)
+		old := seedKey(t, seedDrainOld)
+		h.useBundle(3, h.f.withBundle(3, h.f.drainingCA(trust.RoleHost, old, end)))
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		if a, err := h.accepted(); err != nil || a.BundleVersion != 3 {
+			t.Fatalf("accepted/ %+v (%v), want the draining bundle in force", a, err)
+		}
+		return h, old
+	}
+	byOld := func(h *hostCertHost, old ssh.Signer) {
+		gen2 := h.f.host
+		h.f.host = old
+		h.answer()
+		h.f.host = gen2
+	}
+	pastEnd := func(t *testing.T, h *hostCertHost, end string) {
+		t.Helper()
+		at, err := time.Parse(time.RFC3339, end)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.clock.advance(at.Sub(h.clock.Now()) + time.Second)
+	}
+	// installedByOld installs a certificate signed by old before the end
+	// and returns its committed entry.
+	installedByOld := func(t *testing.T, h *hostCertHost, old ssh.Signer) hostcert.Entry {
+		t.Helper()
+		h.mustHostCerts()
+		byOld(h, old)
+		if r, err := h.hostCerts(); err != nil || len(r.Installed) != 1 {
+			t.Fatalf("an answer signed by the draining host CA key before its end: %+v (%v), want it installed", r, err)
+		}
+		rec := h.record()
+		if len(rec.Committed) != 1 || rec.Committed[0].CASHA256 != hostcert.KeySHA256(old.PublicKey()) {
+			t.Fatalf("record %+v, want one certificate of the draining host CA key", rec)
+		}
+		return rec.Committed[0]
+	}
+	t.Run("hostcert_answer_draining_ca_accepted", func(t *testing.T) {
+		h, old := drainingHost(t, drainAt)
+		installedByOld(t, h, old)
+		if files := h.certFiles(); len(files) != 1 {
+			t.Fatalf("certificate files %v, want the installed one", files)
+		}
+	})
+	t.Run("hostcert_answer_drained_ca_refused", func(t *testing.T) {
+		// The end is two minutes after the clock's start, so the answer is
+		// read past the end while its request is still live: the refusal
+		// is the CA's, not the request's age.
+		const end = "2026-10-26T12:02:00Z"
+		h, old := drainingHost(t, end)
+		h.mustHostCerts()
+		reqs := h.outboxRequests()
+		if len(reqs) != 1 {
+			t.Fatalf("outbox requests %v, want one", reqs)
+		}
+		byOld(h, old)
+		pastEnd(t, h, end)
+		now := uint64(h.clock.Now().Unix()) //nolint:gosec // G115: test clock
+		for _, req := range reqs {
+			if now >= req.CreatedAt+hostcert.RequestTTL {
+				t.Fatalf("the request of %d is no longer live at %d: the case needs a live one", req.CreatedAt, now)
+			}
+		}
+		r, err := h.hostCerts()
+		if err != nil || len(r.Installed) != 0 || len(h.record().Committed) != 0 || len(h.certFiles()) != 0 {
+			t.Fatalf("an answer signed by the host CA key past its end was installed: %+v (%v), record %+v, files %v", r, err, h.record(), h.certFiles())
+		}
+		if a := h.attempts(); len(a.Keys) != 1 || a.Keys[0].LastCode != "answer_unpinned_ca" {
+			t.Fatalf("attempts %+v, want the refusal answer_unpinned_ca", a)
+		}
+	})
+	t.Run("hostcert_kept_cert_of_draining_ca_kept_until_due", func(t *testing.T) {
+		// Due's membership check takes the same time-aware set: a
+		// certificate of a draining host CA key is kept before its end.
+		h, old := drainingHost(t, drainAt)
+		installedByOld(t, h, old)
+		h.clock.advance(30 * time.Minute)
+		if r := h.mustHostCerts(); len(r.Requested) != 0 {
+			t.Fatalf("a certificate of the draining host CA key was replaced before its end: %+v", r)
+		}
+	})
+	t.Run("hostcert_kept_cert_of_drained_ca_replaced", func(t *testing.T) {
+		h, old := drainingHost(t, drainAt)
+		en := installedByOld(t, h, old)
+		pastEnd(t, h, drainAt)
+		// By elimination the reason is untrusted_ca: the certificate is far
+		// from its ValidBefore and RenewAt, its principals are the
+		// directory's, and the KRL revokes nothing (the report names keys,
+		// not codes).
+		now := uint64(h.clock.Now().Unix()) //nolint:gosec // G115: test clock
+		if now+hostcert.MissingMargin(en.ValidBefore-en.IssuedAt) >= en.ValidBefore || now >= en.RenewAt {
+			t.Fatalf("entry %+v at %d: the case needs a certificate that is otherwise not due", en, now)
+		}
+		if r := h.mustHostCerts(); len(r.Requested) != 1 {
+			t.Fatalf("a kept certificate of the host CA key past its end: %+v, want a replacement request", r)
+		}
+	})
 	hostCertStepCases(t)
 	hostCertStepCases2(t)
 }

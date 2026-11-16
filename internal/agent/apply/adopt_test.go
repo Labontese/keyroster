@@ -158,6 +158,62 @@ func TestAdopt(t *testing.T) {
 		}
 		h.nothingWritten("after the refusal")
 	})
+	// The Phase 2 CA file may hold any user CA key the bundle trusts at
+	// the applier's clock: active, next, or draining before its end
+	// (03-12c). caLine is the file's line for the formatted key k, with
+	// ca-key's comment.
+	caLine := func(k string) string { return k + " keyroster user CA (bundle v1)\n" }
+	t.Run("adopt_next_user_ca_ok", func(t *testing.T) {
+		t.Parallel()
+		h := adoptHost(t)
+		k2 := seedKey(t, 29)
+		for v, d := range h.f.roleNextChain(trust.RoleUser, k2, false) {
+			h.state.Bundles[v] = d
+		}
+		h.installPhase2(phase2Layout{caLine: caLine(trust.FormatKey(k2.PublicKey()))})
+		if r, err := h.apply(); err != nil || len(r.Phase2Removed) != 4 {
+			t.Fatalf("a Phase 2 CA file holding the next user CA key: %+v (%v), want it adopted", r, err)
+		}
+	})
+	t.Run("adopt_draining_user_ca_ok", func(t *testing.T) {
+		t.Parallel()
+		h := adoptHost(t)
+		old := seedKey(t, seedDrainOld)
+		h.useBundle(3, h.f.withBundle(3, h.f.drainingCA(trust.RoleUser, old, drainAt)))
+		h.installPhase2(phase2Layout{caLine: caLine(trust.FormatKey(old.PublicKey()))})
+		if r, err := h.apply(); err != nil || len(r.Phase2Removed) != 4 {
+			t.Fatalf("a Phase 2 CA file holding the draining user CA key before its end: %+v (%v), want it adopted", r, err)
+		}
+	})
+	t.Run("adopt_drained_user_ca_refused", func(t *testing.T) {
+		t.Parallel()
+		h := adoptHost(t)
+		old := seedKey(t, seedDrainOld)
+		h.useBundle(3, h.f.withBundle(3, h.f.drainingCA(trust.RoleUser, old, drainAt)))
+		h.installPhase2(phase2Layout{caLine: caLine(trust.FormatKey(old.PublicKey()))})
+		end, err := time.Parse(time.RFC3339, drainAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.clock.advance(end.Sub(h.clock.Now()) + time.Second)
+		if _, err := h.apply(); !errors.Is(err, ErrPhase2Differs) || !strings.Contains(err.Error(), "not the active user CA key") {
+			t.Fatalf("a Phase 2 CA file holding the user CA key past its end: %v, want phase2_layout_differs", err)
+		}
+		h.nothingWritten("after the refusal")
+	})
+	t.Run("adopt_retired_user_ca_refused", func(t *testing.T) {
+		t.Parallel()
+		h := adoptHost(t)
+		k2 := seedKey(t, 29)
+		for v, d := range h.f.roleNextChain(trust.RoleUser, k2, true) {
+			h.state.Bundles[v] = d
+		}
+		h.installPhase2(phase2Layout{caLine: caLine(trust.FormatKey(k2.PublicKey()))})
+		if _, err := h.apply(); !errors.Is(err, ErrPhase2Differs) || !strings.Contains(err.Error(), "not the active user CA key") {
+			t.Fatalf("a Phase 2 CA file holding a retired user CA key: %v, want phase2_layout_differs", err)
+		}
+		h.nothingWritten("after the refusal")
+	})
 	t.Run("principals_from_older_directory_refused", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))
