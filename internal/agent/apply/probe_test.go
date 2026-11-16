@@ -354,6 +354,103 @@ func TestProbeStep(t *testing.T) {
 			}
 		})
 	}
+	// The probe answer set, and so a kept pair's usability, is the machine
+	// CA keys trusted at the run's clock (03-12c). drainingProbeHost's
+	// first bundle is version 3 with the machine CA generation 1 draining
+	// (old's key) until drainAt and generation 2 active; byOld runs f with
+	// the stand-in machine CA signing with old, so a KRL published inside
+	// f lists the negatives under old's key.
+	drainingProbeHost := func(t *testing.T) (*probeHost, ssh.Signer) {
+		t.Helper()
+		h := newProbeHost(t)
+		old := seedKey(t, seedDrainOld)
+		h.useBundle(3, h.f.withBundle(3, h.f.drainingCA(trust.RoleMachine, old, drainAt)))
+		h.installed("role:ops")
+		if a, err := h.accepted(); err != nil || a.BundleVersion != 3 {
+			t.Fatalf("accepted/ %+v (%v), want the draining bundle in force", a, err)
+		}
+		return h, old
+	}
+	byOld := func(h *probeHost, old ssh.Signer, f func()) {
+		gen2 := h.f.mach
+		h.f.mach = old
+		defer func() { h.f.mach = gen2 }()
+		f()
+	}
+	// committedByOld collects a pair signed by old before the end and
+	// makes it the pair in use (its negative listed under old's key).
+	committedByOld := func(t *testing.T, h *probeHost, old ssh.Signer) map[probecert.Polarity]*ssh.Certificate {
+		t.Helper()
+		h.mustProbeCerts()
+		var certs map[probecert.Polarity]*ssh.Certificate
+		byOld(h, old, func() { certs = h.answerAll() })
+		if r := h.mustProbeCerts(); len(r.Kept) != 2 {
+			t.Fatalf("a pair signed by the draining machine CA key before its end: report %+v, record %+v, want both kept", r, h.record())
+		}
+		byOld(h, old, func() { h.listNegative(certs[probecert.Negative].Serial) })
+		if r := h.mustProbeCerts(); !r.PairChanged || h.record().Committed.Negative == nil {
+			t.Fatalf("after the negative is listed: %+v, want the pair in use", r)
+		}
+		return certs
+	}
+	pastEnd := func(t *testing.T, h *probeHost) {
+		t.Helper()
+		at, err := time.Parse(time.RFC3339, drainAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.clock.advance(at.Sub(h.clock.Now()) + time.Second)
+	}
+	t.Run("probe_pair_draining_ca_kept", func(t *testing.T) {
+		// As answer_kept_after_verification, with the pair signed by the
+		// draining machine CA key before its end.
+		h, old := drainingProbeHost(t)
+		h.mustProbeCerts()
+		byOld(h, old, func() { h.answerAll() })
+		r := h.mustProbeCerts()
+		rec := h.record()
+		if len(r.Kept) != 2 || rec.Next.Positive == nil || rec.Next.Negative == nil || len(h.outbox()) != 0 {
+			t.Fatalf("a pair signed by the draining machine CA key before its end: report %+v, record %+v, want both kept", r, rec)
+		}
+	})
+	t.Run("probe_pair_drained_ca_unusable", func(t *testing.T) {
+		h, old := drainingProbeHost(t)
+		h.lifetime = 4 * 3600 // the pair outlives the end and is far from renewal at it
+		committedByOld(t, h, old)
+		if r := h.mustProbeCerts(); len(r.Requested) != 0 {
+			t.Fatalf("a usable pair of the draining machine CA key was replaced before its end: %+v", r)
+		}
+		pastEnd(t, h)
+		if r := h.mustProbeCerts(); !slices.Equal(r.Requested, []string{"positive", "negative"}) {
+			t.Fatalf("the pair of the machine CA key past its end: %+v, want both polarities requested", r)
+		}
+	})
+	t.Run("probe_pair_expires_before_drop", func(t *testing.T) {
+		// The pair's lifetime (600 s) ends long before the draining CA's
+		// end, so when the end arrives it is expired by time, a fresh pair
+		// is requested and kept under the active key, and the drop's apply
+		// holds nothing.
+		h, old := drainingProbeHost(t)
+		certs := committedByOld(t, h, old)
+		pastEnd(t, h)
+		if now := uint64(h.clock.Now().Unix()); now < certs[probecert.Positive].ValidBefore || now < certs[probecert.Negative].ValidBefore { //nolint:gosec // G115: test clock
+			t.Fatalf("the pair is valid until %d and %d at %d: the case needs an expired pair", certs[probecert.Positive].ValidBefore, certs[probecert.Negative].ValidBefore, now)
+		}
+		if r := h.mustProbeCerts(); !slices.Equal(r.Requested, []string{"positive", "negative"}) {
+			t.Fatalf("at the end with the pair expired: %+v, want both polarities requested", r)
+		}
+		ar, err := h.apply()
+		if err != nil || strings.HasPrefix(ar.Detail, "probe_held") {
+			t.Fatalf("the drop's apply: %+v (%v), want nothing held", ar, err)
+		}
+		if ca := readFile(t, filepath.Join(h.l.Current(), CAFile)); strings.Contains(ca, trust.FormatKey(old.PublicKey())) {
+			t.Fatalf("user_ca_keys still holds the machine CA key past its end:\n%s", ca)
+		}
+		h.answerAll()
+		if r := h.mustProbeCerts(); len(r.Kept) != 2 {
+			t.Fatalf("the fresh pair under the active machine CA key: %+v, want both kept", r)
+		}
+	})
 	t.Run("refusal_sticky_and_transient", func(t *testing.T) {
 		h := newProbeHost(t)
 		h.installed("role:ops")

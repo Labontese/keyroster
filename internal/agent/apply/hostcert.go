@@ -400,13 +400,18 @@ func (e *engine) readHostCertState(ctx context.Context, lg link) (*hostCertState
 		if pol, err := trust.ParsePolicy(stored.Policy); err == nil {
 			in.Policy = pol.Version
 		}
-		// The answer set is the host CA's active and next keys (03-12b):
-		// an aborted key is no longer an answer authority. The same set
-		// decides whether a kept certificate is still usable
-		// (hostcert.Due: one signed by a key outside it is replaced);
-		// 03-12c replaces it by the time-aware set. Revocation and
+		// The answer set is the host CA keys trusted at the run's clock
+		// (03-12c): active and next, and a draining key until its end; an
+		// aborted (retired) key or one past its end is no longer an answer
+		// authority (03-12b). The same set decides whether a kept
+		// certificate is still usable: hostcert.Due keeps its membership
+		// check against it, so a certificate of a key past its end or
+		// retired is replaced (untrusted_ca), and one of a draining key is
+		// kept until it is due. A fresh answer signed by a draining key is
+		// accepted until its end, because the binding of the switch makes
+		// every such certificate expire before the end. Revocation and
 		// recovery still read every state on purpose.
-		for _, ca := range trust.IssuingCAs(bundle, trust.RoleHost) {
+		for _, ca := range trust.TrustedCAs(bundle, trust.RoleHost, st.now) {
 			if pub, err := trust.ParseKey(ca.Key); err == nil {
 				st.caKeys = append(st.caKeys, pub)
 			}

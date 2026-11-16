@@ -2448,7 +2448,13 @@ what the agent installed, and fixes nothing (AGENT-05):
   once, so an apply that swaps it during the check cannot mix two
   generations;
 - accounts that `AllowUsers`, `AllowGroups`, `DenyUsers` or `DenyGroups`
-  exclude are listed, report only.
+  exclude are listed, report only;
+- `draining` lists the accepted bundle's draining CA keys with their end,
+  report only ([CA rotation: what the agent does](#ca-rotation-what-the-agent-does));
+- `trust_expired` names a drained key that `user_ca_keys` still holds, and
+  `trust_latch` says the record of dropped keys does not read, report only;
+- `bundle_behind` names a bundle the signed KRL manifest has named for
+  2 hours that this host has not accepted, report only.
 
 Exit status 0 when nothing drifted, 3 on drift, 2 for a tool error (no
 generation installed). The check runs `sshd -T -C` with loopback client
@@ -2459,6 +2465,65 @@ therefore not checked, and an override there can go unreported.
 apply and every 15 min, with a random 60 s either way, and reports its
 result in the heartbeat (`keyroster host status`, DRIFT; AGENT-05, 03-08;
 run in CI: `TestRunChecks`).
+
+## CA rotation: what the agent does
+
+Run in CI on a fake `sshd` and a fake clock (`TestDrainingDrop`,
+`TestDrainingLatch`, `TestRunTrustDue`, `TestCheckTrust`, `TestBehind`);
+UNVERIFIED on a real host, against a real `sshd`, in a fleet (the 2-hour
+grace of `bundle_behind`) and on Windows OpenSSH. Nothing can put a
+draining CA key into a bundle yet: the second ceremony of a rotation comes
+with a later release, and its runbook carries these steps into the
+rotation.
+
+1. **The upgrade order, before the second ceremony of a rotation.**
+   Upgrade the signer and the server first: the server checks heartbeats
+   strictly, so an older server refuses a heartbeat that carries
+   `bundle_behind`. Then upgrade every applier together with its fetcher,
+   from one release: the fetcher checks the applier's status file
+   strictly. Then the CLIs. An agent built before this change refuses a
+   bundle with a `draining` entry or a `trusted_until` field and keeps the
+   bundle it has, so on that host the old CA key stays active, a `next`
+   key stays trusted and logins keep working until it is upgraded.
+2. **The drop.** At a draining CA key's end (`trusted_until`) each agent
+   drops the key from `user_ca_keys` by itself, on its own clock, as a
+   narrowing change, with no new bundle. It records every key it drops and
+   never takes one back: a clock stepped back, a rollback or
+   `keyroster-agent reset-directory` does not bring it back. A clock
+   stepped forward drops the keys being drained early, for good. A stopped
+   agent narrows nothing: the key stays in `user_ca_keys` until the agent
+   runs again.
+3. **What `check` reports.** Read the JSON of
+
+   ```
+   sudo keyroster-agent check
+   ```
+
+   - `draining`: each draining CA key of the accepted bundle with its
+     role, generation, fingerprint and end; `state` is `draining` before
+     the end and `drained (ended <t>)` from it; `in_file` says whether
+     `user_ca_keys` still holds it, `latched` whether the agent recorded
+     it as dropped.
+   - `trust_expired`: a drained key that `user_ca_keys` still holds. The
+     applier applies again within one check period (15 min). If it
+     stays, read the last apply in `keyroster host status` and the agent's
+     log (`journalctl -u keyroster-agent`).
+   - `trust_latch`: `unreadable` when the agent's record of dropped keys
+     does not read. The agent then renders no draining CA key at all until
+     the record is restored from the host's own backup of the agent's
+     state directory. Never edit or delete the record by hand: it is what
+     keeps a dropped key out.
+   - `bundle_behind`: the host has not accepted a bundle that the
+     ops-signed KRL manifest has named for 2 hours or more, with the
+     manifest's and the accepted bundle versions, the first time the
+     manifest named it (`since`) and a `reason`: `unapplied` (the bundle
+     verified and cannot be applied), `not_accepted` (it reached the
+     spool and this agent refused or holds it: its log says why),
+     `not_delivered` (it never reached the spool) or
+     `unknown` (`check` reads no spool). The old CA key stays trusted on
+     that host: this is detection, not enforcement. Find why the bundle
+     did not arrive or apply. The heartbeat carries the same object.
+4. None of these changes the exit status of `check`: read the JSON.
 
 ## Windows hosts
 

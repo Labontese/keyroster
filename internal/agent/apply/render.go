@@ -4,12 +4,12 @@ package apply
 
 import (
 	"bytes"
-	"cmp"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -135,8 +135,10 @@ func (h *HostError) Unwrap() error { return h.Err }
 // directory.HostForKey finds for any of them (every match must name the
 // same host, else host_keys_disagree; none, or a disabled one, is
 // host_not_in_directory and installs nothing new). user_ca_keys holds the
-// bundle's active and next user and machine CA keys, one trust.FormatKey
-// line each, sorted by role (user, then machine) and generation;
+// bundle's user and machine CA keys that are trusted at at.Now (active and
+// next, and draining until its end, 03-12c), less the entries at.Dropped
+// names, one plain trust.FormatKey line each, sorted by role (user, then
+// machine) and generation;
 // principals/<account> is directory.RenderPrincipalsFile for each account
 // of the host's host group, the one renderer, through one
 // directory.PrincipalsRenderer, which canonicalises and hashes the
@@ -147,9 +149,9 @@ func (h *HostError) Unwrap() error { return h.Err }
 // rendered, the bundle's CA keys and the verified KRL, with no principals
 // files and no host, so certificate logins fail closed, as on the signer
 // (T-02-15); authorized_keys and the console are unaffected.
-func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
+func Render(v *state.Verified, hostKeys []ssh.PublicKey, at RenderAt) (*Generation, error) {
 	if v.DirectoryUnauthorized != nil {
-		return renderTrust(v)
+		return renderTrust(v, at)
 	}
 	if v.Directory == nil {
 		return nil, &HostError{Err: errNoDirectory, Unmatched: fingerprints(hostKeys)}
@@ -165,7 +167,7 @@ func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
 	if host.Status != directory.StatusActive {
 		return nil, &HostError{Err: fmt.Errorf("%w: host %s is %s in directory version %d", ErrHostNotInDirectory, host.Name, host.Status, v.Directory.Version)}
 	}
-	g, err := renderTrust(v)
+	g, err := renderTrust(v, at)
 	if err != nil {
 		return nil, err
 	}
@@ -222,12 +224,12 @@ func hostsForKeys(d *directory.Directory, hostKeys []ssh.PublicKey) []*directory
 // a verified bundle's CA keys never wait for a directory. It returns the
 // generation and the host status; a refusal of any other kind is returned
 // as is.
-func RenderFallback(v *state.Verified, hostKeys []ssh.PublicKey, lastHost string, lastGood *Generation, refusal error) (*Generation, string, error) {
+func RenderFallback(v *state.Verified, hostKeys []ssh.PublicKey, lastHost string, lastGood *Generation, refusal error, at RenderAt) (*Generation, string, error) {
 	if v.Directory == nil {
 		if lastGood == nil || !errors.Is(refusal, ErrHostNotInDirectory) {
 			return nil, "", refusal
 		}
-		g, err := renderTrust(v)
+		g, err := renderTrust(v, at)
 		if err != nil {
 			return nil, "", err
 		}
@@ -254,7 +256,7 @@ func RenderFallback(v *state.Verified, hostKeys []ssh.PublicKey, lastHost string
 			status = HostDisabled
 		}
 	}
-	g, err := renderTrust(v)
+	g, err := renderTrust(v, at)
 	if err != nil {
 		return nil, "", err
 	}
@@ -275,28 +277,26 @@ func keepPrincipals(g, lastGood *Generation) {
 	}
 }
 
+// RenderAt is what a render reads besides the verified state (03-12c):
+// Now is the engine's clock, and Dropped, when set, names the CA entries
+// the render leaves out (the agent's drop latch fills it).
+type RenderAt struct {
+	Now     time.Time
+	Dropped func(trust.CAEntry) bool
+}
+
 // renderTrust is the part of a generation that does not depend on the
-// host entry: user_ca_keys and revoked.krl.
-func renderTrust(v *state.Verified) (*Generation, error) {
-	g := &Generation{Files: map[string][]byte{}}
-	var ca bytes.Buffer
-	for _, role := range []string{trust.RoleUser, trust.RoleMachine} {
-		var entries []trust.CAEntry
-		for _, c := range v.Bundle.CAs {
-			if c.Role == role && (c.State == "active" || c.State == "next") {
-				entries = append(entries, c)
-			}
-		}
-		slices.SortFunc(entries, func(a, b trust.CAEntry) int { return cmp.Compare(a.Generation, b.Generation) })
-		for _, c := range entries {
-			pub, err := trust.ParseKey(c.Key)
-			if err != nil {
-				return nil, fmt.Errorf("the bundle's %s CA key: %w", role, err)
-			}
-			ca.WriteString(trust.FormatKey(pub) + "\n")
-		}
+// host entry: user_ca_keys and revoked.krl. The CA file is
+// trust.UserCAKeysFileExcept at at.Now (03-12c): the bundle's keys trusted
+// at that time, one plain line each, without the entries at.Dropped names;
+// its error names the bundle's CA key that does not parse.
+func renderTrust(v *state.Verified, at RenderAt) (*Generation, error) {
+	ca, err := trust.UserCAKeysFileExcept(v.Bundle, at.Now, at.Dropped)
+	if err != nil {
+		return nil, err
 	}
-	g.Files[CAFile] = ca.Bytes()
+	g := &Generation{Files: map[string][]byte{}}
+	g.Files[CAFile] = ca
 	g.Files[KRLFile] = append([]byte{}, v.Next.KRL...)
 	return g, nil
 }

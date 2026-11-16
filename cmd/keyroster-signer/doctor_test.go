@@ -22,6 +22,10 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+
+	"github.com/Labontese/keyroster/internal/doctor"
+	"github.com/Labontese/keyroster/internal/signerdb"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // doctorState is a state directory initialised by ca-init with the agent
@@ -328,4 +332,44 @@ func TestDoctorUnrecordedGenerationFile(t *testing.T) {
 			t.Fatalf("doctor exited %d:\n%s", code, out)
 		}
 	})
+}
+
+// TestDoctorDrainingTrustedUntil (03-12c): a stored generation whose key
+// the installed bundle lists as draining shows the entry's trusted_until
+// on the OK generations line. The signer refuses to install a draining
+// bundle until 03-12e, so the bundle is built by hand and goes through
+// generationFacts and doctor.Run directly.
+func TestDoctorDrainingTrustedUntil(t *testing.T) {
+	key := func() ssh.PublicKey {
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := ssh.NewSignerFromKey(priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.PublicKey()
+	}
+	k1, k2 := key(), key()
+	const end = "2026-10-20T00:00:00Z"
+	b := &trust.Bundle{CAs: []trust.CAEntry{
+		{Role: trust.RoleUser, Key: trust.FormatKey(k1), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "draining", Generation: 1, TrustedUntil: end},
+		{Role: trust.RoleUser, Key: trust.FormatKey(k2), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "active", Generation: 2},
+	}}
+	gens := []signerdb.CAGeneration{
+		{Role: trust.RoleUser, Generation: 1, PublicKey: k1.Marshal(), Alg: ssh.KeyAlgoED25519, Custody: "software"},
+		{Role: trust.RoleUser, Generation: 2, PublicKey: k2.Marshal(), Alg: ssh.KeyAlgoED25519, Custody: "software"},
+	}
+	var line string
+	for _, r := range doctor.Run(doctor.Facts{Generations: generationFacts(gens, b)}) {
+		if r.Code == "generations" {
+			line = r.Line()
+		}
+	}
+	for _, want := range []string{"OK", "draining g1 " + ssh.FingerprintSHA256(k1) + " until " + end, "active g2 " + ssh.FingerprintSHA256(k2)} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("the generations line %q lacks %q", line, want)
+		}
+	}
 }

@@ -95,6 +95,11 @@ type CAEntry struct {
 	Custody    string `json:"custody"`
 	State      string `json:"state"`
 	Generation uint32 `json:"generation"`
+	// TrustedUntil is the end of a draining entry's trust, a time in
+	// TimeFormat (03-12c): the one entry field that a state may leave
+	// empty. It is the last field with omitempty, so every entry that is
+	// not draining keeps its exact bytes.
+	TrustedUntil string `json:"trusted_until,omitempty"`
 }
 
 // KeyEntry is a non-CA online key (the ops key, the KRL authority used from
@@ -119,7 +124,7 @@ var (
 	rootKeyTypes  = set(ssh.KeyAlgoED25519, ssh.KeyAlgoSKED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoSKECDSA256)
 	rootCustody   = set("software", "fido", "piv", "pkcs11")
 	onlineCustody = set("agent", "pkcs11-agent", "tpm", "vtpm", "piv", "software")
-	caStates      = set("active", "next", "retired")
+	caStates      = set("active", "next", "draining", "retired")
 )
 
 func set(vs ...string) map[string]bool {
@@ -147,6 +152,13 @@ func (b *Bundle) Canonical() ([]byte, error) { return CanonicalJSON(b) }
 
 // Validate checks every structural rule of a bundle. It does not check
 // signatures, pins or the policy hash against a policy document.
+//
+// For CA entries (03-12c): a draining entry needs a trusted_until in
+// TimeFormat and no other state may carry one; a role has at most one
+// next entry and any number of draining ones; and a version 1 bundle has
+// no draining entry, because a genesis has no earlier key to drain. Every
+// parse of a first bundle runs this rule, the agent's first acceptance
+// included, so no path can start from a draining genesis.
 func (b *Bundle) Validate() error {
 	if b.Version < 1 {
 		return fmt.Errorf("%w: version must be >= 1", ErrInvalid)
@@ -187,7 +199,7 @@ func (b *Bundle) Validate() error {
 	}
 	roleIdx := -1
 	var lastGen uint32
-	active := map[string]int{}
+	active, next := map[string]int{}, map[string]int{}
 	for i, ca := range b.CAs {
 		where := fmt.Sprintf("cas[%d] (%s)", i, ca.Role)
 		idx := indexOf(caRoles, ca.Role)
@@ -202,10 +214,18 @@ func (b *Bundle) Validate() error {
 			return fmt.Errorf("%w: %s: generation must be >= 1", ErrInvalid, where)
 		}
 		if !caStates[ca.State] {
-			return fmt.Errorf("%w: %s: state %q (want active, next or retired)", ErrInvalid, where, ca.State)
+			return fmt.Errorf("%w: %s: state %q (want active, next, draining or retired)", ErrInvalid, where, ca.State)
 		}
-		if ca.State == "active" {
+		if err := checkTrustedUntil(where, b.Version, ca); err != nil {
+			return err
+		}
+		switch ca.State {
+		case "active":
 			active[ca.Role]++
+		case "next":
+			if next[ca.Role]++; next[ca.Role] > 1 {
+				return fmt.Errorf("%w: %s: role %s has more than one next entry", ErrInvalid, where, ca.Role)
+			}
 		}
 		pub, err := checkOnlineKey(where, ca.Key, ca.Alg, ca.Custody)
 		if err != nil {
@@ -243,6 +263,27 @@ func (b *Bundle) Validate() error {
 	}
 	if b.InstallationID != "" && !IsInstallationID(b.InstallationID) {
 		return fmt.Errorf("%w: installation_id must be 32 lowercase hex digits", ErrInvalid)
+	}
+	return nil
+}
+
+// checkTrustedUntil applies the trusted_until rules of Validate to the
+// entry ca of a bundle at version (03-12c).
+func checkTrustedUntil(where string, version uint64, ca CAEntry) error {
+	if ca.State != "draining" {
+		if ca.TrustedUntil != "" {
+			return fmt.Errorf("%w: %s: trusted_until on a %s entry (only a draining entry has one)", ErrInvalid, where, ca.State)
+		}
+		return nil
+	}
+	if ca.TrustedUntil == "" {
+		return fmt.Errorf("%w: %s: a draining entry needs a trusted_until", ErrInvalid, where)
+	}
+	if checkTimestamp(ca.TrustedUntil) != nil {
+		return fmt.Errorf("%w: %s: trusted_until: %q must be RFC 3339 UTC with whole seconds (%s)", ErrInvalid, where, ca.TrustedUntil, TimeFormat)
+	}
+	if version == 1 {
+		return fmt.Errorf("%w: %s: a version 1 bundle has no draining entry", ErrInvalid, where)
 	}
 	return nil
 }

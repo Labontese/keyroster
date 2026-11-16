@@ -78,6 +78,9 @@ type fixture struct {
 	// krlMachSerials are machine-CA serials every later KRL also revokes:
 	// negative probe certificates (03-10b).
 	krlMachSerials []uint64
+	// manifestBundle is the bundle version every later KRL manifest names
+	// (03-12c); zero means 1.
+	manifestBundle uint64
 }
 
 func newFixture(t testing.TB) *fixture {
@@ -262,7 +265,7 @@ func (f *fixture) krlWithHeader(serials []uint64, keys []ssh.PublicKey, id strin
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	m := &krl.Manifest{InstallationID: id, KRLVersion: f.krlVersion, KRLSHA256: krl.SHA256Hex(b), IssuedAt: "2026-10-01T00:00:00Z", BundleVersion: 1, LogIndex: 3}
+	m := &krl.Manifest{InstallationID: id, KRLVersion: f.krlVersion, KRLSHA256: krl.SHA256Hex(b), IssuedAt: "2026-10-01T00:00:00Z", BundleVersion: max(f.manifestBundle, 1), LogIndex: 3}
 	doc, err := m.Canonical()
 	if err != nil {
 		f.t.Fatal(err)
@@ -272,6 +275,43 @@ func (f *fixture) krlWithHeader(serials []uint64, keys []ssh.PublicKey, id strin
 		f.t.Fatal(err)
 	}
 	return f.krlVersion, spool.KRLFiles{KRL: b, Manifest: doc, Sig: sig}
+}
+
+// withBundle is a copy of f.bundle at version, with prev the SHA-256 of a
+// fixed string and issued_at 2026-10-20T00:00:00Z, changed by edit,
+// canonical and root-signed (03-12c). A first acceptance runs no chain
+// rule, so it reaches a fresh host as its first bundle.
+func (f *fixture) withBundle(version uint64, edit func(b *trust.Bundle)) spool.Doc {
+	f.t.Helper()
+	b := *f.bundle
+	b.Root.Keys = slices.Clone(f.bundle.Root.Keys)
+	b.CAs = slices.Clone(f.bundle.CAs)
+	b.Version, b.Prev, b.IssuedAt = version, trust.SHA256Hex([]byte("an earlier bundle")), "2026-10-20T00:00:00Z"
+	if edit != nil {
+		edit(&b)
+	}
+	doc := mustCanonical(f.t, &b)
+	if _, err := trust.ParseBundle(doc); err != nil {
+		f.t.Fatalf("test bundle version %d: %v", version, err)
+	}
+	return spool.Doc{Body: doc, Sigs: f.rootSign(trust.NamespaceBundle, doc)}
+}
+
+// drainingCA is a withBundle edit (03-12c): role's one entry becomes
+// generation 1 draining with old's key until end, and generation 2 active
+// with the fixture's key of the role; the other roles are unchanged.
+func (f *fixture) drainingCA(role string, old ssh.Signer, end string) func(b *trust.Bundle) {
+	return func(b *trust.Bundle) {
+		i := slices.IndexFunc(b.CAs, func(c trust.CAEntry) bool { return c.Role == role })
+		if i < 0 {
+			f.t.Fatalf("the bundle has no %s CA", role)
+		}
+		active := b.CAs[i]
+		drain := active
+		drain.Key, drain.State, drain.Generation, drain.TrustedUntil = trust.FormatKey(old.PublicKey()), "draining", 1, end
+		active.Generation = 2
+		b.CAs = slices.Replace(b.CAs, i, i+1, drain, active)
+	}
 }
 
 // genesis is a spool state with the genesis bundle and policy.
@@ -872,6 +912,19 @@ func (h *testHost) publishKRL(serials ...uint64) {
 	h.t.Helper()
 	v, files := h.f.krl(serials, nil, "")
 	h.state.KRLs = map[uint64]spool.KRLFiles{v: files}
+}
+
+// publishKRLNaming offers the next KRL version, whose manifest names
+// bundle version bundle (03-12c); every later KRL names it too.
+func (h *testHost) publishKRLNaming(bundle uint64, serials ...uint64) {
+	h.t.Helper()
+	h.f.manifestBundle = bundle
+	h.publishKRL(serials...)
+}
+
+// useBundle makes d, at version, the spool's only bundle (03-12c).
+func (h *testHost) useBundle(version uint64, d spool.Doc) {
+	h.state.Bundles = map[uint64]spool.Doc{version: d}
 }
 
 // write puts the offered state into the spool.

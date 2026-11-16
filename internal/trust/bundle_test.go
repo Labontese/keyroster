@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -286,4 +287,131 @@ func rsaTestKey(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return FormatKey(pub)
+}
+
+// stateBundle is the canonical golden bundle at version with the user
+// entries users (03-12c). A version above 1 has a non-genesis prev, since
+// a genesis carries no draining entry.
+func stateBundle(t *testing.T, version uint64, users ...CAEntry) []byte {
+	t.Helper()
+	b := goldenBundle(t, mustCanonical(t, goldenPolicy(t)))
+	if version > 1 {
+		b.Version, b.Prev = version, SHA256Hex([]byte("an earlier bundle"))
+	}
+	b.CAs = append(slices.Clone(users), b.CAs[1:]...)
+	return mustCanonical(t, b)
+}
+
+// TestBundleCAStates (03-12c): Validate's rules for draining entries and
+// trusted_until, and at most one next entry per role. Each refusal is
+// ErrInvalid with its own text.
+func TestBundleCAStates(t *testing.T) {
+	active := func(gen uint32) CAEntry { return caAt(t, RoleUser, seedUserCA, "active", gen) }
+	parses := func(t *testing.T, doc []byte) *Bundle {
+		t.Helper()
+		b, err := ParseBundle(doc)
+		if err != nil {
+			t.Fatalf("ParseBundle: %v, want it to parse", err)
+		}
+		return b
+	}
+	refused := func(t *testing.T, err error, want string) {
+		t.Helper()
+		if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want ErrInvalid holding %q", err, want)
+		}
+	}
+	refusedParse := func(t *testing.T, doc []byte, want string) {
+		t.Helper()
+		_, err := ParseBundle(doc)
+		refused(t, err, want)
+	}
+	t.Run("draining_state_parses", func(t *testing.T) {
+		b := parses(t, stateBundle(t, 2, drainingAt(t, RoleUser, seedCANext, 1, drainEnd), active(2)))
+		if b.CAs[0].State != "draining" || b.CAs[0].TrustedUntil != drainEnd {
+			t.Fatalf("the parsed entry is %+v, want draining until %s", b.CAs[0], drainEnd)
+		}
+	})
+	t.Run("many_draining_entries_ok", func(t *testing.T) {
+		parses(t, stateBundle(t, 2,
+			drainingAt(t, RoleUser, seedCANext, 1, "2026-10-10T00:00:00Z"),
+			drainingAt(t, RoleUser, seedCANext2, 2, "2026-10-15T00:00:00Z"),
+			drainingAt(t, RoleUser, seedCAOther, 3, drainEnd),
+			active(4)))
+	})
+	t.Run("entries_ordered_role_generation", func(t *testing.T) {
+		in := []CAEntry{
+			caAt(t, RoleUser, seedCAOther, "retired", 1),
+			drainingAt(t, RoleUser, seedCANext, 2, "2026-10-10T00:00:00Z"),
+			drainingAt(t, RoleUser, seedCANext2, 3, drainEnd),
+			active(4),
+			caAt(t, RoleUser, seedCARotate, "next", 5),
+		}
+		parses(t, stateBundle(t, 2, in...))
+		out := slices.Clone(in)
+		out[1], out[2] = out[2], out[1]
+		_, err := ParseBundle(stateBundle(t, 2, out...))
+		if !errors.Is(err, ErrCARole) || !strings.Contains(err.Error(), "entries must be ordered user, host, machine, then by increasing generation") {
+			t.Fatalf("out of order: err = %v, want the ordering refusal", err)
+		}
+	})
+	t.Run("draining_without_trusted_until_refused", func(t *testing.T) {
+		refusedParse(t, stateBundle(t, 2, drainingAt(t, RoleUser, seedCANext, 1, ""), active(2)),
+			"cas[0] (user): a draining entry needs a trusted_until")
+	})
+	t.Run("draining_with_bad_trusted_until_refused", func(t *testing.T) {
+		refusedParse(t, stateBundle(t, 2, drainingAt(t, RoleUser, seedCANext, 1, "2026-10-20T00:00:00.5Z"), active(2)),
+			"cas[0] (user): trusted_until:")
+	})
+	for _, state := range []string{"active", "next", "retired"} {
+		t.Run("trusted_until_on_"+state+"_refused", func(t *testing.T) {
+			e := caAt(t, RoleUser, seedCANext, state, 2)
+			e.TrustedUntil = drainEnd
+			users := []CAEntry{active(1), e}
+			if state == "active" {
+				users = []CAEntry{caAt(t, RoleUser, seedCAOther, "retired", 1), e}
+			}
+			refusedParse(t, stateBundle(t, 2, users...), "cas[1] (user): trusted_until on a "+state+" entry (only a draining entry has one)")
+		})
+	}
+	genesis := stateBundle(t, 1, drainingAt(t, RoleUser, seedCANext, 1, drainEnd), active(2))
+	t.Run("genesis_with_draining_refused", func(t *testing.T) {
+		refusedParse(t, genesis, "cas[0] (user): a version 1 bundle has no draining entry")
+	})
+	t.Run("genesis_verify_refuses_draining", func(t *testing.T) {
+		_, _, err := VerifyGenesisBundle(genesis, nil, mustCanonical(t, goldenPolicy(t)), nil, goldenPins(t), 1)
+		refused(t, err, "cas[0] (user): a version 1 bundle has no draining entry")
+	})
+	t.Run("second_next_for_one_role_refused", func(t *testing.T) {
+		refusedParse(t, stateBundle(t, 2, active(1), caAt(t, RoleUser, seedCANext, "next", 2), caAt(t, RoleUser, seedCANext2, "next", 3)),
+			"cas[2] (user): role user has more than one next entry")
+	})
+	t.Run("one_next_per_role_ok", func(t *testing.T) {
+		b := goldenBundle(t, mustCanonical(t, goldenPolicy(t)))
+		b.Version, b.Prev = 2, SHA256Hex([]byte("an earlier bundle"))
+		b.CAs = []CAEntry{
+			goldenCA(t, RoleUser), caAt(t, RoleUser, seedCANext, "next", 2),
+			goldenCA(t, RoleHost), caAt(t, RoleHost, seedCANext2, "next", 2),
+			goldenCA(t, RoleMachine), caAt(t, RoleMachine, seedCAOther, "next", 2),
+		}
+		parses(t, mustCanonical(t, b))
+	})
+	t.Run("single_active_bundle_unchanged", func(t *testing.T) {
+		_, doc := goldenDocs(t)
+		b := parses(t, doc)
+		if again := mustCanonical(t, b); !bytes.Equal(again, doc) || bytes.Contains(doc, []byte("trusted_until")) {
+			t.Fatalf("the golden bundle re-marshals to %s, want its own bytes with no trusted_until", again)
+		}
+	})
+	t.Run("empty_trusted_until_not_canonical", func(t *testing.T) {
+		_, doc := goldenDocs(t)
+		const gen = `"generation":1}`
+		if !bytes.Contains(doc, []byte(gen)) {
+			t.Fatalf("fixture lacks %s", gen)
+		}
+		v := bytes.Replace(doc, []byte(gen), []byte(`"generation":1,"trusted_until":""}`), 1)
+		if _, err := ParseBundle(v); !errors.Is(err, ErrNotCanonical) {
+			t.Fatalf(`"trusted_until":"": %v, want ErrNotCanonical`, err)
+		}
+	})
 }

@@ -399,12 +399,17 @@ func (e *engine) readProbeFacts(lg link) (*probeFacts, error) {
 		if pol, err := trust.ParsePolicy(stored.Policy); err == nil {
 			in.Policy = pol.Version
 		}
-		// The answer set is the machine CA's active and next keys
-		// (03-12b): an aborted key is no longer an answer authority. The
-		// same set feeds the usability check of a kept pair
-		// (probe/probe.go); 03-12c replaces it by the time-aware set.
-		// Revocation and recovery still read every state on purpose.
-		for _, ca := range trust.IssuingCAs(bundle, trust.RoleMachine) {
+		// The answer set is the machine CA keys trusted at the run's clock
+		// (03-12c): active and next, and a draining key until its end; an
+		// aborted (retired) key or one past its end is no longer an answer
+		// authority (03-12b). The same set feeds the usability check of a
+		// kept pair (probe/probe.go PairUsable), so a pair of a key past
+		// its end is unusable and collected again under a trusted key. A
+		// fresh pair signed by a draining key is accepted until its end,
+		// because the binding of the switch makes every such certificate
+		// expire before the end. Revocation and recovery still read every
+		// state on purpose.
+		for _, ca := range trust.TrustedCAs(bundle, trust.RoleMachine, st.now) {
 			if pub, err := trust.ParseKey(ca.Key); err == nil {
 				in.CAKeys = append(in.CAKeys, pub)
 			}

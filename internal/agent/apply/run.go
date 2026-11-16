@@ -136,6 +136,10 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		probeDue     time.Time
 		probeAnswers string
 		probeStarted bool
+		// trustDue is the next draining CA's end (03-12c): the timer on
+		// the host's own clock that applies the drop with no new document.
+		// The retry after an error is failedAt's.
+		trustDue time.Time
 		// forceApply: a new probe pair arrived while an addition is held
 		// (03-10b, D9), so the next round applies at once.
 		forceApply bool
@@ -209,6 +213,18 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		case d.Drift():
 			logf("ERROR drift: generation %d: %d setting, %d file and %d foreign findings (keyroster-agent check prints them)", d.Generation, len(d.Settings), len(d.Files), len(d.Foreign))
 		}
+		// 03-12c: current still holds a CA key that the render omits (its
+		// end has passed, or the drop latch holds it), for example after an
+		// operator's --recover-to-last-good: the next round applies at once.
+		// After a failed apply Retry governs instead (failedAt), so a check
+		// that follows a failing apply does not make every round apply
+		// (T-03-443).
+		for _, x := range d.TrustExpired {
+			logf("ERROR trust_expired: %s g%d %s ended %s and is still in user_ca_keys; applying", x.Role, x.Generation, x.Fingerprint, x.TrustedUntil)
+		}
+		if len(d.TrustExpired) > 0 && failedAt.IsZero() {
+			forceApply = true
+		}
 		status(StatusUpdate{Checked: true, Drift: d})
 	}
 	for {
@@ -234,7 +250,8 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			switch {
 			case err != nil:
 				logf("ERROR spool: %v", err)
-			case names != "" && (!haveNames || names != lastNames || catchUp || forceApply || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry)):
+			case names != "" && (!haveNames || names != lastNames || catchUp || forceApply || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry) ||
+				(!trustDue.IsZero() && !rc.Clock.Now().Before(trustDue))):
 				catchUp, forceApply = false, false
 				// A check after the round's applies, below.
 				nextCheck = time.Time{}
@@ -247,6 +264,10 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 						rc.Out(r, err)
 					}
 					failedAt = time.Time{}
+					trustDue = time.Time{}
+					if err == nil {
+						trustDue = r.TrustDue
+					}
 					if err != nil {
 						if !quiet {
 							logf("ERROR apply: %v", err)

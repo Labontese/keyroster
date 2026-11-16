@@ -12,8 +12,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Labontese/keyroster/internal/agent/paths"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 func (h *testHost) check() (*DriftReport, error) {
@@ -292,6 +294,125 @@ func TestDriftProbeAccount(t *testing.T) {
 			}
 			if bytes.Contains(b, []byte("Zq9Marker")) {
 				t.Fatalf("the report carries the hash (in passwd: %t): %s", inPasswd, b)
+			}
+		}
+	})
+}
+
+// stateListing is the names under h's state directory, recursively.
+func stateListing(t *testing.T, h *testHost) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(h.l.StateDir, func(p string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		out = append(out, p)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// heldNextHost is a probes-on host whose gate holds the addition of a
+// next user CA key (03-12b's chain-legal bundle 2): current lacks its line.
+func heldNextHost(t *testing.T) (*testHost, string) {
+	t.Helper()
+	h := gateHost(t, "role:ops")
+	next := seedKey(t, seedDrainOld2)
+	h.state.Bundles[2] = h.f.roleNextChain(trust.RoleUser, next, false)[2]
+	if _, err := h.apply(); !errors.Is(err, ErrProbeHeld) {
+		t.Fatalf("CHECK: the next CA's addition: %v, want probe_held", err)
+	}
+	line := caText(next)
+	if got := h.file(CAFile); strings.Contains(got, line) || h.heldNow() == "" {
+		t.Fatalf("CHECK: held %q, user_ca_keys %q; want the next key's addition held", h.heldNow(), got)
+	}
+	return h, line
+}
+
+// TestCheckTrust (03-12c): keyroster-agent check lists the draining CA
+// keys, reports trust_expired for one that current still holds past its
+// end, and an unreadable latch, report only; it writes nothing.
+func TestCheckTrust(t *testing.T) {
+	t.Run("lists_draining_keys", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		want := DrainingCA{Role: trust.RoleUser, Generation: 1, Fingerprint: fp(old), TrustedUntil: drainAt, State: "draining", InFile: true}
+		if d, err := h.check(); err != nil || !slices.Equal(d.Draining, []DrainingCA{want}) {
+			t.Fatalf("CHECK: before the end: %+v, %v; want draining %+v", d, err, want)
+		}
+		h.clock.advance(2 * time.Hour)
+		want.State = "drained (ended " + drainAt + ")"
+		if d, err := h.check(); err != nil || !slices.Equal(d.Draining, []DrainingCA{want}) {
+			t.Fatalf("CHECK: past the end: %+v, %v; want draining %+v", d, err, want)
+		}
+	})
+	t.Run("trust_expired_when_current_holds_a_drained_key", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		if d, err := h.check(); err != nil || len(d.TrustExpired) != 0 {
+			t.Fatalf("CHECK: inside the window: %+v, %v; want no trust_expired", d, err)
+		}
+		h.clock.advance(2 * time.Hour)
+		d, err := h.check()
+		want := DrainingCA{Role: trust.RoleUser, Generation: 1, Fingerprint: fp(old), TrustedUntil: drainAt, State: "drained (ended " + drainAt + ")", InFile: true}
+		if err != nil || !slices.Equal(d.TrustExpired, []DrainingCA{want}) {
+			t.Fatalf("CHECK: past the end, before an apply: %+v, %v; want trust_expired %+v", d, err, want)
+		}
+		if d.Drift() {
+			t.Fatalf("CHECK: trust_expired counted as drift: %+v", d)
+		}
+	})
+	t.Run("nothing_for_a_held_next_line", func(t *testing.T) {
+		h, _ := heldNextHost(t)
+		d, err := h.check()
+		if err != nil || len(d.TrustExpired) != 0 || len(d.Draining) != 0 || d.TrustLatch != "" {
+			t.Fatalf("CHECK: a held next line: %+v, %v; want no trust report", d, err)
+		}
+	})
+	t.Run("latch_unreadable_reported", func(t *testing.T) {
+		h, _ := newDrainingHost(t)
+		h.installed("role:ops")
+		writeLatchFile(t, h, []byte("not json"), 0o600)
+		if d, err := h.check(); err != nil || d.TrustLatch != "unreadable" {
+			t.Fatalf("CHECK: an unreadable latch: %+v, %v; want trust_latch unreadable", d, err)
+		}
+	})
+	t.Run("check_writes_nothing", func(t *testing.T) {
+		h, _ := newDrainingHost(t)
+		h.installed("role:ops")
+		h.clock.advance(2 * time.Hour)
+		before := stateListing(t, h)
+		if _, err := h.check(); err != nil {
+			t.Fatalf("CHECK: %v", err)
+		}
+		if after := stateListing(t, h); !slices.Equal(before, after) {
+			t.Fatalf("CHECK: the state directory changed:\nbefore %q\nafter  %q", before, after)
+		}
+		if b := latchFile(t, h); b != nil {
+			t.Fatalf("CHECK: check wrote the latch %q", b)
+		}
+		if h.exists(filepath.Join(h.l.Outbox(), "status.json")) {
+			t.Fatal("CHECK: check wrote a status file")
+		}
+	})
+	t.Run("healthy_host_has_no_trust_fields", func(t *testing.T) {
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		d, err := h.check()
+		if err != nil {
+			t.Fatalf("CHECK: %v", err)
+		}
+		b, err := json.Marshal(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []string{`"draining"`, `"trust_expired"`, `"trust_latch"`} {
+			if bytes.Contains(b, []byte(k)) {
+				t.Fatalf("CHECK: a host without a draining entry reports %s: %s", k, b)
 			}
 		}
 	})

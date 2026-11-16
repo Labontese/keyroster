@@ -77,6 +77,15 @@ const StuckPendingStateUnknown = "pending_state_unknown"
 // last_apply.host_status values (closed; 03-05, owner decision 2026-10-26).
 var hostStatuses = []string{"", "host_disabled", "host_removed", "host_keys_rotated", "host_keys_disagree"}
 
+// BehindReasons is the closed set of BundleBehind.Reason (03-12c), in this
+// order: unapplied (the newer bundle verified but cannot be applied: the
+// unapplied record names it), not_accepted (the spool holds it complete and
+// this build did not accept it), not_delivered (it never reached the
+// spool) and unknown (no spool to look at).
+func BehindReasons() []string {
+	return []string{"unapplied", "not_accepted", "not_delivered", "unknown"}
+}
+
 // ErrFieldInvalid is a heartbeat or status field outside its rule; the
 // server answers it 400 heartbeat_field_invalid with the field's name.
 var ErrFieldInvalid = errors.New("heartbeat_field_invalid")
@@ -176,6 +185,10 @@ type Status struct {
 	Stuck          string     `json:"stuck"`
 	KRLStale       bool       `json:"krl_stale"`
 	Unapplied      *Unapplied `json:"unapplied,omitempty"`
+	// BundleBehind is set when the accepted KRL manifest has named a newer
+	// bundle than the accepted one for the grace period (03-12c); omitted
+	// otherwise.
+	BundleBehind *BundleBehind `json:"bundle_behind,omitempty"`
 	// HostCerts, HostKeysSkipped and HostCertDetail are 03-09's (see the
 	// package comment); omitted when empty.
 	HostCerts       []HostCert   `json:"host_certs,omitempty"`
@@ -236,6 +249,22 @@ type Unapplied struct {
 	BundleSHA256    string `json:"bundle_sha256,omitempty"`
 	Directory       uint64 `json:"directory,omitempty"`
 	DirectorySHA256 string `json:"directory_sha256,omitempty"`
+}
+
+// BundleBehind is a host held at an older bundle than the one the
+// ops-signed KRL manifest it accepted names (03-12c): the manifest's bundle
+// version, the accepted bundle's version, since (the first time the
+// accepted manifest named a newer bundle, trust's timestamp format) and why
+// the newer bundle is not in force (BehindReasons). The field is optional,
+// so an older server's strict parse refuses only a status that carries it:
+// the server is upgraded before the applier and the fetcher. It is display
+// only, detection and not enforcement; the proof on a host is its own
+// keyroster-agent check.
+type BundleBehind struct {
+	ManifestBundleVersion uint64 `json:"manifest_bundle_version"`
+	AcceptedVersion       uint64 `json:"accepted_version"`
+	Since                 string `json:"since"`
+	Reason                string `json:"reason"`
 }
 
 // Heartbeat is the body of POST /api/v1/agent/heartbeat: the applier's
@@ -331,8 +360,10 @@ func checkTime(field, s string) error {
 // result, pending.step, stuck and host_status from their closed sets;
 // detail, when present, ^[a-z0-9_]+(:[a-z0-9_]+)?$ within MaxDetail bytes;
 // every free-text field at most MaxText bytes of printable ASCII; times in
-// trust's timestamp format; seq from 1 to the largest int64. The error is
-// a *FieldError naming the first field that failed.
+// trust's timestamp format; seq from 1 to the largest int64; bundle_behind,
+// when present, with both versions at least 1, since in trust's timestamp
+// format and a reason from BehindReasons (03-12c). The error is a
+// *FieldError naming the first field that failed.
 func Validate(s *Status) error {
 	if !Printable(s.AgentVersion, MaxText) {
 		return bad("agent_version")
@@ -431,6 +462,21 @@ func Validate(s *Status) error {
 			if p.sum != "" && (p.v == 0 || !hexRE.MatchString(p.sum)) {
 				return bad(p.name)
 			}
+		}
+	}
+	// bundle_behind (03-12c) has, like unapplied, no rule against the
+	// versions in force, so a status written while accepted/ moved never
+	// makes the server refuse the heartbeat.
+	if b := s.BundleBehind; b != nil {
+		switch {
+		case b.ManifestBundleVersion < 1:
+			return bad("bundle_behind.manifest_bundle_version")
+		case b.AcceptedVersion < 1:
+			return bad("bundle_behind.accepted_version")
+		case trust.CheckTimestamp(b.Since) != nil:
+			return bad("bundle_behind.since")
+		case !contains(BehindReasons(), b.Reason):
+			return bad("bundle_behind.reason")
 		}
 	}
 	if len(s.HostCerts) > MaxHostCerts {

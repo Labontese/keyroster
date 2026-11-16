@@ -12,9 +12,11 @@ import (
 	"slices"
 	"strings"
 
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 
 	"github.com/Labontese/keyroster/internal/agent/execsite"
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	certpkg "github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -63,6 +65,34 @@ type DriftReport struct {
 	// LoginGraceObserved is false when an apply held the lock, so the
 	// check left login_grace.json to that apply.
 	LoginGraceObserved bool `json:"login_grace_observed"`
+	// Draining lists every draining CA entry of the accepted bundle
+	// (03-12c), report only.
+	Draining []DrainingCA `json:"draining,omitempty"`
+	// TrustExpired lists the draining user and machine entries that
+	// current's user_ca_keys still holds although their end has passed or
+	// the drop latch holds them (03-12c), report only.
+	TrustExpired []DrainingCA `json:"trust_expired,omitempty"`
+	// TrustLatch is "unreadable" when the drop latch does not read
+	// (03-12c), report only.
+	TrustLatch string `json:"trust_latch,omitempty"`
+	// BundleBehind is the heartbeat's bundle_behind object (03-12c), read
+	// from the since record and never written by a check; report only.
+	BundleBehind *heartbeat.BundleBehind `json:"bundle_behind,omitempty"`
+}
+
+// DrainingCA is one draining CA entry of the accepted bundle as
+// keyroster-agent check reports it (03-12c): its role, generation, SHA-256
+// fingerprint and end; State is "draining" before the end and
+// "drained (ended <trusted_until>)" from it; InFile when current's
+// user_ca_keys holds its line; Latched when the drop latch holds its key.
+type DrainingCA struct {
+	Role         string `json:"role"`
+	Generation   uint32 `json:"generation"`
+	Fingerprint  string `json:"fingerprint"`
+	TrustedUntil string `json:"trusted_until"`
+	State        string `json:"state"`
+	InFile       bool   `json:"in_file"`
+	Latched      bool   `json:"latched"`
 }
 
 // Drift reports whether anything drifted.
@@ -90,7 +120,10 @@ func (r *DriftReport) Drift() bool {
 //   - the sshd -T dump is passed to ObserveLoginGrace, so the swap wait's
 //     LoginGraceTime bound is refreshed at every check (03-05), unless an
 //     apply holds the lock (it observes for itself); an unbounded
-//     LoginGraceTime is a SettingDrift of logingracetime.
+//     LoginGraceTime is a SettingDrift of logingracetime;
+//   - the accepted bundle's draining CA keys, trust_expired and an
+//     unreadable drop latch are listed (trustReport, 03-12c), report only:
+//     Drift does not count them.
 //
 // The record names the generation current names, whether that is
 // last-good, RollbackTarget(current, last-good) or a kept state that a
@@ -149,6 +182,7 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 			r.Files = append(r.Files, FileDrift{File: filepath.Join(l.Gen(cur.n), name), WantSHA256: want, GotSHA256: got})
 		}
 	}
+	e.trustReport(g, r)
 
 	// The drop-in is the agent's own file once a generation is installed
 	// (D-R2, PR #68 review F15): bytes that differ from DropIn are drift,
@@ -269,6 +303,57 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 		}
 	}
 	return r, nil
+}
+
+// trustReport adds the draining CA entries of the accepted bundle to r
+// (03-12c), report only, as g, the generation current names, holds them:
+// every draining entry with its state at the engine's clock, whether g's
+// user_ca_keys holds its line (never for the host role) and whether the
+// drop latch holds its key; trust_expired for a user or machine entry g
+// still holds although its end has passed or the latch blocks it;
+// trust_latch when the latch does not read; and bundle_behind, read from
+// the since record and never written here. It writes nothing. accepted/
+// that does not load or parse (check takes no apply lock, so a commit may
+// prune a snapshot under it) leaves the lists empty and is not an error.
+func (e *engine) trustReport(g *Generation, r *DriftReport) {
+	l := e.readLatch()
+	if l.unreadable {
+		r.TrustLatch = "unreadable"
+	}
+	st, err := e.loadStored()
+	if err != nil || st == nil || st.Bundle == nil {
+		return
+	}
+	now := e.clock.Now()
+	r.BundleBehind = e.bundleBehind(st, now, false)
+	b, err := trust.ParseBundle(st.Bundle)
+	if err != nil {
+		return
+	}
+	inFile := lineSet(g.Files[CAFile], caKey)
+	for _, ca := range b.CAs {
+		if ca.State != "draining" {
+			continue
+		}
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			continue
+		}
+		d := DrainingCA{Role: ca.Role, Generation: ca.Generation, Fingerprint: ssh.FingerprintSHA256(pub), TrustedUntil: ca.TrustedUntil, State: "draining"}
+		d.Latched = l.holds(d.Fingerprint)
+		trusted := ca.TrustedAt(now)
+		if !trusted {
+			d.State = "drained (ended " + ca.TrustedUntil + ")"
+		}
+		if ca.Role == trust.RoleUser || ca.Role == trust.RoleMachine {
+			k, ok := caKey(trust.FormatKey(pub))
+			d.InFile = ok && inFile[k]
+		}
+		r.Draining = append(r.Draining, d)
+		if d.InFile && (!trusted || l.Blocks(ca)) {
+			r.TrustExpired = append(r.TrustExpired, d)
+		}
+	}
 }
 
 // probeDrift adds the probe account's findings to r.Probe when the probes

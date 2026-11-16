@@ -19,6 +19,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
 	probecert "github.com/Labontese/keyroster/internal/agent/probe"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // TestRunCatchUp (PR #71 review F9): with more directory versions queued
@@ -703,4 +704,191 @@ func TestRunHeldNoise(t *testing.T) {
 			t.Fatalf("report step %d (%+v): quiet %t, want %t", i, c.r, got, c.quiet)
 		}
 	}
+}
+
+// trustLoop is keyroster-agent run on a test host, stepped one iteration
+// at a time, counting the applies it reports (03-12c).
+type trustLoop struct {
+	t       *testing.T
+	applies atomic.Int32
+	iter    chan int32
+	step    chan struct{}
+}
+
+// startTrustLoop starts Run on h with rc, whose Config, Interval, Out and
+// Iteration it sets; Retry and CheckEvery default to an hour and a day.
+func startTrustLoop(t *testing.T, h *testHost, rc RunConfig) *trustLoop {
+	t.Helper()
+	lp := &trustLoop{t: t, iter: make(chan int32), step: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	rc.Config, rc.Interval = h.cfg, time.Millisecond
+	if rc.Retry == 0 {
+		rc.Retry = time.Hour
+	}
+	if rc.CheckEvery == 0 {
+		rc.CheckEvery = 24 * time.Hour
+	}
+	rc.Out = func(*Report, error) { lp.applies.Add(1) }
+	rc.Iteration = func() {
+		select {
+		case lp.iter <- lp.applies.Load():
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case <-lp.step:
+		case <-ctx.Done():
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, rc, h.l) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return lp
+}
+
+// next waits for the loop's next iteration and returns the applies so far.
+func (lp *trustLoop) next() int32 {
+	lp.t.Helper()
+	select {
+	case n := <-lp.iter:
+		return n
+	case <-time.After(30 * time.Second):
+		lp.t.Fatal("TRACER: no loop iteration within 30 s")
+		return 0
+	}
+}
+
+// round lets the loop run one more iteration and returns the applies.
+func (lp *trustLoop) round() int32 {
+	lp.t.Helper()
+	lp.step <- struct{}{}
+	return lp.next()
+}
+
+// idle runs five iterations that must apply nothing more than want.
+func (lp *trustLoop) idle(what string, want int32) {
+	lp.t.Helper()
+	for i := range 5 {
+		if n := lp.round(); n != want {
+			lp.t.Fatalf("TRACER: %s: iteration %d: %d applies, want %d", what, i, n, want)
+		}
+	}
+}
+
+// TestRunTrustDue (03-12c): keyroster-agent run applies when the host's
+// clock reaches a draining CA's end, with no new document, and is idle
+// before and after.
+func TestRunTrustDue(t *testing.T) {
+	t.Run("trust_due_triggers_apply", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TRACER: the first iteration applied %d times, want 1", n)
+		}
+		if got := h.file(CAFile); !strings.Contains(got, caText(old)) {
+			t.Fatalf("TRACER: user_ca_keys before the end = %q, want the draining key's line", got)
+		}
+		lp.idle("before the end", 1)
+		h.clock.advance(2 * time.Hour)
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TRACER: the iteration past the end: %d applies, want 2", n)
+		}
+		if got := h.file(CAFile); strings.Contains(got, caText(old)) || got != caText(h.f.user, h.f.mach) {
+			t.Fatalf("TRACER: user_ca_keys past the end = %q, want the active user and machine keys only", got)
+		}
+		lp.idle("after the drop", 2)
+	})
+	t.Run("trust_expired_sets_force_apply", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		var log syncLog
+		h.cfg.Log = &log
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("CHECK: the first iteration applied %d times, want 1", n)
+		}
+		h.clock.advance(2 * time.Hour)
+		if n := lp.round(); n != 2 {
+			t.Fatalf("CHECK: the iteration past the end: %d applies, want 2", n)
+		}
+		// The drained key's line is back in current; no document changes
+		// and no end is due, so only the next check can notice it.
+		setCurrentCA(t, h, caText(old, h.f.user, h.f.mach))
+		lp.idle("before the next check", 2)
+		h.clock.advance(25 * time.Hour)
+		if n := lp.round(); n != 2 {
+			t.Fatalf("CHECK: the check's iteration: %d applies, want 2", n)
+		}
+		if n := lp.round(); n != 3 {
+			t.Fatalf("CHECK: the iteration after trust_expired: %d applies, want 3\n%s", n, log.String())
+		}
+		line := "keyroster-agent run: ERROR trust_expired: user g1 " + fp(old) + " ended " + drainAt + " and is still in user_ca_keys; applying"
+		if !strings.Contains(log.String(), line) {
+			t.Fatalf("CHECK: the log lacks %q:\n%s", line, log.String())
+		}
+		if got := h.file(CAFile); got != caText(h.f.user, h.f.mach) {
+			t.Fatalf("CHECK: user_ca_keys after the forced apply = %q, want %q", got, caText(h.f.user, h.f.mach))
+		}
+	})
+	t.Run("trust_due_error_backs_off", func(t *testing.T) {
+		h, _ := newDrainingHost(t)
+		var failing atomic.Bool
+		h.cfg.Fault = func(p string) error {
+			if p == "marker" && failing.Load() {
+				return &crash{point: p}
+			}
+			return nil
+		}
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TRACER: the first iteration applied %d times, want 1", n)
+		}
+		failing.Store(true)
+		h.clock.advance(2 * time.Hour)
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TRACER: the failing apply at the end: %d applies, want 2", n)
+		}
+		lp.idle("after the failed apply at the end", 2)
+	})
+	t.Run("trust_due_covers_host_role", func(t *testing.T) {
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.useBundle(3, f.withBundle(3, f.drainingCA(trust.RoleHost, seedKey(t, seedDrainOld), drainAt)))
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		var calls atomic.Int32
+		lp := startTrustLoop(t, h, RunConfig{HostCerts: func() { calls.Add(1) }})
+		lp.next()
+		lp.idle("before the host CA's end", 1)
+		c := calls.Load()
+		h.clock.advance(2 * time.Hour)
+		lp.round()
+		if got := calls.Load(); got != c+1 {
+			t.Fatalf("TRACER: past the host CA's end the host-certificate step ran %d more times, want 1", got-c)
+		}
+	})
+	t.Run("held_next_line_does_not_retrigger", func(t *testing.T) {
+		h, _ := heldNextHost(t)
+		var log syncLog
+		h.cfg.Log = &log
+		lp := startTrustLoop(t, h, RunConfig{CheckEvery: time.Minute})
+		n := lp.next()
+		for i := range 5 {
+			h.clock.advance(time.Minute)
+			if got := lp.round(); got != n {
+				t.Fatalf("CHECK: held, iteration %d: %d applies, want %d (the held record's own retry only)\n%s", i, got, n, log.String())
+			}
+		}
+		if strings.Contains(log.String(), "trust_expired") {
+			t.Fatalf("CHECK: a held next line raised trust_expired:\n%s", log.String())
+		}
+	})
 }

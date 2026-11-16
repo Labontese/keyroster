@@ -33,6 +33,13 @@ Exit status: 0 when nothing drifted, 3 on drift, 2 for a usage or tool
 error (no generation installed, sshd -T failing). Accounts that AllowUsers,
 AllowGroups, DenyUsers or DenyGroups exclude are listed, report only, and
 so are the probe account's problems (probe, code probe_account).
+
+The accepted bundle's draining CA keys (draining), the ones whose end has
+passed that user_ca_keys still holds (trust_expired), a drop latch that
+does not read (trust_latch) and a newer bundle that the signed KRL
+manifest has named for 2 hours without the host accepting it
+(bundle_behind) are report only as well: the exit status does not count
+them, so read the JSON.
 `
 
 // runCheck is keyroster-agent check.

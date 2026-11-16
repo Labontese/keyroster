@@ -1,0 +1,27 @@
+Trust bundle version 4, issued 2026-10-05T00:00:00Z
+  prev:          0fac0c58814480c5aee02fe5e51ea260d0bb0151b2170f52648c68fcbde70aae
+  policy sha256: d18c6893440b8becc2e13548fe04dfeba6ed0d7d2e7a90e9b24b29ff6f654c63
+Root keys (threshold 1 of 2):
+  SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8  ssh-ed25519                        custody=software
+    WARNING: SOFTWARE ROOT - this key is not hardware-protected; keep it on offline media
+  SHA256:eUjVPa81eD0giadfuQciei2Prn60eJEut8nagrTsovQ  ecdsa-sha2-nistp256                custody=piv
+CA keys:
+  user     gen 1   retired  SHA256:z8yseAiLFh+sSLMvMm3iNiY6DSDo4xZKVAcIpuvHA4Y  ecdsa-sha2-nistp256  custody=vtpm
+  user     gen 2   draining SHA256:fjotVFMVk90PZR8dZZklNa9V5580mYvj1SgAo763Ndo  ecdsa-sha2-nistp256  custody=vtpm  trusted until 2026-10-02T00:00:00Z
+  user     gen 3   draining SHA256:9ASpr+Ugkz8JGUqcLxeVnsIQgWxjRnCTnuq4eXaC81c  ecdsa-sha2-nistp256  custody=vtpm  trusted until 2026-10-20T00:00:00Z
+  user     gen 4   active   SHA256:7DF6pxiSpoguKrowToUpg2FDAqhLEQ6jTzh40nq5mF0  ecdsa-sha2-nistp256  custody=vtpm
+  user     gen 5   next     SHA256:rnDSV1ImWIDoUOsDcyCJN8OQiT1BaQhaHEXICZVbflI  ecdsa-sha2-nistp256  custody=vtpm
+  host     gen 1   active   SHA256:kLPh7MnG2KoZ74EMsUgw57MmiI+kwHfYDEZKKqb1Tnw  ecdsa-sha2-nistp256  custody=vtpm
+  machine  gen 1   active   SHA256:tbmF+7/My1dBY4FK74G3CxiYKMI4NP39WrM3r2Gj9uw  ecdsa-sha2-nistp256  custody=vtpm
+Ops key (KRL authority): SHA256:xdYOYfAqW54EuhVfwuwJx8AAoYAbm1chG9ehYfe8Jdw  ecdsa-sha2-nistp256  custody=vtpm
+Log key: SHA256:fVgyj0kOcqVT1YQ7/hKS1yX147NuE5BtwkamzFG2Isc  ecdsa-sha2-nistp256  custody=vtpm  origin=keyroster/log/7d58328f490e72a5
+Policy version 1:
+  admin quorum 1 of 1
+  admin alice            SHA256:Sy7Qz9Ql8tk5vYkt3wypNP4pnGftzz06aeXKZcuFbxw  ssh-ed25519
+  profile user     max ttl 12h0m0s  default extensions [permit-pty]  allowed extensions []  allowed critical options []
+  profile host     max ttl 720h0m0s  default extensions []  allowed extensions []  allowed critical options []
+  profile machine  max ttl 24h0m0s  default extensions [permit-pty]  allowed extensions []  allowed critical options []
+  webauthn: none (passkey logins refused)
+  pop: none (host agents and machine renewals are off)
+  timelock 0s
+Bundle SHA-256: 2613f8def80a7f5b5b9c4659e72152ef871c745ea11dc1838f4709b992d52a3f

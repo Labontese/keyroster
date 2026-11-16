@@ -197,11 +197,13 @@ type Facts struct {
 // GenerationFact is one stored CA key generation (03-12): State is the
 // state of the installed bundle's entry with the same key (active for the
 // ops or log key the bundle names), or prepared when the bundle names no
-// such entry.
+// such entry. TrustedUntil is the end of a draining entry (03-12c) and
+// empty otherwise.
 type GenerationFact struct {
 	Role                             string
 	Generation                       uint32
 	Fingerprint, Alg, Custody, State string
+	TrustedUntil                     string
 }
 
 // hardwareCustody are the online custodies whose keys cannot be copied off
@@ -299,7 +301,11 @@ func generationResults(f Facts) []Result {
 			if _, seen := byRole[g.Role]; !seen {
 				roles = append(roles, g.Role)
 			}
-			byRole[g.Role] = append(byRole[g.Role], fmt.Sprintf("%s g%d %s", g.State, g.Generation, g.Fingerprint))
+			part := fmt.Sprintf("%s g%d %s", g.State, g.Generation, g.Fingerprint)
+			if g.State == "draining" && g.TrustedUntil != "" {
+				part += " until " + g.TrustedUntil // 03-12c
+			}
+			byRole[g.Role] = append(byRole[g.Role], part)
 		}
 		parts := make([]string, 0, len(roles))
 		for _, r := range roles {

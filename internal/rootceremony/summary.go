@@ -34,7 +34,12 @@ func Summary(b *trust.Bundle, p *trust.Policy) string {
 	w.WriteString("CA keys:\n")
 	for _, ca := range b.CAs {
 		fp, _ := describe(ca.Key)
-		fmt.Fprintf(&w, "  %-8s gen %-3d %-8s %s  %s  custody=%s\n", ca.Role, ca.Generation, ca.State, fp, ca.Alg, ca.Custody)
+		fmt.Fprintf(&w, "  %-8s gen %-3d %-8s %s  %s  custody=%s", ca.Role, ca.Generation, ca.State, fp, ca.Alg, ca.Custody)
+		if ca.State == "draining" {
+			// 03-12c: the end of a draining entry's trust.
+			fmt.Fprintf(&w, "  trusted until %s", ca.TrustedUntil)
+		}
+		w.WriteString("\n")
 	}
 	fp, _ := describe(b.OpsKey.Key)
 	fmt.Fprintf(&w, "Ops key (KRL authority): %s  %s  custody=%s\n", fp, b.OpsKey.Alg, b.OpsKey.Custody)

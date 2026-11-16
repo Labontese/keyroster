@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
@@ -174,23 +175,24 @@ type AdoptPlan struct {
 var headerVersionRE = regexp.MustCompile(`directory version ([0-9]+) sha256`)
 
 // Adopt compares a structurally exact Phase 2 layout with the verified
-// signed content (D-08): keyroster_user_ca.pub must hold the bundle's
-// active user CA key (its comment is ignored), and every
+// signed content (D-08): keyroster_user_ca.pub must hold a user CA key the
+// bundle trusts at now (its comment is ignored): the active one, a next
+// one, or a draining one before its end (03-12c), and every
 // /etc/ssh/principals/<account> must be byte-equal to
 // directory.RenderPrincipalsFile for this host's host group in the
 // verified directory. A file whose principal lines match but whose header
 // names another directory version is reported "only the header differs"
 // (the host's approval installs a new version, so files rendered before
 // it carry the older one). It returns the plan, or every difference.
-func Adopt(l Layout, v *state.Verified, hostGroup string) (*AdoptPlan, []string) {
+func Adopt(l Layout, v *state.Verified, hostGroup string, now time.Time) (*AdoptPlan, []string) {
 	var diffs []string
 	ca := l.Phase2CAFile()
 	if b, err := readSmall(ca, 64<<10); err != nil {
 		diffs = append(diffs, ca+": "+err.Error())
 	} else if pub, _, _, _, err := ssh.ParseAuthorizedKey(bytes.TrimSpace(b)); err != nil {
 		diffs = append(diffs, ca+" does not hold a parseable public key line")
-	} else if !isActiveUserCA(v.Bundle, pub) {
-		diffs = append(diffs, fmt.Sprintf("%s holds %s, which is not the active user CA key of trust bundle version %d; re-run keyroster host ca-key, or let the agent install it fresh (remove the Phase 2 layout by hand)", ca, ssh.FingerprintSHA256(pub), v.Bundle.Version))
+	} else if !isTrustedUserCA(v.Bundle, pub, now) {
+		diffs = append(diffs, fmt.Sprintf("%s holds %s, which is not the active user CA key of trust bundle version %d (nor a next or still-trusted draining one); re-run keyroster host ca-key, or let the agent install it fresh (remove the Phase 2 layout by hand)", ca, ssh.FingerprintSHA256(pub), v.Bundle.Version))
 	}
 	dir := l.Phase2PrincipalsDir()
 	entries, err := os.ReadDir(dir)
@@ -256,12 +258,11 @@ func principalSet(b []byte) []string {
 	return out
 }
 
-// isActiveUserCA reports whether pub is the bundle's active user CA key.
-func isActiveUserCA(b *trust.Bundle, pub ssh.PublicKey) bool {
-	for _, c := range b.CAs {
-		if c.Role != trust.RoleUser || c.State != "active" {
-			continue
-		}
+// isTrustedUserCA reports whether pub is a user CA key the bundle trusts at
+// now (trust.TrustedCAs, 03-12c): active, next, or draining before its end.
+// A retired key, or a draining one past its end, is not.
+func isTrustedUserCA(b *trust.Bundle, pub ssh.PublicKey, now time.Time) bool {
+	for _, c := range trust.TrustedCAs(b, trust.RoleUser, now) {
 		if k, err := trust.ParseKey(c.Key); err == nil && bytes.Equal(k.Marshal(), pub.Marshal()) {
 			return true
 		}
@@ -307,7 +308,7 @@ func (e *engine) adoptDecision(v *state.Verified, g *Generation, hits []settingH
 			group = h.HostGroup
 		}
 		var plan *AdoptPlan
-		if plan, diffs = Adopt(e.l, v, group); len(diffs) == 0 {
+		if plan, diffs = Adopt(e.l, v, group, e.clock.Now()); len(diffs) == 0 {
 			if !e.cfg.AllowAdoption {
 				return nil, &Finding{Code: CodePhase2Pending, File: e.l.Phase2DropIn(),
 					Message: "this host holds the Phase 2 runbook's exact layout, and it matches the signed state; this applier may not take it over (its unit cannot remove files in /etc/ssh); nothing was written or removed",
