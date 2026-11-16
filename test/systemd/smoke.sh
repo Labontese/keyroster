@@ -208,7 +208,11 @@ installation_id=$(sed -n 's/.*"installation_id": *"\([0-9a-f]\{32\}\)".*/\1/p' "
 step "install-bundle as keyroster-signer"
 in=$work/bundle-in
 install -d -o keyroster-signer -g keyroster-signer -m 0700 "$in"
-install -o keyroster-signer -g keyroster-signer -m 0600 "$cer"/bundle/* "$in/"
+# keyroster-signer owns $in, so the files are written as that user, as in
+# signer-install.md step 6; root's shell opens only the ceremony's files.
+for f in bundle.json bundle.json.sigs policy.json policy.json.sigs; do
+	as_signer sh -c 'umask 077 && set -C && cat >"$1"' sh "$in/$f" <"$cer/bundle/$f"
+done
 as_signer keyroster-signer install-bundle --state-dir "$STATE" --threshold 1 --pin "$root_fp" \
 	--bundle "$in/bundle.json" --policy "$in/policy.json"
 
