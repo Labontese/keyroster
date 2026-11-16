@@ -332,6 +332,44 @@ func TestCheckBundleKeysGenerations(t *testing.T) {
 			t.Fatalf("checkBundleKeys with a draining entry = %v, want ErrBundleKeys naming 03-12e", err)
 		}
 	})
+	t.Run("draining_parsed_bundle_refused", func(t *testing.T) {
+		// Since 03-12c a bundle with a draining entry parses (version 2 or
+		// above, with a trusted_until): the signer still refuses it until
+		// 03-12e.
+		e := newGenEnv(t)
+		g := e.mustPrepare(t, keystore.RoleUser)
+		b, _ := installedDocs(t, e.db)
+		draining := nextEntry(t, g)
+		draining.State, draining.TrustedUntil = "draining", "2026-12-01T00:00:00Z"
+		insertCA(b, draining)
+		b.Version, b.Prev = 2, trust.SHA256Hex([]byte("an earlier bundle"))
+		doc, err := trust.CanonicalJSON(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := trust.ParseBundle(doc)
+		if err != nil {
+			t.Fatalf("a version 2 bundle with a draining entry does not parse: %v", err)
+		}
+		if err := e.checkKeys(t, [4][]byte{}, parsed); !errors.Is(err, ErrBundleKeys) || !strings.Contains(err.Error(), "03-12e") {
+			t.Fatalf("checkBundleKeys with a parsed draining entry = %v, want ErrBundleKeys naming 03-12e", err)
+		}
+	})
+	t.Run("draining_successor_refused_by_the_chain_rule", func(t *testing.T) {
+		// A root-signed successor that adds a draining entry is refused by
+		// the chain rule before the signer's own rule, and nothing is
+		// written.
+		e := newGenEnv(t)
+		g := e.mustPrepare(t, keystore.RoleUser)
+		docs := editedSuccessor(t, e.db, func(b *trust.Bundle) {
+			draining := nextEntry(t, g)
+			draining.State, draining.TrustedUntil = "draining", "2026-12-01T00:00:00Z"
+			insertCA(b, draining)
+		}, nil, e.fx.Root)
+		if err := mustRefusedInstall(t, e, docs, trust.ErrVersionChain); !strings.Contains(err.Error(), "a new entry must be next") {
+			t.Fatalf("the refusal %q does not name the chain rule's reason", err)
+		}
+	})
 	t.Run("admin_equal_stored_generation_refused", func(t *testing.T) {
 		e := newGenEnv(t)
 		g := e.mustPrepare(t, keystore.RoleHost)

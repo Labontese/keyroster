@@ -73,24 +73,47 @@ func summaryPolicy(t *testing.T, name string, edit func(p *trust.Policy)) *trust
 
 // TestSummaryGolden pins Summary on the test vectors byte for byte (03-14b,
 // F14): the pop line for no PoP, for hosts and machines with pop.hosts'
-// one-way note, and for machines only.
+// one-way note, and for machines only; and the rotation vector, whose two
+// draining entries, and only they, end in their trusted until (03-12c).
 func TestSummaryGolden(t *testing.T) {
 	b, err := trust.ParseBundle(readVector(t, "bundle_genesis_v1.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	rot, err := trust.ParseBundle(readVector(t, "bundle_rotation_v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name string
+		b    *trust.Bundle
 		p    *trust.Policy
 	}{
-		{"genesis", summaryPolicy(t, "policy_genesis_v1.json", nil)},
-		{"pop_hosts_machines", summaryPolicy(t, "policy_pop_v1.json", nil)},
-		{"pop_machines_only", summaryPolicy(t, "policy_genesis_v1.json", func(p *trust.Policy) {
+		{"genesis", b, summaryPolicy(t, "policy_genesis_v1.json", nil)},
+		{"pop_hosts_machines", b, summaryPolicy(t, "policy_pop_v1.json", nil)},
+		{"pop_machines_only", b, summaryPolicy(t, "policy_genesis_v1.json", func(p *trust.Policy) {
 			p.PoP = &trust.PoPPolicy{Hosts: false, Machines: true}
 		})},
+		{"draining", rot, summaryPolicy(t, "policy_genesis_v1.json", nil)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			checkGolden(t, tc.name, Summary(b, tc.p))
+			got := Summary(tc.b, tc.p)
+			checkGolden(t, tc.name, got)
+			var ends []string
+			for _, l := range strings.Split(got, "\n") {
+				if _, end, ok := strings.Cut(l, "  trusted until "); ok {
+					ends = append(ends, end)
+				}
+			}
+			var want []string
+			for _, ca := range tc.b.CAs {
+				if ca.State == "draining" {
+					want = append(want, ca.TrustedUntil)
+				}
+			}
+			if !slices.Equal(ends, want) {
+				t.Fatalf("lines ending in trusted until: %q, want exactly the draining entries' %q", ends, want)
+			}
 		})
 	}
 }

@@ -202,6 +202,7 @@ type GenerationFact struct {
 	Role                             string
 	Generation                       uint32
 	Fingerprint, Alg, Custody, State string
+	TrustedUntil                     string
 }
 
 // hardwareCustody are the online custodies whose keys cannot be copied off

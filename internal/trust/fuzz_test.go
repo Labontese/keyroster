@@ -27,6 +27,7 @@ func seedVector(f *testing.F, name string) {
 // accepted input is exactly its own canonical re-marshal.
 func FuzzParseBundle(f *testing.F) {
 	seedVector(f, "bundle_genesis_v1.json")
+	seedVector(f, "bundle_rotation_v1.json")
 	f.Fuzz(func(t *testing.T, data []byte) {
 		b, err := ParseBundle(data)
 		if err != nil {

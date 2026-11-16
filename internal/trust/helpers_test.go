@@ -108,3 +108,35 @@ func mustCanonical(t testing.TB, v any) []byte {
 	}
 	return b
 }
+
+// Seeds of the rotation vector's user CA keys (03-12c).
+const (
+	seedRotUser1 = 40
+	seedRotUser2 = 41
+	seedRotUser3 = 42
+	seedRotUser4 = 43
+	seedRotUser5 = 44
+)
+
+// goldenRotationBundle is the bundle of test/vectors/bundle_rotation_v1.json
+// (03-12c): the golden bundle at version 4, with prev the SHA-256 of a
+// fixed string, whose user role holds one entry in each state: g1 retired,
+// g2 draining with an end already past at the bundle's issue time (an
+// earlier rotation's entry, carried), g3 draining until 2026-10-20, g4
+// active and g5 next. The host and machine roles are the golden ones.
+func goldenRotationBundle(t testing.TB, policy []byte) *Bundle {
+	t.Helper()
+	b := goldenBundle(t, policy)
+	b.Version, b.Prev = 4, SHA256Hex([]byte("bundle version 3 of the rotation vector"))
+	user := func(seed byte, state string, gen uint32, end string) CAEntry {
+		return CAEntry{Role: RoleUser, Key: keyOf(p256Key(t, seed)), Alg: ssh.KeyAlgoECDSA256, Custody: "vtpm", State: state, Generation: gen, TrustedUntil: end}
+	}
+	b.CAs = append([]CAEntry{
+		user(seedRotUser1, "retired", 1, ""),
+		user(seedRotUser2, "draining", 2, "2026-10-02T00:00:00Z"),
+		user(seedRotUser3, "draining", 3, "2026-10-20T00:00:00Z"),
+		user(seedRotUser4, "active", 4, ""),
+		user(seedRotUser5, "next", 5, ""),
+	}, b.CAs[1:]...)
+	return b
+}

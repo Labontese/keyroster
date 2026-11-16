@@ -82,6 +82,15 @@ func TestCATransitions(t *testing.T) {
 		reasonTwice    = "the key is added twice in this successor"
 		reasonCount    = "more than one change for this role"
 	)
+	// The draining cases (03-12c) start from a hand-built previous bundle
+	// whose user role holds g1 draining (until drainEnd) and g2 active.
+	// 03-12b's rule already compares whole entries, so they pin the owner
+	// decisions the format makes expressible: the end is immutable, there
+	// is no draining-to-retired move, no draining entry can be created and
+	// no entry is removed.
+	d1 := drainingAt(t, RoleUser, seedCARotate, 1, drainEnd)
+	a2 := caAt(t, RoleUser, seedCANext, "active", 2)
+	d1Other := drainingAt(t, RoleUser, seedCARotate, 1, "2026-10-27T00:00:00Z")
 	for _, c := range []struct {
 		name       string
 		prev, next []CAEntry
@@ -172,6 +181,38 @@ func TestCATransitions(t *testing.T) {
 		{name: "generation_gap_ok",
 			prev: []CAEntry{u1},
 			next: []CAEntry{u1, caAt(t, RoleUser, seedCANext, "next", 5)}},
+		{name: "draining_unchanged_ok",
+			prev: []CAEntry{d1, a2},
+			next: []CAEntry{d1, a2}},
+		{name: "draining_kept_with_next_added_ok",
+			prev: []CAEntry{d1, a2},
+			next: []CAEntry{d1, a2, caAt(t, RoleUser, seedCANext2, "next", 3)}},
+		{name: "draining_trusted_until_changed_refused",
+			prev: []CAEntry{d1, a2},
+			next: []CAEntry{d1Other, a2},
+			role: RoleUser, gen: 1, reason: reasonChanges},
+		{name: "draining_to_retired_refused",
+			// The retired entry carries no trusted_until, the form Validate
+			// allows.
+			prev: []CAEntry{d1, a2},
+			next: []CAEntry{caAt(t, RoleUser, seedCARotate, "retired", 1), a2},
+			role: RoleUser, gen: 1, reason: reasonChanges},
+		{name: "draining_to_active_refused",
+			prev: []CAEntry{d1, a2},
+			next: []CAEntry{caAt(t, RoleUser, seedCARotate, "active", 1), a2},
+			role: RoleUser, gen: 1, reason: reasonChanges},
+		{name: "active_to_draining_refused",
+			prev: []CAEntry{d1, a2},
+			next: []CAEntry{d1, drainingAt(t, RoleUser, seedCANext, 2, drainEnd)},
+			role: RoleUser, gen: 2, reason: reasonChanges},
+		{name: "new_draining_refused",
+			prev: []CAEntry{d1, a2},
+			next: []CAEntry{d1, a2, drainingAt(t, RoleUser, seedCANext2, 3, drainEnd)},
+			role: RoleUser, gen: 3, reason: reasonNotNext},
+		{name: "draining_removed_refused",
+			prev: []CAEntry{d1, a2},
+			next: []CAEntry{a2},
+			role: RoleUser, gen: 1, reason: reasonRemoved},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			prev, next := caPair(t, c.prev, c.next, c.edit)

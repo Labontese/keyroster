@@ -471,6 +471,32 @@ func TestDoctorGenerations(t *testing.T) {
 		}
 	}
 	requireNone(t, Run(healthy(t)), "generations")
+	// A draining generation shows its end (03-12c); no other state shows
+	// one.
+	t.Run("draining_shows_trusted_until", func(t *testing.T) {
+		f := healthy(t)
+		f.Generations = []GenerationFact{
+			{Role: "user", Generation: 1, Fingerprint: "SHA256:aaa", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "draining", TrustedUntil: "2026-10-20T00:00:00Z"},
+			{Role: "user", Generation: 2, Fingerprint: "SHA256:bbb", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "active"},
+		}
+		r := requireOne(t, Run(f), OK, "generations")
+		for _, want := range []string{"draining g1 SHA256:aaa until 2026-10-20T00:00:00Z", "active g2 SHA256:bbb"} {
+			if !strings.Contains(r.Message, want) {
+				t.Fatalf("the generations line lacks %q: %s", want, r.Line())
+			}
+		}
+	})
+	t.Run("other_states_show_none", func(t *testing.T) {
+		f := healthy(t)
+		f.Generations = []GenerationFact{
+			{Role: "user", Generation: 1, Fingerprint: "SHA256:aaa", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "active"},
+			{Role: "user", Generation: 2, Fingerprint: "SHA256:bbb", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "next"},
+			{Role: "user", Generation: 3, Fingerprint: "SHA256:ccc", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "prepared"},
+		}
+		if r := requireOne(t, Run(f), OK, "generations"); strings.Contains(r.Message, "until") {
+			t.Fatalf("a generation that is not draining shows an end: %s", r.Line())
+		}
+	})
 }
 
 // TestDoctorGenerationFiles (03-12): a <role>-g<N>.age file that no
