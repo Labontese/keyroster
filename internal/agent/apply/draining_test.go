@@ -477,6 +477,30 @@ func TestDrainingLatch(t *testing.T) {
 			t.Fatalf("LATCH: the log does not name the unreadable latch:\n%s", log.String())
 		}
 	})
+	t.Run("removed_latch_written_again_by_next_render", func(t *testing.T) {
+		// The runbook's repair without a backup (PR #107 review): the file
+		// removed with the clock correct reads as empty, an unchanged
+		// capture renders nothing, and the next render latches every key
+		// whose end has passed again.
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		h.clock.advance(2 * time.Hour)
+		h.mustApply()
+		if err := os.Remove(h.l.State(trustLatchFile)); err != nil {
+			t.Fatal(err)
+		}
+		if r := h.mustApply(); !r.NoOp || latchFile(t, h) != nil {
+			t.Fatalf("LATCH: an unchanged capture after the removal: %+v, latch %q; want a no-op that writes no latch", r, latchFile(t, h))
+		}
+		h.publishKRL(1)
+		h.mustApply()
+		if got, want := latchFile(t, h), latchText(t, latchKey{fp(old), drainAt}); !bytes.Equal(got, want) {
+			t.Fatalf("LATCH: after the next render the latch = %q, want %q", got, want)
+		}
+		if got := h.file(CAFile); strings.Contains(got, caText(old)) {
+			t.Fatalf("LATCH: user_ca_keys = %q, want the dropped key to stay out", got)
+		}
+	})
 	t.Run("latch_survives_reset_directory", func(t *testing.T) {
 		h, old := newDrainingHost(t)
 		spoolInState(t, h)

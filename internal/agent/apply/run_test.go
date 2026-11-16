@@ -997,4 +997,22 @@ func TestRunTrustDue(t *testing.T) {
 			t.Fatalf("CHECK: a held next line raised trust_expired:\n%s", log.String())
 		}
 	})
+	t.Run("trust_latch_unreadable_logged_each_check", func(t *testing.T) {
+		// PR #107 review: an unreadable drop latch is in the log of every
+		// check, not only in check's JSON.
+		h, _ := newDrainingHost(t)
+		var log syncLog
+		h.cfg.Log = &log
+		writeLatchFile(t, h, []byte("not json"), 0o600)
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{CheckEvery: time.Minute})
+		lp.next()
+		h.clock.advance(time.Minute)
+		lp.round()
+		line := "keyroster-agent run: ERROR trust_latch: unreadable: " + h.l.State(trustLatchFile) + " does not read"
+		if got := strings.Count(log.String(), line); got != 2 {
+			t.Fatalf("CHECK: %d lines %q after two checks, want 2:\n%s", got, line, log.String())
+		}
+	})
 }
