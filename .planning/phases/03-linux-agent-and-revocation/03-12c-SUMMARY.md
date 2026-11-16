@@ -34,7 +34,7 @@ A bundle may carry a `draining` CA with a `trusted_until`; every agent trusts it
 
 - PR #107 (`feat(agent): trust a draining CA until its end date and drop it on the agent's clock`), opened by keyroster-bot without auto-merge (`autoMergeRequest` null).
 - The check run IDs and the house e2e gate readings of the final head are recorded in the PR description. A SUMMARY cannot name the runs of the commit that carries it, and recording them here would need one more push after the checks.
-- The pre-merge review is run by the orchestrator on the green PR; its results and fix rounds are recorded under "Pre-merge review" below by the session that runs it.
+- PR #107 was squash-merged to main as fefd624 before its pre-merge review ran. The review then ran on fefd624, and its issues and their fixes are recorded under "Review (after merge)" below.
 - Requirement KEY-08: advanced, not completed (it completes in 03-13). `requirements.mark-complete` was not run and REQUIREMENTS.md is untouched.
 
 ## Reversibility
@@ -286,7 +286,7 @@ The plan's ledger holds at 335af53 with these differences: main had moved from 0
 - **[Rule 3] Base measured with light work alongside (Task 5).** The re-measure of the test-time base overlapped a read of the staged plan diff and the plan commit. The signercmd base (55.139 s) is therefore higher than the earlier readings, which only widens the delta gate's margin; the delta gate itself ran with nothing else running and read 48.559 s against it. The apply base (616.365 s) sits inside the earlier readings (590.181 to 598.542 s at 335af53 in other sessions, 649.777 s at 03-12b's base).
 - **No pair changed in capslock.** The signer's count is 94 against the baseline's 97 at 335af53 before any edit and at every task; the plan's prediction ("none") holds, and the baseline was not edited.
 - **STATE `stopped_at` is stale.** It still reads `Completed 03-12-PLAN.md (PR #102 open, merge gate pending)`; the plan's STATE gate checks only the three counts, and the task allows only the three tracking commands, so `state.record-session` was not run.
-- **The pre-merge review was not run by the executor**: the orchestrator runs it on the green PR.
+- **The review did not run before the merge**: PR #107 was merged as fefd624 first, and the review ran on fefd624 afterwards (see "Review (after merge)").
 
 ## What stays UNVERIFIED
 
@@ -294,9 +294,16 @@ The drop against a real sshd (a drop is a narrowing, and this plan has no e2e: 0
 
 Residuals, stated and unchanged by this plan: a stopped agent narrows nothing; a wiped state directory loses the latch; the agent's answer sets, the CLI and login have no latch, so they trust a drained CA again while a clock is set back; a forward jump of the host clock drops the drains under way early and for good (the owner accepted this); root itself can edit the latch and the since record; a server that withholds bundles and publishes no newer manifest shows only through `krl_stale`.
 
-## Pre-merge review
+## Review (after merge)
 
-Not run by the executor. The orchestrator runs it on the green PR, before Task 6; its results, fix rounds and checks are recorded here by that session.
+PR #107 was squash-merged to main as fefd624 before its pre-merge review ran. The review then ran on fefd624 (run wf_bd2e9061-d8e): two Opus lenses (one on the agent side, one on the format, the docs and doctor), one Codex lens at high, and Sonnet skeptics. Four issues were confirmed, one was split and is folded into the first because it has the same cause, and one was refuted. The fixes are one follow-up PR from branch `p03/12c-review-fixes`, each issue as old → new:
+
+- **A due drop and a capture that does not verify.** Old: when the spool's capture did not read or did not verify, the apply returned before the narrowing, so a draining CA past its end stayed in `user_ca_keys` for as long as every capture failed. New: forward lands the due drop from the accepted state alone (`dropDue`: `state.KRLAlone` against an empty capture, `candidate`'s render and latch, bounded by current, current's KRL files byte for byte, one narrowing swap, self-test, commit) and still returns the capture's error; with an unapplied record ahead, the accepted bundle decides. `Report.TrustDue` is now kept after a failed run (the plan's "an apply that returns an error clears it" is reversed), so the next end is armed while captures keep failing. Tests d04ba31, fix 59f238e.
+- **A due drop and an empty or unreadable spool** (the split issue, folded into the one above). Old: Run applied only while the spool listed a document, so the timer and `trust_expired` did nothing with an empty or unreadable spool. New: the timer and the check's `trust_expired` apply whatever the spool holds; after a failed apply Retry still governs the check's trigger (T-03-443); a host that is not installed still does nothing. Tests d04ba31, fix 59f238e.
+- **The repair of an unreadable drop latch.** Old: host-setup.md said only to restore the record from a backup and never to edit or delete it, without naming the file, its mode or owner, or a path without a backup. New: it names `/var/lib/keyroster-agent/trust-dropped.json`, the `install -m 0600 -o root -g root` restore of that one file, and the repair without a backup (stop the applier, check the clock, remove the file; the next render records every key past its end again, pinned by `removed_latch_written_again_by_next_render`), and Run logs `ERROR trust_latch` on every check. Tests eecfe72, log line 722d202, runbook 38f840d.
+- **A `bundle_behind` since after now.** Old: a recorded since ahead of the clock kept `bundle_behind` quiet for the time the clock was off plus 2 hours. New: it counts as unreadable, the grace restarts with since = now and the status build rewrites the record. Tests 976fdf5, fix d4656ca.
+- **The latch's 64 KiB bound in tests.** Old: the oversize row was refused as non-canonical anyway, so a removed or raised read bound passed, and the write-side bound had no case. New: the row is a canonical, parsable latch just over the bound, and a record that would pass the bound fails and leaves the latch unchanged. Tests 13cd419.
+- Refuted: the latch capacity can be exhausted only by about 600 draining entries, which needs a root-signed bundle, so it is outside the threat model.
 
 ## Self-Check
 
