@@ -561,6 +561,9 @@ func commandLinkSafe(cmd string, vars []string) bool {
 			return true
 		}
 	}
+	if stateDirCreate(cmd, vars) {
+		return true
+	}
 	if !strings.HasPrefix(cmd, "runuser -u keyroster-signer ") && !directChildRemoval(cmd, vars) {
 		return false
 	}
@@ -580,6 +583,19 @@ func stateDirNames(vars []string) []string {
 		out = append(out, "$"+v, "${"+v+"}")
 	}
 	return out
+}
+
+// stateDirCreate reports whether l is root's creation of the state
+// directory itself, owned by keyroster-signer (signer-install.md step 4):
+// its parent is root's, so no link of keyroster-signer's lies on the path.
+// Nothing below the directory may be named.
+func stateDirCreate(l string, vars []string) bool {
+	op, ok := strings.CutPrefix(l, "install -d -o keyroster-signer -g keyroster-signer -m 0700 ")
+	if !ok {
+		return false
+	}
+	op = strings.Trim(op, `"`)
+	return slices.Contains(stateDirNames(vars), op) || op == signerStateDir+"/"
 }
 
 // directChildRemoval reports whether l is an rm -f whose every operand is a
@@ -638,6 +654,8 @@ func TestCARotationRunbookLinkSafety(t *testing.T) {
 			`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/incoming/bundle.json" <"/media/transfer/succ/bundle.json"`,
 			`runuser -u keyroster-signer -- cat "$S/incoming/user-g2.json" >/media/transfer/user-g2.json`,
 			`rm -f "$S/restore-recovery-pending"`, `exec 9<"$S/signer.lock"`), false},
+		{"state_dir_create_accepted", block("install -d -o keyroster-signer -g keyroster-signer -m 0700 /var/lib/keyroster-signer"), false},
+		{"incoming_create_by_root_refused", block("install -d -o keyroster-signer -g keyroster-signer -m 0700 /var/lib/keyroster-signer/incoming"), true},
 		{"inline_span_runuser_accepted", block(bind, "true") + "As the signer's user\n(`runuser -u keyroster-signer -- rm -f \"$S/software/user-g2.age\"`), or\nremove it.\n", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -677,6 +695,34 @@ func TestCARotationRunbookAbortPrev(t *testing.T) {
 	}
 	if strings.Contains(win, "/media/transfer/prev") {
 		t.Error("the abort section signs on ceremony 1's --prev directory, not on the bundle in force")
+	}
+}
+
+// TestSignerInstallGenesisLinkSafety (03-12b review): in signer-install.md
+// root reads, creates and writes nothing below the signer's state directory
+// in the genesis steps 4 to 6 either: their fenced blocks pass
+// signerDirLinkSafety (their prose names the directory's files as nouns,
+// so its inline spans are not checked), and its runuser forms for the
+// read, the directory and the writes are there.
+func TestSignerInstallGenesisLinkSafety(t *testing.T) {
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
+	for _, section := range []string{"4. Create the state directory", "5. Root ceremony", "6. Install the bundle"} {
+		win, err := sectionWindow(data, &signingSection{id: section, file: "signer-install.md", section: section})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bad := signerDirLinkSafety(win); len(bad) != 0 {
+			t.Errorf("signer-install.md step %s runs, as root, below the signer's state directory:\n%s", section, strings.Join(bad, "\n"))
+		}
+	}
+	for _, want := range []string{
+		"runuser -u keyroster-signer -- cat /var/lib/keyroster-signer/ca-pubkeys.json >/media/transfer/ca-pubkeys.json",
+		`runuser -u keyroster-signer -- sh -c 'umask 077 && mkdir -p "$1"' sh "$S/incoming"`,
+		`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/incoming/$f" <"/media/transfer/ceremony/$f"`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("signer-install.md lacks %q", want)
+		}
 	}
 }
 
