@@ -489,6 +489,55 @@ func TestDrainingDropRefusedGeneration(t *testing.T) {
 	})
 }
 
+// TestDrainingDropWaitsForDropIn (PR #108 review): while the drop-in on
+// disk is not the agent's, a due drop waits at every route, as it does at
+// the preflight: a capture that does not verify, and a generation the host
+// refuses. The apply returns the error, and user_ca_keys, last-good,
+// dropin.prev, the drop-in and the latch stay as they were.
+func TestDrainingDropWaitsForDropIn(t *testing.T) {
+	waits := func(t *testing.T, h *testHost, kind error) {
+		t.Helper()
+		appendFile(t, h.l.DropIn(), "# managed by ansible\n")
+		prev := []byte("# an earlier drop-in\n")
+		if err := os.WriteFile(h.l.State(dropinPrevFile), prev, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dropIn, ca, cur, lg := readFile(t, h.l.DropIn()), h.file(CAFile), h.current(), h.lastGood()
+		h.clock.advance(2 * time.Hour)
+		if _, err := h.apply(); !errors.Is(err, kind) {
+			t.Fatalf("DROPIN: the apply past the end with an edited drop-in: %v, want %v", err, kind)
+		}
+		if got := h.file(CAFile); got != ca {
+			t.Fatalf("DROPIN: user_ca_keys = %q, want %q unchanged until the drop-in is the agent's", got, ca)
+		}
+		if h.current() != cur || h.lastGood() != lg {
+			t.Fatalf("DROPIN: current %d, last-good %d; want %d and %d unchanged", h.current(), h.lastGood(), cur, lg)
+		}
+		if got, err := os.ReadFile(h.l.State(dropinPrevFile)); err != nil || !bytes.Equal(got, prev) {
+			t.Fatalf("DROPIN: dropin.prev = %q, %v; want %q unchanged", got, err, prev)
+		}
+		if got := readFile(t, h.l.DropIn()); got != dropIn {
+			t.Fatalf("DROPIN: the drop-in = %q, want %q unchanged", got, dropIn)
+		}
+		if b := latchFile(t, h); b != nil {
+			t.Fatalf("DROPIN: the latch = %q, want none written", b)
+		}
+	}
+	t.Run("capture_not_verified", func(t *testing.T) {
+		h, _ := newDrainingHost(t)
+		h.installed("role:ops")
+		h.publishUnverifiedKRL()
+		waits(t, h, state.ErrKRL)
+	})
+	t.Run("generation_refused", func(t *testing.T) {
+		h, _ := newDrainingHost(t)
+		h.installed("role:ops")
+		h.run.queryCode = 255
+		h.publishKRL(7)
+		waits(t, h, ErrKRLRejected)
+	})
+}
+
 // stepWall steps the fake clock's wall time by d and leaves its
 // monotonic clock alone: a step of the host's clock (03-12c).
 func stepWall(c *fakeClock, d time.Duration) {
