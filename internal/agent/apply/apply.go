@@ -1026,6 +1026,18 @@ func (e *engine) forward(ctx context.Context) error {
 				return heldOutcome(outcome(v), heldReason)
 			}
 			if err := e.preflightApply(v, g); err != nil {
+				// Not dropDue (PR #108 review). On an installed host the
+				// preflight runs only while the drop-in on disk is not the
+				// agent's, and its refusals name a configuration in which
+				// sshd may not read the agent's files (a foreign trust
+				// setting, no sshd_config.d), may not take its keys (FIPS)
+				// or cannot be self-tested (no loopback listener). A
+				// narrowed user_ca_keys is then not known to narrow what
+				// sshd trusts, and dropDue, which never writes the drop-in,
+				// would commit as last-good a generation running under a
+				// drop-in the agent did not write. The drop waits for the
+				// operator's repair, as every KRL does; check reports the
+				// drop-in's drift and trust_expired meanwhile.
 				return err
 			}
 			if e.cfg.DryRun {
@@ -1115,15 +1127,20 @@ func (e *engine) forward(ctx context.Context) error {
 			// A CA line the host's ssh-keygen refuses is a content
 			// refusal. validate's KRL refusals are not: the KRL-alone
 			// generation carries the same KRL, so they would only recur.
+			// A due drop does not wait for them (PR #108 review): dropDue
+			// keeps current's KRL, and the discarded number is not
+			// allocated again.
 			if !errors.Is(refusal, ErrCALineRejected) {
-				return refusal
+				return e.dropDue(ctx, stored, refusal)
 			}
 		}
 		if !isCrash(refusal) {
 			e.recordUnapplied(stored, v)
 		}
 		if v, err = e.krlAlone(stored, st, v, refusal); err != nil {
-			return err
+			// PR #108 review: nor for a refusal with no KRL-alone pass,
+			// or a KRL-alone pass that does not verify.
+			return e.dropDue(ctx, stored, err)
 		}
 		e.report.DirectoryUnauthorized = v.DirectoryUnauthorized != nil
 	}
@@ -1268,11 +1285,14 @@ func (e *engine) forward(ctx context.Context) error {
 }
 
 // dropDue lands a due drop when forward cannot use its capture (PR #107
-// review): the capture did not read, or did not verify. A draining user or
-// machine CA whose end has passed on the agent's clock, or that the drop
-// latch holds, then still leaves current's user_ca_keys, with no document
-// from the spool, and cause, the capture's error, is returned after it,
-// so the report and the exit status still name it.
+// review): the capture did not read, or did not verify; or the host
+// refused the generation the capture renders and no KRL-alone pass lands
+// instead (PR #108 review): a KRL validate refuses, a refusal with no
+// KRL-alone pass, or a KRL-alone pass that does not verify. When a draining
+// user or machine CA's end has passed on the agent's clock, or the drop
+// latch holds it, while current's user_ca_keys still holds its line, the
+// drop then still lands, with no document from the spool, and cause is
+// returned after it, so the report and the exit status still name it.
 //
 // The drop is defined by the accepted state alone, unchanged: state.KRLAlone
 // against an empty capture takes no document, so its bundle, policy,
@@ -1288,8 +1308,12 @@ func (e *engine) forward(ctx context.Context) error {
 // It reuses forward's pieces, not its loop. narrowingPending decides whether
 // anything is due; candidate renders (so recordDropped latches before any
 // marker) and, Refused being set, bounds every CA and principal line by
-// current (krlOnly, ref current), so the target only removes; every KRL
-// file is current's, byte for byte, so no KRL moves, up or down. Then the
+// current (krlOnly, ref current). The target is current less every CA and
+// principal line the accepted render at the engine's clock omits: the due
+// draining lines, and any other line current holds that the render omits,
+// the same lines forward's own narrowing removes. It only removes, and
+// never adds a line current lacks. Every KRL file is current's, byte for
+// byte, so no KRL moves, up or down. Then the
 // narrowing swap (Transition collapses to one swap), the self-test with the
 // keeping rollback, and the commit, which stages the accepted state
 // unchanged and makes the narrowed generation last-good, so no recovery
