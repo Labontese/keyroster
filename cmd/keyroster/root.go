@@ -509,7 +509,10 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 			_, _ = fmt.Fprintf(stderr, "root sign: --installation-id new is refused: the bundle in force already has installation ID %s, which its successor carries unchanged\n", prev.InstallationID)
 			return errUsage
 		}
-		inputs = "--prev, --roots, --threshold and --policy"
+		// The CA flags are inputs of every successor, given or not: a
+		// co-signer who leaves them out builds another bundle (03-12b
+		// review).
+		inputs = "--prev, --roots, --threshold, --policy, --ca-next, --ca-next-fingerprint and --ca-retire"
 		rootSets = append(rootSets, prev.Root.Keys)
 		idRule = installationRule{fresh: *installID == "new", carry: prev.InstallationID}
 	} else {
