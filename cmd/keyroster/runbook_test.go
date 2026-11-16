@@ -492,12 +492,19 @@ func directChildRemoval(l string, vars []string) bool {
 	return true
 }
 
+// signerDirSpanSafety checks the inline code spans of text's prose, outside
+// the fenced blocks, as signerDirLinkSafety checks a block line, with the
+// variables the blocks bind (03-12b review).
+func signerDirSpanSafety(text string) []string { return nil }
+
 // TestCARotationRunbookLinkSafety (03-12b): in ca-rotation.md root runs
 // nothing below the signer's state directory: the files below incoming/
 // are removed, written and read only as keyroster-signer, in the pinned
-// forms. The fixture subtests pin what the checker refuses and accepts.
+// forms, in the fenced blocks and in the prose's inline code spans. The
+// fixture subtests pin what the checker refuses and accepts.
 func TestCARotationRunbookLinkSafety(t *testing.T) {
 	block := func(lines ...string) string { return "```\n" + strings.Join(lines, "\n") + "\n```\n" }
+	const bind = "S=/var/lib/keyroster-signer"
 	for _, c := range []struct {
 		name string
 		text string
@@ -505,23 +512,35 @@ func TestCARotationRunbookLinkSafety(t *testing.T) {
 	}{
 		{"one_line_root_write_refused", block("install -o keyroster-signer -g keyroster-signer -m 0600 /media/transfer/ceremony/* /var/lib/keyroster-signer/incoming/"), true},
 		{"continuation_line_write_refused", block("install -o keyroster-signer -g keyroster-signer -m 0600 \\", "  /media/transfer/ceremony/* /var/lib/keyroster-signer/incoming/"), true},
-		{"root_redirect_refused", block("S=/var/lib/keyroster-signer", `runuser -u keyroster-signer -- cat /media/transfer/x >"$S/incoming/y"`), true},
-		{"root_rm_under_incoming_refused", block("S=/var/lib/keyroster-signer", `rm -f "$S/incoming/bundle.json"`), true},
-		{"runuser_form_accepted", block("S=/var/lib/keyroster-signer",
+		{"root_redirect_refused", block(bind, `runuser -u keyroster-signer -- cat /media/transfer/x >"$S/incoming/y"`), true},
+		{"root_rm_under_incoming_refused", block(bind, `rm -f "$S/incoming/bundle.json"`), true},
+		// A runuser prefix covers its own command only: root runs what
+		// follows a control operator (03-12b review).
+		{"and_list_after_runuser_refused", block(bind, `runuser -u keyroster-signer -- true && rm -f "$S/incoming/x"`), true},
+		{"semicolon_after_runuser_refused", block(`runuser -u keyroster-signer -- true; chown root /var/lib/keyroster-signer/incoming/x`), true},
+		{"pipe_to_root_tee_refused", block(bind, `runuser -u keyroster-signer -- cat /media/x | tee "$S/incoming/y"`), true},
+		// Root's shell opens a redirect's target, quoted or not.
+		{"single_quoted_redirect_target_refused", block(`runuser -u keyroster-signer -- cat /media/x >'/var/lib/keyroster-signer/incoming/y'`), true},
+		{"noclobber_override_redirect_refused", block(bind, `runuser -u keyroster-signer -- cat /media/x >|"$S/incoming/y"`), true},
+		{"ampersand_redirect_refused", block(bind, `runuser -u keyroster-signer -- cat /media/x &>"$S/incoming/y"`), true},
+		{"inline_span_root_write_refused", block(bind, "true") + "Then run `rm -f \"$S/incoming/x\"` as root.\n", true},
+		{"inline_span_literal_dir_refused", "Then run `chown root /var/lib/keyroster-signer/incoming/x`.\n", true},
+		{"runuser_form_accepted", block(bind,
 			`runuser -u keyroster-signer -- rm -f "$S/incoming/bundle.json" \`, `  "$S/incoming/policy.json"`,
 			`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/incoming/bundle.json" <"/media/transfer/succ/bundle.json"`,
 			`runuser -u keyroster-signer -- cat "$S/incoming/user-g2.json" >/media/transfer/user-g2.json`,
 			`rm -f "$S/restore-recovery-pending"`, `exec 9<"$S/signer.lock"`), false},
+		{"inline_span_runuser_accepted", block(bind, "true") + "As the signer's user\n(`runuser -u keyroster-signer -- rm -f \"$S/software/user-g2.age\"`), or\nremove it.\n", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := signerDirLinkSafety(c.text); (len(got) != 0) != c.bad {
+			if got := append(signerDirLinkSafety(c.text), signerDirSpanSafety(c.text)...); (len(got) != 0) != c.bad {
 				t.Fatalf("signerDirLinkSafety refused %q, want refused %t", got, c.bad)
 			}
 		})
 	}
 	t.Run("runbook_blocks_pass", func(t *testing.T) {
 		data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "ca-rotation.md")))
-		if bad := signerDirLinkSafety(data); len(bad) != 0 {
+		if bad := append(signerDirLinkSafety(data), signerDirSpanSafety(data)...); len(bad) != 0 {
 			t.Fatalf("ca-rotation.md runs, as root, below the signer's state directory:\n%s", strings.Join(bad, "\n"))
 		}
 		for _, want := range []string{`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"'`, "runuser -u keyroster-signer -- rm -f"} {
