@@ -858,6 +858,199 @@ func TestRunTrustDue(t *testing.T) {
 		}
 		lp.idle("after the failed apply at the end", 2)
 	})
+	// PR #107 review: the timer applies with no document in the spool, and
+	// with a spool that does not read. The first pins Run's trigger only:
+	// an empty spool is a capture that verifies as unchanged, so forward's
+	// own narrowing lands the drop, not dropDue. The second goes through
+	// dropDue (a capture that does not read).
+	for _, c := range []struct {
+		name  string
+		spoil func(t *testing.T, h *testHost)
+	}{
+		{"empty_spool_drops_on_timer", func(_ *testing.T, h *testHost) { h.resetSpool() }},
+		{"unreadable_spool_drops_on_timer", func(t *testing.T, h *testHost) {
+			if err := os.RemoveAll(h.spool); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.spool, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, old := newDrainingHost(t)
+			h.publishDir(h.spec("role:ops"))
+			h.write()
+			lp := startTrustLoop(t, h, RunConfig{})
+			if n := lp.next(); n != 1 {
+				t.Fatalf("TIMER: the first iteration applied %d times, want 1", n)
+			}
+			c.spoil(t, h)
+			lp.idle("before the end", 1)
+			h.clock.advance(2 * time.Hour)
+			if n := lp.round(); n != 2 {
+				t.Fatalf("TIMER: the iteration past the end: %d applies, want 2", n)
+			}
+			if got := h.file(CAFile); strings.Contains(got, caText(old)) || got != caText(h.f.user, h.f.mach) {
+				t.Fatalf("TIMER: user_ca_keys past the end = %q, want the active user and machine keys only", got)
+			}
+			lp.idle("after the drop", 2)
+		})
+	}
+	t.Run("failed_drop_retried_after_retry_with_empty_spool", func(t *testing.T) {
+		h, old := newDrainingHost(t)
+		var failing atomic.Bool
+		h.cfg.Fault = func(p string) error {
+			if p == "marker" && failing.Load() {
+				return &crash{point: p}
+			}
+			return nil
+		}
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{Retry: 50 * time.Millisecond})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TIMER: the first iteration applied %d times, want 1", n)
+		}
+		h.resetSpool()
+		failing.Store(true)
+		h.clock.advance(2 * time.Hour)
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TIMER: the failing apply at the end: %d applies, want 2", n)
+		}
+		failing.Store(false)
+		// Only the check's trust_expired can apply now, once Retry has
+		// passed: no document is in the spool and no end is due.
+		time.Sleep(200 * time.Millisecond)
+		if n := lp.round(); n != 3 {
+			t.Fatalf("TIMER: the iteration after Retry: %d applies, want 3", n)
+		}
+		if got := h.file(CAFile); strings.Contains(got, caText(old)) {
+			t.Fatalf("TIMER: user_ca_keys after the retry = %q, want the drop", got)
+		}
+		lp.idle("after the drop", 3)
+	})
+	t.Run("refused_capture_drops_each_end", func(t *testing.T) {
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		a, b := seedKey(t, seedDrainOld), seedKey(t, seedDrainOld2)
+		const endB = "2026-10-26T14:00:00Z"
+		h.useBundle(3, f.withBundle(3, twoDrainingCA(f, a, drainAt, b, endB)))
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TIMER: the first iteration applied %d times, want 1", n)
+		}
+		// Every later capture is refused; Retry (an hour of real time) never
+		// comes in this test, so only the timer can apply.
+		h.publishUnverifiedKRL()
+		h.write()
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TIMER: the refused capture: %d applies, want 2", n)
+		}
+		lp.idle("inside both windows", 2)
+		h.clock.advance(90 * time.Minute)
+		if n := lp.round(); n != 3 {
+			t.Fatalf("TIMER: past the first end: %d applies, want 3", n)
+		}
+		if got := h.file(CAFile); got != caText(b, f.user, f.mach) {
+			t.Fatalf("TIMER: user_ca_keys past the first end = %q, want %q", got, caText(b, f.user, f.mach))
+		}
+		lp.idle("between the ends", 3)
+		h.clock.advance(time.Hour)
+		if n := lp.round(); n != 4 {
+			t.Fatalf("TIMER: past the second end: %d applies, want 4", n)
+		}
+		if got := h.file(CAFile); got != caText(f.user, f.mach) {
+			t.Fatalf("TIMER: user_ca_keys past the second end = %q, want %q", got, caText(f.user, f.mach))
+		}
+		lp.idle("after both drops", 4)
+	})
+	t.Run("refused_krl_drops_on_timer", func(t *testing.T) {
+		// PR #108 review: the spool keeps a capture that verifies and whose
+		// KRL the host refuses; Retry (an hour of real time) never comes in
+		// this test, so only the timer can apply, and its apply drops the
+		// line.
+		h, old := newDrainingHost(t)
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TIMER: the first iteration applied %d times, want 1", n)
+		}
+		h.run.queryCode = 255
+		h.publishKRL(7)
+		h.write()
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TIMER: the refused KRL: %d applies, want 2", n)
+		}
+		lp.idle("before the end", 2)
+		h.clock.advance(2 * time.Hour)
+		if n := lp.round(); n != 3 {
+			t.Fatalf("TIMER: past the end: %d applies, want 3", n)
+		}
+		if got := h.file(CAFile); got != caText(h.f.user, h.f.mach) {
+			t.Fatalf("TIMER: user_ca_keys past the end = %q, want %q (%s dropped)", got, caText(h.f.user, h.f.mach), fp(old))
+		}
+		lp.idle("after the drop", 3)
+	})
+	t.Run("restart_with_empty_spool_arms_the_end", func(t *testing.T) {
+		// PR #108 review: a loop that starts with no document applies
+		// nothing, yet its first check arms the next end, so the drop lands
+		// at that end and not at the next check (CheckEvery, a day here).
+		h, old := newDrainingHost(t)
+		h.installed("role:ops")
+		h.resetSpool()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 0 {
+			t.Fatalf("TIMER: the first iteration with no document applied %d times, want 0", n)
+		}
+		lp.idle("before the end", 0)
+		h.clock.advance(2 * time.Hour)
+		if n := lp.round(); n != 1 {
+			t.Fatalf("TIMER: past the end: %d applies, want 1", n)
+		}
+		if got := h.file(CAFile); got != caText(h.f.user, h.f.mach) {
+			t.Fatalf("TIMER: user_ca_keys past the end = %q, want %q (%s dropped)", got, caText(h.f.user, h.f.mach), fp(old))
+		}
+		lp.idle("after the drop", 1)
+	})
+	t.Run("failure_before_the_lock_keeps_the_next_end", func(t *testing.T) {
+		// PR #108 review: at the first end sshd -T fails, so the apply
+		// fails before its lock and the check after it fails too; the
+		// second end is still armed, and Retry (an hour of real time)
+		// never comes.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		a, b := seedKey(t, seedDrainOld), seedKey(t, seedDrainOld2)
+		const endB = "2026-10-26T14:00:00Z"
+		h.useBundle(3, f.withBundle(3, twoDrainingCA(f, a, drainAt, b, endB)))
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{})
+		if n := lp.next(); n != 1 {
+			t.Fatalf("TIMER: the first iteration applied %d times, want 1", n)
+		}
+		h.run.rejectDropIn = func([]byte) bool { return true }
+		h.clock.advance(90 * time.Minute)
+		if n := lp.round(); n != 2 {
+			t.Fatalf("TIMER: the failing apply at the first end: %d applies, want 2", n)
+		}
+		h.run.rejectDropIn = nil
+		if got := h.file(CAFile); got != caText(a, b, f.user, f.mach) {
+			t.Fatalf("TIMER: user_ca_keys after the failed apply = %q, want %q", got, caText(a, b, f.user, f.mach))
+		}
+		lp.idle("between the ends", 2)
+		h.clock.advance(time.Hour)
+		if n := lp.round(); n != 3 {
+			t.Fatalf("TIMER: past the second end: %d applies, want 3", n)
+		}
+		if got := h.file(CAFile); got != caText(f.user, f.mach) {
+			t.Fatalf("TIMER: user_ca_keys past the second end = %q, want %q", got, caText(f.user, f.mach))
+		}
+		lp.idle("after both drops", 3)
+	})
 	t.Run("trust_due_covers_host_role", func(t *testing.T) {
 		f := newFixture(t)
 		h := newTestHost(t, f)
@@ -889,6 +1082,24 @@ func TestRunTrustDue(t *testing.T) {
 		}
 		if strings.Contains(log.String(), "trust_expired") {
 			t.Fatalf("CHECK: a held next line raised trust_expired:\n%s", log.String())
+		}
+	})
+	t.Run("trust_latch_unreadable_logged_each_check", func(t *testing.T) {
+		// PR #107 review: an unreadable drop latch is in the log of every
+		// check, not only in check's JSON.
+		h, _ := newDrainingHost(t)
+		var log syncLog
+		h.cfg.Log = &log
+		writeLatchFile(t, h, []byte("not json"), 0o600)
+		h.publishDir(h.spec("role:ops"))
+		h.write()
+		lp := startTrustLoop(t, h, RunConfig{CheckEvery: time.Minute})
+		lp.next()
+		h.clock.advance(time.Minute)
+		lp.round()
+		line := "keyroster-agent run: ERROR trust_latch: unreadable: " + h.l.State(trustLatchFile) + " does not read"
+		if got := strings.Count(log.String(), line); got != 2 {
+			t.Fatalf("CHECK: %d lines %q after two checks, want 2:\n%s", got, line, log.String())
 		}
 	})
 }

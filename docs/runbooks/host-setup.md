@@ -2469,12 +2469,14 @@ run in CI: `TestRunChecks`).
 ## CA rotation: what the agent does
 
 Run in CI on a fake `sshd` and a fake clock (`TestDrainingDrop`,
+`TestDrainingDropRefusedCapture`, `TestDrainingDropRefusedGeneration`,
 `TestDrainingLatch`, `TestRunTrustDue`, `TestCheckTrust`, `TestBehind`);
 UNVERIFIED on a real host, against a real `sshd`, in a fleet (the 2-hour
-grace of `bundle_behind`) and on Windows OpenSSH. Nothing can put a
-draining CA key into a bundle yet: the second ceremony of a rotation comes
-with a later release, and its runbook carries these steps into the
-rotation.
+grace of `bundle_behind`) and on Windows OpenSSH, and so is the repair of
+the record from a backup.
+Nothing can put a draining CA key into a bundle yet: the second ceremony
+of a rotation comes with a later release, and its runbook carries these
+steps into the rotation.
 
 1. **The upgrade order, before the second ceremony of a rotation.**
    Upgrade the signer and the server first: the server checks heartbeats
@@ -2487,12 +2489,25 @@ rotation.
    key stays trusted and logins keep working until it is upgraded.
 2. **The drop.** At a draining CA key's end (`trusted_until`) each agent
    drops the key from `user_ca_keys` by itself, on its own clock, as a
-   narrowing change, with no new bundle. It records every key it drops and
-   never takes one back: a clock stepped back, a rollback or
-   `keyroster-agent reset-directory` does not bring it back. A clock
-   stepped forward drops the keys being drained early, for good. A stopped
-   agent narrows nothing: the key stays in `user_ca_keys` until the agent
-   runs again.
+   narrowing change, with no new bundle, also while the spool holds no
+   document, does not read, offers one the agent refuses, or offers one
+   whose generation the host refuses, for example its KRL (the apply then
+   still reports that refusal). Every check of the applier arms its timer
+   for the next end from the accepted bundle, also after a restart with an
+   empty spool and after a failed apply; an end that a failed apply
+   missed is applied again after the retry delay. While the drop-in
+   differs from the agent's own, the drop waits when the spool does not
+   read, offers a document the agent refuses or offers one whose
+   generation the host refuses, and when the apply's preflight refuses
+   the host's configuration: the agent commits no narrowing under a
+   drop-in it did not write. It lands with the next apply that goes
+   through, which rewrites the drop-in, as every KRL does; `check`
+   reports the drift and `trust_expired` meanwhile. The agent
+   records every key it drops and never takes one back: a clock stepped
+   back, a rollback or `keyroster-agent reset-directory` does not bring it
+   back. A clock stepped forward drops the keys being drained early, for
+   good. A stopped agent narrows nothing: the key stays in `user_ca_keys`
+   until the agent runs again.
 3. **What `check` reports.** Read the JSON of
 
    ```
@@ -2508,17 +2523,56 @@ rotation.
      applier applies again within one check period (15 min). If it
      stays, read the last apply in `keyroster host status` and the agent's
      log (`journalctl -u keyroster-agent`).
-   - `trust_latch`: `unreadable` when the agent's record of dropped keys
-     does not read. The agent then renders no draining CA key at all until
-     the record is restored from the host's own backup of the agent's
-     state directory. Never edit or delete the record by hand: it is what
-     keeps a dropped key out.
+   - `trust_latch`: `unreadable` when the agent's record of dropped keys,
+     `/var/lib/keyroster-agent/trust-dropped.json`, does not read (that is
+     the default `--state-dir`; on a host installed with another state
+     directory the file is `trust-dropped.json` there, and the commands
+     below take that path): it is not a regular file of mode 0600 owned by
+     root (the applier's user), it is above 64 KiB, or it does not parse.
+     The applier logs `ERROR trust_latch` on every check while it stays
+     so. Until it is repaired the agent renders no draining CA key at all:
+     a draining key still inside its window leaves early, and the next
+     rotation drops the old key at once instead of at its end. The record
+     is what keeps a dropped key out: never edit its content. Repair it in
+     one of two ways:
+     - **From a backup of this host.** Stop the applier (`sudo systemctl
+       stop keyroster-agent`, or `sudo rc-service keyroster-agent stop`):
+       an apply that runs while the file is missing reads it as empty and
+       can write a new record over the one you restore. Make sure the
+       host's clock is correct (`date -u` against a clock you trust;
+       `timedatectl` shows whether a systemd host is synchronised): a
+       backup lacks every key dropped after it was taken, so those drops
+       rest on the clock until the agent records them again, as below.
+       Copy only `trust-dropped.json` out of the backup of the agent's
+       state directory into a directory that only root can write, such as
+       `/root`, then install it as root with the mode and owner the agent
+       checks, and start the applier again:
+
+       ```
+       sudo install -m 0600 -o root -g root /root/trust-dropped.json /var/lib/keyroster-agent/trust-dropped.json
+       ```
+
+       Never extract the whole state directory over the host: its
+       `spool/` belongs to the fetcher's account, and older copies of the
+       other files roll the agent's state back.
+     - **Without a backup.** Stop the applier as above, make sure the
+       host's clock is correct, remove the record with
+       `sudo rm /var/lib/keyroster-agent/trust-dropped.json` and start the
+       applier again. A missing record reads as empty. The next apply that
+       renders a new generation, which a new KRL, bundle or directory
+       brings, records again every draining key whose end has passed by
+       the host's clock; an apply that finds nothing new writes no record.
+       Until then the drop rests on the clock alone. That is why the clock
+       must be correct: a clock behind a dropped key's end makes the next
+       render trust that key again, and nothing holds it back.
    - `bundle_behind`: the host has not accepted a bundle that the
      ops-signed KRL manifest has named for 2 hours or more, with the
      manifest's and the accepted bundle versions, the first time the
-     manifest named it (`since`) and a `reason`: `unapplied` (the bundle
-     verified and cannot be applied), `not_accepted` (it reached the
-     spool and this agent refused or holds it: its log says why),
+     manifest named it (`since`; a recorded `since` that is after the
+     host's clock restarts at the clock's time, with the 2 hours counted
+     from there) and a `reason`: `unapplied` (the bundle verified and
+     cannot be applied), `not_accepted` (it reached the spool and this
+     agent refused or holds it: its log says why),
      `not_delivered` (it never reached the spool) or
      `unknown` (`check` reads no spool). The old CA key stays trusted on
      that host: this is detection, not enforcement. Find why the bundle

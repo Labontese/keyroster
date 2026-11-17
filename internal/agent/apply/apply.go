@@ -231,7 +231,10 @@ type Report struct {
 	Diff      []string   `json:"diff,omitempty"`
 	Errors    []string   `json:"errors"`
 	// TrustDue is the earliest trusted_until of the accepted bundle after
-	// now (03-12c): keyroster-agent run applies again at that time. It is
+	// now (03-12c): keyroster-agent run applies again at that time. A run
+	// that failed carries it too (PR #107 review), so a capture that keeps
+	// failing does not keep the next end from its drop (dropDue); it is
+	// always after the run's own clock, so it is due once per end. It is
 	// never printed or kept.
 	TrustDue time.Time `json:"-"`
 }
@@ -399,10 +402,6 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 				e.logf("WARNING writing %s: %v", filepath.Join(l.Outbox(), heartbeat.StatusFile), serr)
 			}
 		}
-	}
-	if err != nil {
-		// 03-12c: after an error Run's retry governs the next attempt.
-		r.TrustDue = time.Time{}
 	}
 	return r, err
 }
@@ -890,17 +889,19 @@ func (e *engine) forward(ctx context.Context) error {
 		// the unapplied record; a refused step takes the KRL alone against
 		// accepted/.
 		if st, err = e.capture(base.Floor()); err != nil {
-			return err
+			return e.dropDue(ctx, stored, err)
 		}
 		v, err = state.VerifyAhead(e.pins, stored, base, st)
 	} else {
 		if st, err = e.capture(stored.Floor()); err != nil {
-			return err
+			return e.dropDue(ctx, stored, err)
 		}
 		v, err = state.Verify(e.pins, stored, st)
 	}
 	if err != nil {
-		return err
+		// PR #107 review: a due drop does not wait for a capture that
+		// verifies.
+		return e.dropDue(ctx, stored, err)
 	}
 	// F03 (03-08f): the report names the unauthorized state of the
 	// Verified the run last moved to: v here, after each KRL-alone pass,
@@ -1025,6 +1026,17 @@ func (e *engine) forward(ctx context.Context) error {
 				return heldOutcome(outcome(v), heldReason)
 			}
 			if err := e.preflightApply(v, g); err != nil {
+				// Not dropDue (PR #108 review). On an installed host the
+				// preflight runs only while the drop-in on disk is not the
+				// agent's, and its refusals name a configuration in which
+				// sshd may not read the agent's files (a foreign trust
+				// setting, no sshd_config.d), may not take its keys (FIPS)
+				// or cannot be self-tested (no loopback listener). A due
+				// drop waits while the drop-in is not the agent's, at every
+				// route (dropDue's own check), so dropDue would only return
+				// err here. The drop waits for the operator's repair, as
+				// every KRL does; check reports the drop-in's drift and
+				// trust_expired meanwhile.
 				return err
 			}
 			if e.cfg.DryRun {
@@ -1114,15 +1126,20 @@ func (e *engine) forward(ctx context.Context) error {
 			// A CA line the host's ssh-keygen refuses is a content
 			// refusal. validate's KRL refusals are not: the KRL-alone
 			// generation carries the same KRL, so they would only recur.
+			// A due drop does not wait for them (PR #108 review): dropDue
+			// keeps current's KRL, and the discarded number is not
+			// allocated again.
 			if !errors.Is(refusal, ErrCALineRejected) {
-				return refusal
+				return e.dropDue(ctx, stored, refusal)
 			}
 		}
 		if !isCrash(refusal) {
 			e.recordUnapplied(stored, v)
 		}
 		if v, err = e.krlAlone(stored, st, v, refusal); err != nil {
-			return err
+			// PR #108 review: nor for a refusal with no KRL-alone pass,
+			// or a KRL-alone pass that does not verify.
+			return e.dropDue(ctx, stored, err)
 		}
 		e.report.DirectoryUnauthorized = v.DirectoryUnauthorized != nil
 	}
@@ -1266,6 +1283,113 @@ func (e *engine) forward(ctx context.Context) error {
 	return heldOutcome(outcome(tv), heldReason)
 }
 
+// dropDue lands a due drop when forward cannot use its capture (PR #107
+// review): the capture did not read, or did not verify; or the host
+// refused the generation the capture renders and no KRL-alone pass lands
+// instead (PR #108 review): a KRL validate refuses, a refusal with no
+// KRL-alone pass, or a KRL-alone pass that does not verify. When a draining
+// user or machine CA's end has passed on the agent's clock, or the drop
+// latch holds it, while current's user_ca_keys still holds its line, the
+// drop then still lands, with no document from the spool, and cause is
+// returned after it, so the report and the exit status still name it.
+//
+// The drop is defined by the accepted state alone, unchanged: state.KRLAlone
+// against an empty capture takes no document, so its bundle, policy,
+// directory and KRL are accepted/'s and its Refused is cause. With an
+// unapplied record ahead of accepted/ (forward's VerifyAhead branch), the
+// accepted bundle still decides, never the record's: the record's bundle was
+// never put in force, so acting on it would move a bundle, and since
+// trusted_until never changes along the chain, every draining entry the
+// accepted bundle ends is one the record's ends too. The timer
+// (storedTrustDue), check's trust_expired and the latch read accepted/ as
+// well.
+//
+// It reuses forward's pieces, not its loop. narrowingPending decides whether
+// anything is due; candidate renders (so recordDropped latches before any
+// marker) and, Refused being set, bounds every CA and principal line by
+// current (krlOnly, ref current). The target is current less every CA and
+// principal line the accepted render at the engine's clock omits: the due
+// draining lines, and any other line current holds that the render omits,
+// the same lines forward's own narrowing removes. It only removes, and
+// never adds a line current lacks. Every KRL file is current's, byte for
+// byte, so no KRL moves, up or down. Then the
+// narrowing swap (Transition collapses to one swap), the self-test with the
+// keeping rollback, and the commit, which stages the accepted state
+// unchanged and makes the narrowed generation last-good, so no recovery
+// brings the line back. forward's loop also gates, holds or clears a probe
+// addition, repairs the drop-in, runs probes and polls the spool; a drop is
+// a removal and needs none of that, so none of it runs, and host
+// certificates, probe pairs and a Phase 2 takeover are not touched. Nothing
+// runs in a dry run, before a first install, or when nothing is due.
+//
+// Nor while the drop-in on disk is not the agent's (dropInIsWanted, the
+// comparison preflightApply makes; PR #108 review), whatever the route.
+// dropDue never writes the drop-in, so its commit would make last-good a
+// generation running under a drop-in the agent did not write, and the
+// commit removes dropin.prev. A narrowed user_ca_keys is then not known to
+// narrow what sshd trusts either. A drop-in that does not read counts as
+// not the agent's. The drop waits, and cause is returned unchanged, until a
+// run repairs the drop-in or the operator does; check reports the drop-in's
+// drift and trust_expired meanwhile.
+func (e *engine) dropDue(ctx context.Context, stored *state.Stored, cause error) error {
+	if e.cfg.DryRun || stored == nil || stored.Bundle == nil {
+		return cause
+	}
+	v, err := state.KRLAlone(e.pins, stored, spool.State{}, cause, nil)
+	if err != nil || !e.narrowingPending(v) {
+		return cause
+	}
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil || lg.kind != linkAgent {
+		return cause
+	}
+	if ok, err := e.dropInIsWanted(); err != nil || !ok {
+		return cause
+	}
+	cur, curLink, err := e.readCurrent()
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	g, _, err := e.candidate(v, cur, curLink, cur)
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	for _, name := range fileNames(cur, g) {
+		if class, ok := ClassOf(name); !ok || class != FileKRL {
+			continue
+		}
+		if b, ok := cur.Files[name]; ok {
+			g.Files[name] = b
+		} else {
+			delete(g.Files, name)
+		}
+	}
+	e.logf("WARNING %v; a draining CA key past its end leaves user_ca_keys from the accepted state", cause)
+	g.N = e.allocGeneration()
+	if err := e.installGeneration(g); err != nil {
+		return errors.Join(cause, err)
+	}
+	if err := e.validate(ctx, g, e.l.Gen(g.N), cur); err != nil {
+		e.discard(g.N)
+		return errors.Join(cause, err)
+	}
+	e.base = cur
+	if _, err := e.Transition(ctx, cur, g, swapChecked); err != nil {
+		return errors.Join(cause, e.rollback(ctx, err, lg))
+	}
+	e.setVersions(v, g)
+	e.report.Generation = g.N
+	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
+		e.report.SelfTest = "fail: " + err.Error()
+		return errors.Join(cause, e.rollback(ctx, err, lg))
+	}
+	e.report.SelfTest = "pass"
+	if err := e.commit(g.N, v); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
 // setVersions reports v's versions; the KRL version is g's when g (the
 // generation moved to) keeps a newer KRL in force than v accepts
 // (keepKRL), so the report names the KRL actually in force.
@@ -1379,6 +1503,15 @@ func (e *engine) storedTrustDue() time.Time {
 		return time.Time{}
 	}
 	return trustDue(b, e.clock.Now())
+}
+
+// acceptedTrustDue is storedTrustDue outside an apply (PR #108 review):
+// keyroster-agent run's check arms its timer with it, whatever the apply
+// before it or the check itself returned. It reads accepted/ without the
+// apply lock, as Check does.
+func acceptedTrustDue(cfg Config, l Layout) time.Time {
+	e := &engine{cfg: cfg, l: l, clock: cfg.Clock, stateFd: -1}
+	return e.storedTrustDue()
 }
 
 // render is renderAt at the engine's clock with the drop latch (03-12c):
