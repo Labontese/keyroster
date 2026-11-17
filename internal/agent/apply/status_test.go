@@ -345,6 +345,34 @@ func TestStatus(t *testing.T) {
 				}
 			})
 		}
+		t.Run("drift_of_another_generation_is_published", func(t *testing.T) {
+			// Drift found by a check of another generation is published,
+			// as a failed check is: it can only stop the host being
+			// counted. Without it a host whose swap left its pending marker
+			// (the status reports the swap's from generation, every check
+			// another one) would keep showing the last clean check.
+			h := newTestHost(t, newFixture(t))
+			withOutbox(t, h)
+			h.installed("role:ops")
+			g := h.current()
+			d, err := h.check()
+			if err != nil || d.Drift() || d.Generation != g {
+				t.Fatalf("the check of generation %d: %+v %v", g, d, err)
+			}
+			writeStatus(t, h, StatusUpdate{Checked: true, Drift: d})
+			h.clock.advance(time.Minute)
+			h.publishDir(h.spec("role:ops", "role:web"))
+			h.mustApply()
+			if h.current() == g {
+				t.Fatal("the apply committed no new generation")
+			}
+			h.clock.advance(time.Minute)
+			d.Files = append(d.Files, FileDrift{File: filepath.Join(h.l.Gen(g), CAFile), WantSHA256: strings.Repeat("ab", 32), GotSHA256: strings.Repeat("cd", 32)})
+			s := writeStatus(t, h, StatusUpdate{Checked: true, Drift: d})
+			if s.Generation == g || s.LastCheck == nil || !s.LastCheck.Drift || s.LastCheck.At != stamp(h.clock.Now()) {
+				t.Fatalf("drift found by a check of generation %d at generation %d: last_check %+v, want drift at %s", g, s.Generation, s.LastCheck, stamp(h.clock.Now()))
+			}
+		})
 	})
 	t.Run("cap_refusal_is_refused", func(t *testing.T) {
 		// PR #76 review F4: a directory above the generation caps is refused
