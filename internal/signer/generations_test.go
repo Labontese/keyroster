@@ -231,14 +231,14 @@ func insertCA(b *trust.Bundle, e trust.CAEntry) {
 	b.CAs = slices.Insert(b.CAs, at, e)
 }
 
-// TestCheckBundleKeysGenerations (03-12, 03-12b): an install accepts exactly
-// one active CA entry per role, equal in key, algorithm, custody and
-// generation to the role's stored generation 1, and a next or retired
-// entry only when it equals a stored generation of its role; it refuses a
-// draining entry, and a root or a policy admin equal to any stored
-// generation, prepared ones included. An edit of the active entry is
-// refused by the chain rule first (03-12b), so those cases also call
-// checkBundleKeys directly. 03-12e rewrites active_not_generation_1_refused.
+// TestCheckBundleKeysGenerations (03-12, 03-12b, 03-12e): an install accepts
+// exactly one active CA entry per role, equal in key, algorithm and custody
+// to a stored generation of its role whose number it carries, and a next,
+// retired or draining entry only when it equals a stored generation of its
+// role, whatever the backend holds; it refuses a root or a policy admin
+// equal to any stored generation, prepared ones included. An edit of the
+// active entry is refused by the chain rule first (03-12b), so those cases
+// also call checkBundleKeys directly.
 func TestCheckBundleKeysGenerations(t *testing.T) {
 	refused := func(t *testing.T, e *genEnv, docs [4][]byte) {
 		t.Helper()
@@ -255,17 +255,31 @@ func TestCheckBundleKeysGenerations(t *testing.T) {
 			t.Fatalf("start after the successor: %v", err)
 		}
 	})
-	t.Run("active_not_generation_1_refused", func(t *testing.T) {
+	t.Run("active_later_generation_ok", func(t *testing.T) {
+		// Since the switch (03-12e) the active entry may be any stored
+		// generation; replacing the active key in place is still the chain
+		// rule's to refuse.
 		e := newGenEnv(t)
 		g := e.mustPrepare(t, keystore.RoleUser)
 		docs := editedSuccessor(t, e.db, func(b *trust.Bundle) {
 			ca := caEntry(t, b, "user")
 			ca.Key, ca.Generation = formatWire(t, g.PublicKey), 2
 		}, nil, e.fx.Root)
-		if err := e.checkKeys(t, docs, nil); !errors.Is(err, ErrBundleKeys) {
-			t.Fatalf("checkBundleKeys = %v, want ErrBundleKeys", err)
+		if err := e.checkKeys(t, docs, nil); err != nil {
+			t.Fatalf("checkBundleKeys with the stored generation 2 active = %v, want nil", err)
 		}
 		_ = mustRefusedInstall(t, e, docs, trust.ErrVersionChain)
+	})
+	t.Run("active_not_stored_refused", func(t *testing.T) {
+		// An active entry whose key no stored generation holds.
+		e := newGenEnv(t)
+		e.mustPrepare(t, keystore.RoleUser)
+		docs := editedSuccessor(t, e.db, func(b *trust.Bundle) {
+			caEntry(t, b, "user").Key = trust.FormatKey(newEd25519(t).PublicKey())
+		}, nil, e.fx.Root)
+		if err := e.checkKeys(t, docs, nil); !errors.Is(err, ErrBundleKeys) {
+			t.Fatalf("checkBundleKeys with a foreign active key = %v, want ErrBundleKeys", err)
+		}
 	})
 	t.Run("generation_field_mismatch_refused", func(t *testing.T) {
 		e := newGenEnv(t)
@@ -319,23 +333,24 @@ func TestCheckBundleKeysGenerations(t *testing.T) {
 			t.Fatalf("checkBundleKeys = %v, want ErrBundleKeys naming the retired entry", err)
 		}
 	})
-	t.Run("draining_refused_until_switch", func(t *testing.T) {
-		// No bundle parses with a draining entry until 03-12c, so the case
-		// is a direct call with an unvalidated bundle struct.
+	t.Run("draining_stored_generation_ok", func(t *testing.T) {
+		// A direct call with an unvalidated bundle struct: a draining entry
+		// that is a stored generation of its role is accepted, whatever the
+		// backend holds (03-12e).
 		e := newGenEnv(t)
 		g := e.mustPrepare(t, keystore.RoleUser)
 		b, _ := installedDocs(t, e.db)
 		draining := nextEntry(t, g)
 		draining.State = "draining"
 		insertCA(b, draining)
-		if err := e.checkKeys(t, [4][]byte{}, b); !errors.Is(err, ErrBundleKeys) || !strings.Contains(err.Error(), "03-12e") {
-			t.Fatalf("checkBundleKeys with a draining entry = %v, want ErrBundleKeys naming 03-12e", err)
+		if err := e.checkKeys(t, [4][]byte{}, b); err != nil {
+			t.Fatalf("checkBundleKeys with the stored generation 2 draining = %v, want nil", err)
 		}
 	})
-	t.Run("draining_parsed_bundle_refused", func(t *testing.T) {
-		// Since 03-12c a bundle with a draining entry parses (version 2 or
-		// above, with a trusted_until): the signer still refuses it until
-		// 03-12e.
+	t.Run("draining_parsed_bundle_stored_ok", func(t *testing.T) {
+		// A bundle with a draining entry parses (version 2 or above, with a
+		// trusted_until, 03-12c); the signer accepts it when the entry is a
+		// stored generation of its role (03-12e).
 		e := newGenEnv(t)
 		g := e.mustPrepare(t, keystore.RoleUser)
 		b, _ := installedDocs(t, e.db)
@@ -351,8 +366,19 @@ func TestCheckBundleKeysGenerations(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a version 2 bundle with a draining entry does not parse: %v", err)
 		}
-		if err := e.checkKeys(t, [4][]byte{}, parsed); !errors.Is(err, ErrBundleKeys) || !strings.Contains(err.Error(), "03-12e") {
-			t.Fatalf("checkBundleKeys with a parsed draining entry = %v, want ErrBundleKeys naming 03-12e", err)
+		if err := e.checkKeys(t, [4][]byte{}, parsed); err != nil {
+			t.Fatalf("checkBundleKeys with a parsed draining entry of the stored generation 2 = %v, want nil", err)
+		}
+	})
+	t.Run("draining_not_stored_refused", func(t *testing.T) {
+		// A draining entry whose key no stored generation holds (03-12e).
+		e := newGenEnv(t)
+		b, _ := installedDocs(t, e.db)
+		insertCA(b, trust.CAEntry{Role: "user", Key: trust.FormatKey(newEd25519(t).PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "agent",
+			State: "draining", Generation: 2, TrustedUntil: "2026-12-01T00:00:00Z"})
+		want := "CA user is draining but generation 2 is no stored generation of that key"
+		if err := e.checkKeys(t, [4][]byte{}, b); !errors.Is(err, ErrBundleKeys) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("checkBundleKeys with a foreign draining entry = %v, want ErrBundleKeys naming %q", err, want)
 		}
 	})
 	t.Run("draining_successor_refused_by_the_chain_rule", func(t *testing.T) {

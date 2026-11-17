@@ -113,6 +113,18 @@ func UserCAKeysFileExcept(b *Bundle, t time.Time, skip func(CAEntry) bool) ([]by
 	return []byte(w.String()), nil
 }
 
+// DrainMargin is how long, in seconds, a switch's trusted_until must lie
+// past the end of what it covers (03-12e).
+const DrainMargin = 300
+
+// MaxDrainAllowance is the largest allowance a switch may add to its floor
+// (03-12e).
+const MaxDrainAllowance = 7 * 24 * time.Hour
+
+// DrainFloor is the earliest trusted_until a switch issued at issuedAt may
+// carry (03-12e).
+func DrainFloor(_ string, _, _ uint64) (uint64, error) { return 0, nil }
+
 // checkCATransitions is the chain rule for CA entries (03-12b). Entries
 // are never removed, so next lists every generation prev lists, and for
 // each of user, host and machine, compared by generation, next may differ

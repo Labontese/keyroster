@@ -5033,3 +5033,93 @@ func encodeBody(t testing.TB, b interface{ Encode() ([]byte, error) }) []byte {
 	}
 	return enc
 }
+
+// switchLog is a log that starts at t0 with the genesis bundle issued at
+// t0, logs generation 2 of the user CA and adds it as next in bundle v2,
+// then logs one issue leaf of generation 1 issued at t0 plus 10 s for the
+// policy's user max_ttl_seconds, and returns the fixture, the v2 documents
+// and that certificate (03-12e).
+func switchLog(t *testing.T, t0 time.Time) (*fixture, docs, *ssh.Certificate) {
+	t.Helper()
+	f := newBareFixtureAt(t, "ed25519", t0)
+	gb := f.genesis()
+	gb.IssuedAt = t0.UTC().Format(trust.TimeFormat)
+	g := f.signDocs(gb, f.policy(), f.root)
+	f.addBundle(g)
+	k := newSigner(t, "ed25519")
+	f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, k.PublicKey()))
+	v2b := f.successor(g, func(b *trust.Bundle) {
+		e := trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(k.PublicKey()), Alg: k.PublicKey().Type(), Custody: "agent", State: "next", Generation: 2}
+		b.CAs = slices.Insert(slices.Clone(b.CAs), 1, e)
+	})
+	v2 := f.signDocs(v2b, f.policy(), f.root)
+	f.addBundle(v2)
+	var ttl uint64
+	for _, prof := range f.policy().CAProfiles {
+		if prof.Role == trust.RoleUser {
+			ttl = prof.MaxTTLSeconds
+		}
+	}
+	now := t0.Add(10 * time.Second)
+	f.serial = uint64(now.UnixMicro()) //nolint:gosec // G115: after 1970
+	f.micros = max(f.micros, f.serial)
+	f.request++
+	keyID := cert.KeyID{CA: "user", Subject: "u:alice", Request: strings.Repeat(hex.EncodeToString([]byte{f.request}), 16), Policy: 1, Serial: f.serial}
+	c, err := cert.Build(cert.Request{
+		Profile: cert.DefaultUserProfile(), Subject: newSigner(t, "ed25519").PublicKey(), Principals: []string{"alice"},
+		Now: now, ValidFor: time.Duration(ttl) * time.Second, KeyID: keyID, Serial: f.serial, //nolint:gosec // G115: a policy TTL
+	}, f.ca, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.add(tlog.KindIssue, issueBody(t, c, f.serial))
+	return f, v2, c
+}
+
+// switchBundle returns the successor of the bundle of d that makes the
+// user CA's next generation 2 active and its active generation 1 draining
+// until trustedUntil, in Unix seconds (03-12e).
+func (f *fixture) switchBundle(d docs, trustedUntil uint64) docs {
+	f.t.Helper()
+	prev, err := trust.ParseBundle(d.bundle)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	next := *prev
+	next.Version, next.Prev = d.version+1, trust.SHA256Hex(d.bundle)
+	next.CAs = slices.Clone(prev.CAs)
+	for i := range next.CAs {
+		switch ca := &next.CAs[i]; {
+		case ca.Role == trust.RoleUser && ca.State == "active":
+			ca.State = "draining"
+			ca.TrustedUntil = time.Unix(int64(trustedUntil), 0).UTC().Format(trust.TimeFormat) //nolint:gosec // G115: a test time
+		case ca.Role == trust.RoleUser && ca.State == "next":
+			ca.State = "active"
+		}
+	}
+	return f.signDocs(&next, f.policy(), f.root)
+}
+
+// TestVerifySwitchTracer (03-12e): audit re-derives the drain binding at a
+// switch's bundle_install from the leaves before it. A certificate of the
+// newly draining key valid until V leaves trust ending at V + 299 refused
+// with drain_window_too_short, and V + 300 verifies.
+func TestVerifySwitchTracer(t *testing.T) {
+	t0 := time.Now().UTC().Truncate(time.Second)
+	t.Run("binding_boundary", func(t *testing.T) {
+		f, v2, c := switchLog(t, t0)
+		f.addBundle(f.switchBundle(v2, c.ValidBefore+299))
+		if _, err := f.verify(join(f.lines()), nil); err == nil || !strings.Contains(err.Error(), "drain_window_too_short") {
+			t.Fatalf("Verify with trusted_until V + 299 = %v, want drain_window_too_short", err)
+		}
+		f, v2, c = switchLog(t, t0)
+		f.addBundle(f.switchBundle(v2, c.ValidBefore+300))
+		rep, err := f.verify(join(f.lines()), nil)
+		if err != nil {
+			t.Fatalf("Verify with trusted_until V + 300: %v", err)
+		}
+		if rep.BundleVersion != 3 {
+			t.Fatalf("the report names bundle version %d, want 3", rep.BundleVersion)
+		}
+	})
+}

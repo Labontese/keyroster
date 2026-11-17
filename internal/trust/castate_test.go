@@ -3,6 +3,7 @@ package trust
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -91,13 +92,38 @@ func TestCATransitions(t *testing.T) {
 	d1 := drainingAt(t, RoleUser, seedCARotate, 1, drainEnd)
 	a2 := caAt(t, RoleUser, seedCANext, "active", 2)
 	d1Other := drainingAt(t, RoleUser, seedCARotate, 1, "2026-10-27T00:00:00Z")
+	// The switch cases (03-12e) start from u1 active and g2 (seedCANext)
+	// next; floorEnd is the switch floor of a successor issued at the
+	// golden issued_at under the golden policy: issued_at plus the user
+	// max_ttl_seconds plus 300 s.
+	n2 := caAt(t, RoleUser, seedCANext, "next", 2)
+	floorEnd := func(t *testing.T) string {
+		t.Helper()
+		issued, err := time.Parse(TimeFormat, goldenIssue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ttl, found := uint64(0), false
+		for _, prof := range goldenPolicy(t).CAProfiles {
+			if prof.Role == RoleUser {
+				ttl, found = prof.MaxTTLSeconds, true
+			}
+		}
+		if !found {
+			t.Fatal("the golden policy has no user profile")
+		}
+		return issued.Add(time.Duration(ttl+300) * time.Second).UTC().Format(TimeFormat) //nolint:gosec // G115: a policy TTL
+	}(t)
 	for _, c := range []struct {
 		name       string
 		prev, next []CAEntry
 		edit       func(prev, next *Bundle)
-		role       string
-		gen        int
-		reason     string // "" accepts
+		// prevPol and nextPol are the two policies the rule reads; nil is
+		// the golden one.
+		prevPol, nextPol *Policy
+		role             string
+		gen              int
+		reason           string // "" accepts
 	}{
 		{name: "unchanged_ok",
 			prev: []CAEntry{u1, caAt(t, RoleUser, seedCANext, "retired", 2), caAt(t, RoleUser, seedCANext2, "next", 3)},
@@ -213,10 +239,22 @@ func TestCATransitions(t *testing.T) {
 			prev: []CAEntry{d1, a2},
 			next: []CAEntry{a2},
 			role: RoleUser, gen: 1, reason: reasonRemoved},
+		{name: "switch_ok",
+			// The switch (03-12e): next becomes active and active becomes
+			// draining, with a trusted_until at the floor.
+			prev: []CAEntry{u1, n2},
+			next: []CAEntry{drainingAt(t, RoleUser, seedUserCA, 1, floorEnd), caAt(t, RoleUser, seedCANext, "active", 2)}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			prev, next := caPair(t, c.prev, c.next, c.edit)
-			err := checkCATransitions(prev, next, goldenPolicy(t), goldenPolicy(t))
+			prevPol, nextPol := c.prevPol, c.nextPol
+			if prevPol == nil {
+				prevPol = goldenPolicy(t)
+			}
+			if nextPol == nil {
+				nextPol = goldenPolicy(t)
+			}
+			err := checkCATransitions(prev, next, prevPol, nextPol)
 			if c.reason == "" {
 				if err != nil {
 					t.Fatalf("checkCATransitions: %v, want nil", err)
@@ -499,6 +537,35 @@ func TestUserCAKeysFile(t *testing.T) {
 		got, err := UserCAKeysFile(nb, end.Add(-time.Hour))
 		if err == nil || got != nil {
 			t.Fatalf("UserCAKeysFile of a key that does not parse = %q, %v; want an error and no bytes", got, err)
+		}
+	})
+}
+
+// TestDrainFloor (03-12e): the switch floor is the Unix seconds of
+// issued_at plus the larger of the two TTLs plus DrainMargin; an issued_at
+// before 1970 and a sum that would overflow are errors.
+func TestDrainFloor(t *testing.T) {
+	issued, err := time.Parse(TimeFormat, goldenIssue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := uint64(issued.Unix()) //nolint:gosec // G115: after 1970
+	t.Run("larger_ttl_of_prev_and_next", func(t *testing.T) {
+		for _, ttls := range [][2]uint64{{7200, 3600}, {3600, 7200}} {
+			got, err := DrainFloor(goldenIssue, ttls[0], ttls[1])
+			if err != nil || got != at+7200+300 {
+				t.Fatalf("DrainFloor(%s, %d, %d) = %d, %v; want %d", goldenIssue, ttls[0], ttls[1], got, err, at+7200+300)
+			}
+		}
+	})
+	t.Run("overflow_refused", func(t *testing.T) {
+		if got, err := DrainFloor(goldenIssue, math.MaxUint64-10, 1); err == nil {
+			t.Fatalf("DrainFloor with a TTL near 2^64 = %d, want an error", got)
+		}
+	})
+	t.Run("negative_issued_at_refused", func(t *testing.T) {
+		if got, err := DrainFloor("1969-12-31T23:59:59Z", 1, 1); err == nil {
+			t.Fatalf("DrainFloor of an issued_at in 1969 = %d, want an error", got)
 		}
 	})
 }

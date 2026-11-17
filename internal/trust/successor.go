@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 )
 
 // SuccessorOptions are what a successor changes or sets, beside the version,
@@ -26,6 +27,11 @@ type SuccessorOptions struct {
 	// entries to retire (an abort) (03-12b).
 	CANext   []CAEntry
 	CARetire []CARef
+	// CASwitch are the roles whose next entry becomes active and whose
+	// active entry becomes draining, and DrainAllowance what the switch
+	// adds to the floor of its trusted_until (03-12e).
+	CASwitch       []string
+	DrainAllowance time.Duration
 }
 
 // CARef names one CA entry of a bundle by role and generation (03-12b).
