@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -295,6 +296,54 @@ func TestStatus(t *testing.T) {
 		}
 		if s := writeStatus(t, h, StatusUpdate{Checked: true, Drift: &DriftReport{}}); s.Stuck != heartbeat.StuckPendingStateUnknown {
 			t.Fatal("a check-only status dropped stuck")
+		}
+	})
+	t.Run("check_of_an_older_generation_is_not_published", func(t *testing.T) {
+		// T-03-447: Check takes no apply lock, so a daemon check of
+		// generation G can end after a keyroster-agent apply --once
+		// committed G+1. Its report is not last_check: the status keeps
+		// the previous one (older than the apply, so host status does not
+		// count the host) until a check of the reported generation.
+		for _, earlier := range []bool{true, false} {
+			t.Run(fmt.Sprintf("earlier_check_%t", earlier), func(t *testing.T) {
+				h := newTestHost(t, newFixture(t))
+				withOutbox(t, h)
+				h.installed("role:ops")
+				g := h.current()
+				d, err := h.check()
+				if err != nil || d.Drift() || d.Generation != g {
+					t.Fatalf("the check of generation %d: %+v %v", g, d, err)
+				}
+				var before *heartbeat.LastCheck
+				if earlier {
+					before = writeStatus(t, h, StatusUpdate{Checked: true, Drift: d}).LastCheck
+					if before == nil || before.At != stamp(h.clock.Now()) {
+						t.Fatalf("the check of the reported generation %d was not published: %+v", g, before)
+					}
+				}
+				h.clock.advance(time.Minute)
+				h.publishDir(h.spec("role:ops", "role:web"))
+				h.mustApply()
+				if h.current() == g {
+					t.Fatal("the apply committed no new generation")
+				}
+				h.clock.advance(time.Minute)
+				s := writeStatus(t, h, StatusUpdate{Checked: true, Drift: d})
+				if s.Generation != h.current() || !reflect.DeepEqual(s.LastCheck, before) {
+					t.Fatalf("a check of generation %d at generation %d: last_check %+v, want %+v", g, s.Generation, s.LastCheck, before)
+				}
+				if s := outboxStatus(t, h); !reflect.DeepEqual(s.LastCheck, before) {
+					t.Fatalf("status.json last_check %+v, want %+v", s.LastCheck, before)
+				}
+				d, err = h.check()
+				if err != nil || d.Generation != h.current() {
+					t.Fatalf("the check of generation %d: %+v %v", h.current(), d, err)
+				}
+				s = writeStatus(t, h, StatusUpdate{Checked: true, Drift: d})
+				if s.LastCheck == nil || s.LastCheck.At != stamp(h.clock.Now()) || s.LastCheck.Drift || s.LastCheck.At < s.LastApply.At {
+					t.Fatalf("the check of the reported generation %d: last_check %+v, last_apply %+v", s.Generation, s.LastCheck, s.LastApply)
+				}
+			})
 		}
 	})
 	t.Run("cap_refusal_is_refused", func(t *testing.T) {
