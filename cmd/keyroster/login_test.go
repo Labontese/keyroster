@@ -40,6 +40,7 @@ import (
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
 )
@@ -93,6 +94,8 @@ type loginServer struct {
 	krlDoc               []byte // nil: 404 no_krl
 	krlStatus            int    // non-zero: the KRL route answers this status
 	krlGets              int
+	// root is the genesis root's private key, for serveRotated (03-12d).
+	root ed25519.PrivateKey
 }
 
 const loginTestCustody = "user=agent, host=agent, machine=agent, ops=agent, log=agent"
@@ -150,6 +153,7 @@ func newLoginServer(t *testing.T) *loginServer {
 		t.Fatalf("root sign: exit %d: %s", code, stderr)
 	}
 	dialAgent = prevDial
+	e.root = g.rootKeys[0]
 	read := func(name string) []byte { return readTestFile(t, filepath.Join(g.out, name)) }
 	if e.bundle, err = trust.ParseBundle(read("bundle.json")); err != nil {
 		t.Fatal(err)
@@ -226,7 +230,10 @@ func (e *loginServer) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.URL.Path == serverclient.TrustPath:
-		_, _ = w.Write(e.trustDoc)
+		e.mu.Lock()
+		doc := e.trustDoc
+		e.mu.Unlock()
+		_, _ = w.Write(doc)
 	case r.URL.Path == serverclient.KRLPath:
 		e.mu.Lock()
 		e.krlGets++
@@ -1477,6 +1484,44 @@ func TestLoginPeerText(t *testing.T) {
 			t.Fatalf("exit %d; stderr lacks the software custody banner:\n%s", r.code, r.stderr)
 		}
 	})
+}
+
+// serveRotated serves e's bundle as version version (at least 2, with a
+// non-genesis prev), changed by edit, re-signed by the genesis root, and
+// reports that version in the trust answer (03-12d), as dirEnv's
+// serveRotated does. edit gets its own copy of the CA entries.
+func (e *loginServer) serveRotated(t *testing.T, version uint64, edit func(b *trust.Bundle)) {
+	t.Helper()
+	if version < 2 {
+		t.Fatalf("serveRotated: version %d, want at least 2", version)
+	}
+	b := *e.bundle
+	b.CAs = slices.Clone(b.CAs)
+	b.Version, b.Prev = version, strings.Repeat("ab", 32)
+	edit(&b)
+	doc, err := b.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := ssh.NewSignerFromKey(e.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, root, trust.NamespaceBundle, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var tr serverclient.TrustResponse
+	if err := json.Unmarshal(e.trustDoc, &tr); err != nil {
+		t.Fatal(err)
+	}
+	tr.Bundle, tr.BundleSigs, tr.BundleVersion = doc, sig, version
+	if e.trustDoc, err = json.Marshal(tr); err != nil {
+		t.Fatal(err)
+	}
+	e.bundle = &b
 }
 
 // setHostTrust makes redeem answer with doc and sigs, and the KRL route

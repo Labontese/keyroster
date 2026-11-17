@@ -408,11 +408,18 @@ func TestHostCAKey(t *testing.T) {
 // the KRL and the ssh config. It returns the ~/.ssh it installed.
 func plantHostTrust(t *testing.T, e *dirEnv, version uint64, cas []trust.CAEntry, names []string) string {
 	t.Helper()
+	return plantHostTrustFiles(t, e.bundle, version, cas, names)
+}
+
+// plantHostTrustFiles is plantHostTrust for any bundle b: the state names
+// b's installation and ops key (03-12d).
+func plantHostTrustFiles(t *testing.T, b *trust.Bundle, version uint64, cas []trust.CAEntry, names []string) string {
+	t.Helper()
 	dir := useSSHDir(t)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	st := &hostTrustState{Format: 1, InstallationID: e.bundle.InstallationID, BundleVersion: version, OpsKey: e.bundle.OpsKey.Key, Names: slices.Clone(names)}
+	st := &hostTrustState{Format: 1, InstallationID: b.InstallationID, BundleVersion: version, OpsKey: b.OpsKey.Key, Names: slices.Clone(names)}
 	data, err := st.encode()
 	if err != nil {
 		t.Fatal(err)

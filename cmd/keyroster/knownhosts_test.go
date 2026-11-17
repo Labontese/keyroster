@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"net/http"
 	"os"
@@ -430,6 +433,7 @@ func TestHostTrustCAs(t *testing.T) {
 // TestKnownHosts (03-09b, D2, T-03-59 to T-03-61, T-03-241, T-03-347):
 // the writer on stub inputs.
 func TestKnownHosts(t *testing.T) {
+	narrowCommandCases(t)
 	t.Run("writes_three_files_and_state", func(t *testing.T) {
 		f := newHTFix(t, 1, 1)
 		doc := f.dirDoc(t, 1, "", htHost(t, "web1", directory.StatusActive, "web1", "web1.lab.example"))
@@ -2412,5 +2416,421 @@ func TestNarrowHostTrust(t *testing.T) {
 			t.Fatalf("stderr %q, want only %q", got, f.narrowed(1))
 		}
 		f.requireFiles(t, f.narrowedFiles(before))
+	})
+}
+
+// trustRef is a reference found by TestTrustCallersUseWrapper: the name,
+// the enclosing function ("" outside one), and where it is.
+type trustRef struct {
+	name, fn, at string
+	pos          token.Pos
+}
+
+// scanTrustRefs parses every non-test .go file of this package directory,
+// whatever its build constraints, and returns every selector named Trust
+// or TrustUnpinned, called or not, and every reference to narrowHostTrust
+// other than its declaration (03-12d).
+func scanTrustRefs(t *testing.T) (sels, narrows []trustRef) {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	parsed := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		af, err := parser.ParseFile(fset, f, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed++
+		for _, d := range af.Decls {
+			fd, isFunc := d.(*ast.FuncDecl)
+			fn := ""
+			if isFunc {
+				fn = fd.Name.Name
+			}
+			ast.Inspect(d, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.SelectorExpr:
+					if x.Sel.Name == "Trust" || x.Sel.Name == "TrustUnpinned" {
+						sels = append(sels, trustRef{x.Sel.Name, fn, fset.Position(x.Pos()).String(), x.Pos()})
+					}
+				case *ast.Ident:
+					if x.Name == "narrowHostTrust" && (!isFunc || x != fd.Name) {
+						narrows = append(narrows, trustRef{x.Name, fn, fset.Position(x.Pos()).String(), x.Pos()})
+					}
+				}
+				return true
+			})
+		}
+	}
+	if parsed < 10 {
+		t.Fatalf("parsed %d non-test files of the package, want the whole package", parsed)
+	}
+	return sels, narrows
+}
+
+// TestTrustCallersUseWrapper (03-12d, NP-05, NP-06, NP-09, NP-10): every
+// Trust of the package goes through verifiedTrust, which narrows; the one
+// TrustUnpinned is runInit's, which narrows itself; nothing else calls the
+// narrowing. A later command cannot forget it.
+func TestTrustCallersUseWrapper(t *testing.T) {
+	sels, narrows := scanTrustRefs(t)
+	t.Run("every_trust_call_goes_through_the_wrapper", func(t *testing.T) {
+		wrapper := 0
+		for _, s := range sels {
+			switch {
+			case s.name == "Trust" && s.fn == "verifiedTrust":
+				wrapper++
+			case s.name == "TrustUnpinned" && s.fn == "runInit":
+			default:
+				t.Errorf("%s: %s outside the wrapper (in %q): call verifiedTrust, which narrows the managed known_hosts", s.at, s.name, s.fn)
+			}
+		}
+		if wrapper == 0 {
+			t.Errorf("found no Trust selector in verifiedTrust; the scan read nothing it should")
+		}
+	})
+	t.Run("init_narrows_after_its_unpinned_trust", func(t *testing.T) {
+		var unpinned token.Pos
+		for _, s := range sels {
+			if s.name == "TrustUnpinned" && s.fn == "runInit" {
+				unpinned = s.pos
+			}
+		}
+		if unpinned == token.NoPos {
+			t.Fatal("runInit has no TrustUnpinned")
+		}
+		for _, n := range narrows {
+			if n.fn == "runInit" && n.pos > unpinned {
+				return
+			}
+		}
+		t.Fatal("runInit does not call narrowHostTrust after its TrustUnpinned")
+	})
+	t.Run("narrow_callers_are_pinned", func(t *testing.T) {
+		var trustAt token.Pos
+		for _, s := range sels {
+			if s.name == "Trust" && s.fn == "verifiedTrust" {
+				trustAt = s.pos
+			}
+		}
+		after := false
+		for _, n := range narrows {
+			switch n.fn {
+			case "verifiedTrust":
+				after = after || (trustAt != token.NoPos && n.pos > trustAt)
+			case "runInit":
+			default:
+				t.Errorf("%s: narrowHostTrust referenced in %q; only verifiedTrust and runInit may call it", n.at, n.fn)
+			}
+		}
+		if !after {
+			t.Error("verifiedTrust does not call narrowHostTrust after its Trust call")
+		}
+	})
+}
+
+// rotatedHostCAs is an edit for serveRotated (03-12d): the host role gets
+// its original entry as draining generation 1 ending at end, a fresh
+// active generation 2 and, with next, a fresh next generation 3, keys of
+// the original's algorithm and custody; the other roles stay.
+func rotatedHostCAs(t *testing.T, end time.Time, next bool) func(b *trust.Bundle) {
+	t.Helper()
+	return func(b *trust.Bundle) {
+		var cas []trust.CAEntry
+		for _, ca := range b.CAs {
+			if ca.Role != trust.RoleHost {
+				cas = append(cas, ca)
+				continue
+			}
+			drained := ca
+			drained.State, drained.Generation, drained.TrustedUntil = "draining", 1, end.UTC().Truncate(time.Second).Format(trust.TimeFormat)
+			active := ca
+			active.Key, active.Generation = rotatedCAKey(t, ca.Alg), 2
+			cas = append(cas, drained, active)
+			if next {
+				n := ca
+				n.Key, n.State, n.Generation = rotatedCAKey(t, ca.Alg), "next", 3
+				cas = append(cas, n)
+			}
+		}
+		b.CAs = cas
+	}
+}
+
+// hostCAsOf returns b's host entries in bundle order.
+func hostCAsOf(b *trust.Bundle) []trust.CAEntry {
+	var out []trust.CAEntry
+	for _, ca := range b.CAs {
+		if ca.Role == trust.RoleHost {
+			out = append(out, ca)
+		}
+	}
+	return out
+}
+
+// caLineFor is the managed file's line for ca over names.
+func caLineFor(ca trust.CAEntry, names []string) string {
+	return fmt.Sprintf("@cert-authority %s %s keyroster host CA generation %d\n", strings.Join(names, ","), ca.Key, ca.Generation)
+}
+
+// plantHostTrustLogin is plantHostTrust for a loginServer (03-12d).
+func plantHostTrustLogin(t *testing.T, e *loginServer, version uint64, cas []trust.CAEntry, names []string) string {
+	t.Helper()
+	return plantHostTrustFiles(t, e.bundle, version, cas, names)
+}
+
+// requireNarrowed fails unless the managed known_hosts under sshDir is
+// before's minus drained, the state, KRL and ssh config are before's,
+// and stderr holds the narrowing line once (03-12d).
+func requireNarrowed(t *testing.T, sshDir string, before map[string]string, drained, stderr string) {
+	t.Helper()
+	after := hostTrustSnapshot(t, sshDir)
+	if strings.Count(before[hostTrustKnownHosts], drained) != 1 {
+		t.Fatalf("the planted known_hosts does not hold the drained line once:\n%s", before[hostTrustKnownHosts])
+	}
+	if want := strings.Replace(before[hostTrustKnownHosts], drained, "", 1); after[hostTrustKnownHosts] != want {
+		t.Fatalf("known_hosts:\n%s\nwant the planted file minus the drained line:\n%s\nstderr:\n%s", after[hostTrustKnownHosts], want, stderr)
+	}
+	for _, n := range []string{hostTrustStateFile, hostTrustKRLFile, hostTrustSSHConfig} {
+		if after[n] != before[n] {
+			t.Fatalf("%s changed:\n%s\nwas:\n%s", n, after[n], before[n])
+		}
+	}
+	want := fmt.Sprintf("Host trust narrowed: removed 1 CA line(s) of host CAs the trust bundle no longer trusts from %s.\n", filepath.Join(sshDir, hostTrustKnownHosts))
+	if strings.Count(stderr, want) != 1 {
+		t.Fatalf("stderr:\n%s\nwant the narrowing line once: %q", stderr, want)
+	}
+}
+
+// narrowCommandCases are TestKnownHosts' cases of the narrowing on the
+// commands that verify a bundle (03-12d, NP-01 to NP-08, NP-22 to NP-24):
+// each serves version 3 of the env's bundle with host g1 drained, plants
+// the managed files of version 2 with g1's line, runs the command and
+// checks what the command left.
+func narrowCommandCases(t *testing.T) {
+	names := []string{"web1"}
+	loginRotated := func(t *testing.T) (*loginServer, string, map[string]string, string) {
+		t.Helper()
+		e := newLoginServer(t)
+		e.serveRotated(t, 3, rotatedHostCAs(t, time.Now().Add(-time.Hour), true))
+		cas := hostCAsOf(e.bundle)
+		sshDir := plantHostTrustLogin(t, e, 2, cas, names)
+		return e, sshDir, hostTrustSnapshot(t, sshDir), caLineFor(cas[0], names)
+	}
+	dirRotated := func(t *testing.T, e *dirEnv, end time.Time) (string, map[string]string, string) {
+		t.Helper()
+		e.serveRotated(t, 3, rotatedHostCAs(t, end, true))
+		cas := hostCAsOf(e.bundle)
+		sshDir := plantHostTrust(t, e, 2, cas, names)
+		return sshDir, hostTrustSnapshot(t, sshDir), caLineFor(cas[0], names)
+	}
+	t.Run("known_hosts_narrows_when_krl_fetch_fails", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			set  func(t *testing.T, e *loginServer)
+		}{
+			{"server_error", func(t *testing.T, e *loginServer) {
+				doc, sigs := e.trustDir(t, 1)
+				e.setHostTrust(t, doc, sigs, nil)
+				e.mu.Lock()
+				e.krlStatus = http.StatusInternalServerError
+				e.mu.Unlock()
+			}},
+			{"no_krl_published", func(t *testing.T, e *loginServer) {
+				doc, sigs := e.trustDir(t, 1)
+				e.setHostTrust(t, doc, sigs, nil)
+			}},
+			{"krl_does_not_verify", func(t *testing.T, e *loginServer) {
+				doc, sigs := e.trustDir(t, 1)
+				e.setHostTrust(t, doc, sigs, htKRLDoc(t, 1, time.Now(), e.bundle.InstallationID, htSigner(t), krl.Set{}))
+			}},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				e, sshDir, before, drained := loginRotated(t)
+				c.set(t, e)
+				r := loginHostTrust(t, e)
+				if !strings.Contains(r.stdout, "Serial: ") || !strings.Contains(r.stdout, "Host trust not refreshed") {
+					t.Fatalf("stdout:\n%s\nwant the certificate and the refresh refused", r.stdout)
+				}
+				requireNarrowed(t, sshDir, before, drained, r.stderr)
+			})
+		}
+	})
+	t.Run("narrows_when_the_directory_is_missing", func(t *testing.T) {
+		e, sshDir, before, drained := loginRotated(t)
+		e.setHostTrust(t, nil, nil, e.trustKRL(t, 1))
+		r := loginHostTrust(t, e)
+		if !strings.Contains(r.stdout, "Host trust partly refreshed: revocations only") {
+			t.Fatalf("stdout:\n%s\nwant the writer's partial path", r.stdout)
+		}
+		after := hostTrustSnapshot(t, sshDir)
+		if want := strings.Replace(before[hostTrustKnownHosts], drained, "", 1); after[hostTrustKnownHosts] != want {
+			t.Fatalf("known_hosts:\n%s\nwant the planted file minus the drained line:\n%s\nstderr:\n%s", after[hostTrustKnownHosts], want, r.stderr)
+		}
+	})
+	t.Run("login_no_known_hosts_still_narrows", func(t *testing.T) {
+		e, sshDir, before, drained := loginRotated(t)
+		doc, sigs := e.trustDir(t, 1)
+		e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+		r := loginHostTrust(t, e, "--no-known-hosts")
+		requireNarrowed(t, sshDir, before, drained, r.stderr)
+	})
+	t.Run("login_refused_after_trust_still_narrows", func(t *testing.T) {
+		e, sshDir, before, drained := loginRotated(t)
+		useRecordingAgent(t)
+		e.setCert(func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
+			_, k, _ := ed25519.GenerateKey(rand.Reader)
+			p.ca, _ = ssh.NewSignerFromKey(k)
+			return nil
+		})
+		stderr, wait := e.start(t)
+		e.drive(t, stderr)
+		r := wait()
+		requireLoginRefused(t, r, "not signed by the user CA")
+		requireNarrowed(t, sshDir, before, drained, r.stderr)
+	})
+	t.Run("narrow_failure_keeps_exit_status", func(t *testing.T) {
+		e, sshDir, before, _ := loginRotated(t)
+		prev := narrowReplace
+		narrowReplace = func(string, string, []byte, fs.FileMode, func() error) error {
+			return errors.New("injected write failure")
+		}
+		t.Cleanup(func() { narrowReplace = prev })
+		r := loginHostTrust(t, e)
+		if !strings.Contains(r.stdout, "Serial: ") {
+			t.Fatalf("stdout:\n%s\nwant the certificate", r.stdout)
+		}
+		want := fmt.Sprintf("Warning: host CA lines not narrowed in %s: writing it failed: injected write failure.\n", filepath.Join(sshDir, hostTrustKnownHosts))
+		if !strings.Contains(r.stderr, want) {
+			t.Fatalf("stderr:\n%s\nwant %q", r.stderr, want)
+		}
+		if got := hostTrustSnapshot(t, sshDir)[hostTrustKnownHosts]; got != before[hostTrustKnownHosts] {
+			t.Fatalf("known_hosts changed:\n%s", got)
+		}
+	})
+	t.Run("narrows_on_any_command_with_verified_bundle", func(t *testing.T) {
+		drainedAt := time.Now().Add(-time.Hour)
+		t.Run("host_ca_key", func(t *testing.T) {
+			e := newDirEnv(t, 1, 1)
+			sshDir, before, drained := dirRotated(t, e, drainedAt)
+			_, _, errOut := run(t, "host", "ca-key")
+			requireNarrowed(t, sshDir, before, drained, errOut)
+		})
+		t.Run("host_status", func(t *testing.T) {
+			e := statusEnv(t, serverclient.HostsStatusAnswer{})
+			sshDir, before, drained := dirRotated(t, e, drainedAt)
+			_, _, errOut := run(t, "host", "status")
+			requireNarrowed(t, sshDir, before, drained, errOut)
+		})
+		t.Run("known_hosts_sync", func(t *testing.T) {
+			// dirEnv serves no KRL (404), so the writer cannot be what
+			// removes the line.
+			e := newDirEnv(t, 1, 1)
+			sshDir, before, drained := dirRotated(t, e, drainedAt)
+			_, _, errOut := run(t, "known-hosts", "sync")
+			requireNarrowed(t, sshDir, before, drained, errOut)
+		})
+		t.Run("directory_show", func(t *testing.T) {
+			e := newDirEnv(t, 1, 1)
+			sshDir, before, drained := dirRotated(t, e, drainedAt)
+			_, _, errOut := run(t, "directory", "show")
+			requireNarrowed(t, sshDir, before, drained, errOut)
+		})
+		t.Run("machine_renew", func(t *testing.T) {
+			e := newRenewEnv(t)
+			e.mu.Lock()
+			e.override["POST "+serverclient.MachineRenewPath] = func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) }
+			e.mu.Unlock()
+			sshDir, before, drained := dirRotated(t, e, drainedAt)
+			key, _ := machineKeyFile(t)
+			_, _, errOut := run(t, "machine", "renew", "ci", "--key", key, "--out", filepath.Join(t.TempDir(), "ci-cert.pub"))
+			requireNarrowed(t, sshDir, before, drained, errOut)
+		})
+	})
+	t.Run("no_narrowing_without_verified_bundle", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		sshDir, before, _ := dirRotated(t, e, time.Now().Add(-time.Hour))
+		e.cfg.TrustPins = []string{ssh.FingerprintSHA256(htSigner(t).PublicKey())}
+		if _, err := saveConfig(e.cfg, true); err != nil {
+			t.Fatal(err)
+		}
+		code, _, errOut := run(t, "host", "ca-key")
+		if code == 0 || strings.Contains(errOut, "Host trust narrowed") {
+			t.Fatalf("host ca-key with another root pin: exit %d, stderr:\n%s\nwant a refusal and no narrowing", code, errOut)
+		}
+		after := hostTrustSnapshot(t, sshDir)
+		for n, v := range before {
+			if after[n] != v {
+				t.Fatalf("%s changed:\n%s\nwas:\n%s", n, after[n], v)
+			}
+		}
+	})
+	t.Run("wrapper_uses_the_client_clock", func(t *testing.T) {
+		// g1 ends an hour after the wall clock and the client's clock is
+		// one second past that end: only a wrapper on trustClock drops it.
+		e := newDirEnv(t, 1, 1)
+		end := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		sshDir, before, drained := dirRotated(t, e, end)
+		prev := trustClock
+		trustClock = func() time.Time { return end.Add(time.Second) }
+		t.Cleanup(func() { trustClock = prev })
+		_, _, errOut := run(t, "host", "ca-key")
+		requireNarrowed(t, sshDir, before, drained, errOut)
+	})
+	t.Run("refresh_uses_the_client_clock", func(t *testing.T) {
+		end := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		prev := trustClock
+		t.Cleanup(func() { trustClock = prev })
+		for _, c := range []struct {
+			at        time.Time
+			withFirst bool
+		}{{end.Add(-time.Second), true}, {end, false}} {
+			sshDir := useSSHDir(t)
+			e := newLoginServer(t)
+			e.serveRotated(t, 3, rotatedHostCAs(t, end, false))
+			doc, sigs := e.trustDir(t, 1)
+			e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+			trustClock = func() time.Time { return c.at }
+			loginHostTrust(t, e)
+			cas := hostCAsOf(e.bundle)
+			kh := string(readTestFile(t, filepath.Join(sshDir, hostTrustKnownHosts)))
+			got := htCALines(t, kh)
+			_, first := got[cas[0].Key]
+			_, second := got[cas[1].Key]
+			if first != c.withFirst || !second || len(got) != map[bool]int{true: 2, false: 1}[c.withFirst] {
+				t.Fatalf("at %s (end %s): known_hosts\n%s\nwant generation 1's line %v and generation 2's", c.at, end, kh, c.withFirst)
+			}
+		}
+	})
+	t.Run("clock_ahead_narrows_early_and_a_refresh_restores", func(t *testing.T) {
+		f := newNHFix(t)
+		end := f.now.Add(-time.Hour) // g1's trusted_until
+		in := f.in(t, f.dirDoc(t, 1, "", htHost(t, "web1", directory.StatusActive, "web1")), f.krlV(t, 1))
+		in.CAs = hostTrustCAs(f.bundle, end.Add(-time.Hour))
+		mustRun(t, in, hostTrustFull)
+		if !strings.Contains(f.file(t, hostTrustKnownHosts), f.g1Line) {
+			t.Fatalf("the refresh before the end wrote no g1 line:\n%s", f.file(t, hostTrustKnownHosts))
+		}
+		if got := htNarrow(t, f.bundle, end.Add(time.Hour)); got != f.narrowed(1) || strings.Contains(f.file(t, hostTrustKnownHosts), f.g1Line) {
+			t.Fatalf("a clock ahead did not narrow: stderr %q\n%s", got, f.file(t, hostTrustKnownHosts))
+		}
+		mustRun(t, in, hostTrustFull)
+		if !strings.Contains(f.file(t, hostTrustKnownHosts), f.g1Line) {
+			t.Fatalf("the refresh at the right clock did not write the g1 line back:\n%s", f.file(t, hostTrustKnownHosts))
+		}
+	})
+	t.Run("clock_behind_keeps_the_drained_line", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		if got := htNarrow(t, f.bundle, f.now.Add(-2*time.Hour)); got != "" {
+			t.Fatalf("stderr %q, want none", got)
+		}
+		f.requireFiles(t, before)
 	})
 }
