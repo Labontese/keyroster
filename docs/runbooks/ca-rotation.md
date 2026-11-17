@@ -147,8 +147,12 @@ signs with generation 1.
 Each agent adds the new line to its `user_ca_keys` after the widening
 wait: about the sshd `LoginGraceTime` bound plus 30 s, 150 s at the
 default of 120 s. On a host, the live `user_ca_keys` then holds both user
-CA lines, and `keyroster-agent check` passes. The live count of hosts that
-trust the key in `host status` arrives in 03-12d.
+CA lines, and `keyroster-agent check` passes. `keyroster host status`
+shows `user CA keys of bundle vN live on X/M hosts`, from the hash each
+host reports for its `user_ca_keys`, and the gate is M/M. Hosts that
+keyroster-agent does not manage are not counted: check the current
+`keyroster host ca-key` output on each of them by hand before ceremony 2
+([host-setup.md](host-setup.md#1-trust-the-user-ca)).
 
 ## Abort: withdraw the next CA key
 
@@ -198,5 +202,7 @@ never reused: the next prepare makes generation 3.
 ## What changes for nobody
 
 No root and no installation ID changes, so no CLI pin changes, and the
-clients keep their configuration as it is. `known_hosts` and logins behave
-as before until 03-12d.
+clients keep their configuration as it is. Nothing creates a draining
+entry before 03-12e, so `known_hosts`, logins and `host ca-key` still
+behave as before, apart from the new narrowing lines and the extra
+`host ca-key` lines.
