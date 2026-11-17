@@ -144,7 +144,7 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	// installation declines.
 	narrowHostTrust(b, trustClock(), stderr)
 	cfg.InstallationID = b.InstallationID
-	if err := printTrustSummary(stdout, b, p); err != nil {
+	if err := printTrustSummary(stdout, b, p, trustClock()); err != nil {
 		return err
 	}
 	path, err := saveConfig(cfg, *force)
@@ -225,7 +225,7 @@ func observeRoots(ctx context.Context, hostPort, host, port string, pool *x509.C
 // printTrustSummary prints what init verified, from the root-signed
 // bundle: its version, the roots, each online key with its custody, and
 // the policy's relying party.
-func printTrustSummary(w io.Writer, b *trust.Bundle, p *trust.Policy) error {
+func printTrustSummary(w io.Writer, b *trust.Bundle, p *trust.Policy, _ time.Time) error {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "trust bundle version %d, policy version %d (verified against your root pins)\n", b.Version, p.Version)
 	for _, r := range b.Root.Keys {

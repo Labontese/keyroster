@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io/fs"
 	"math/big"
 	"net"
@@ -116,12 +117,16 @@ func initTrustDocEdit(t *testing.T, edit func(b *trust.Bundle)) ([]byte, string)
 	}
 	read := func(name string) []byte { return readTestFile(t, filepath.Join(g.out, name)) }
 	bundle, bundleSigs := read("bundle.json"), read("bundle.json.sigs")
+	// The trust answer reports the edited bundle's version, as the server
+	// does and serverclient's Trust requires (03-12d).
+	version := uint64(1)
 	if edit != nil {
 		b, err := trust.ParseBundle(bundle)
 		if err != nil {
 			t.Fatal(err)
 		}
 		edit(b)
+		version = b.Version
 		if bundle, err = b.Canonical(); err != nil {
 			t.Fatal(err)
 		}
@@ -135,7 +140,7 @@ func initTrustDocEdit(t *testing.T, edit func(b *trust.Bundle)) ([]byte, string)
 	}
 	doc, err := json.Marshal(serverclient.TrustResponse{
 		Bundle: bundle, BundleSigs: bundleSigs,
-		Policy: read("policy.json"), PolicySigs: read("policy.json.sigs"), BundleVersion: 1,
+		Policy: read("policy.json"), PolicySigs: read("policy.json.sigs"), BundleVersion: version,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -475,6 +480,47 @@ func TestInit(t *testing.T) {
 				if len(entries) != 0 {
 					t.Fatalf("%s: the config directory holds %d files", c.name, len(entries))
 				}
+			}
+		}
+	})
+	t.Run("ca_states_label_draining_and_drained", func(t *testing.T) {
+		// 03-12d: each CA line ends with caStateText at the client's clock,
+		// so a draining entry shows its end and one past it shows drained.
+		now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+		prev := trustClock
+		trustClock = func() time.Time { return now }
+		t.Cleanup(func() { trustClock = prev })
+		ended, until := now.Add(-time.Hour), now.Add(time.Hour)
+		var b *trust.Bundle
+		rotated := newInitServerEdit(t, softwareCustody, func(e *trust.Bundle) {
+			e.Version, e.Prev = 3, strings.Repeat("ab", 32)
+			rotatedUserCAs(t, "draining", ended, "active")(e)
+			rotatedHostCAs(t, until, true)(e)
+			b = e
+		})
+		useConfigDir(t)
+		code, stdout, stderr := run(t, rotated.args()...)
+		if code != 0 {
+			t.Fatalf("init exit %d:\n%s\n%s", code, stdout, stderr)
+		}
+		for _, c := range []struct {
+			role, label string
+		}{
+			{trust.RoleUser, "drained (ended " + ended.Format(trust.TimeFormat) + ")"},
+			{trust.RoleHost, "draining, trusted until " + until.Format(trust.TimeFormat)},
+		} {
+			var g1 trust.CAEntry
+			for _, ca := range b.CAs {
+				if ca.Role == c.role && ca.Generation == 1 {
+					g1 = ca
+				}
+			}
+			fp, err := keyFP(g1.Key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := fmt.Sprintf("%s CA %s (custody %s, %s)\n", c.role, fp, g1.Custody, c.label); !strings.Contains(stdout, want) {
+				t.Errorf("init stdout lacks %q:\n%s", want, stdout)
 			}
 		}
 	})

@@ -37,6 +37,11 @@ const recoveryCommand = "sudo keyroster-agent apply --once --recover-to-last-goo
 // identity rotation").
 const identityRotationShown = 7 * 24 * time.Hour
 
+// userCAKeysPath is the generation file of the agent's user CA keys,
+// apply.CAFile in internal/agent/apply, which is linux-only, so the CLI
+// keeps its own copy and a linux test pins the two (03-12d).
+const userCAKeysPath = "user_ca_keys"
+
 // errBadHostsStatus refuses a hosts/status answer that does not check out;
 // it never repeats the server's text.
 var errBadHostsStatus = errors.New("the server's host status does not check out; refusing to show it")
@@ -118,7 +123,7 @@ func runHostStatus(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return err
 	}
 	defer s.close()
-	_, pol, err := verifiedTrust(ctx, s.client, s.cfg, s.stderr)
+	bundle, pol, err := verifiedTrust(ctx, s.client, s.cfg, s.stderr)
 	if err != nil {
 		return err
 	}
@@ -134,7 +139,7 @@ func runHostStatus(ctx context.Context, args []string, stdout, stderr io.Writer)
 		_, err = fmt.Fprintf(stdout, "%s\n", b)
 		return err
 	}
-	_, err = io.WriteString(stdout, renderHostsStatus(ans, time.Now()))
+	_, err = io.WriteString(stdout, renderHostsStatus(ans, bundle, time.Now()))
 	return err
 }
 
@@ -155,7 +160,7 @@ func fetchHostsStatus(ctx context.Context, s *adminSession, pol *trust.Policy) (
 }
 
 // renderHostsStatus is host status's text output at now.
-func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string {
+func renderHostsStatus(a *serverclient.HostsStatusAnswer, _ *trust.Bundle, now time.Time) string {
 	var b strings.Builder
 	m := len(a.Hosts)
 	var nb, nd, nk int

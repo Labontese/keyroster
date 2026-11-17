@@ -89,6 +89,25 @@ func hostSetupSection(t *testing.T, prefix string) string {
 	return ""
 }
 
+// TestHostSetupHandManagedCAKeyRule (03-12d, T-03-76): step 1 of
+// host-setup.md tells the operator of a host that keyroster-agent does not
+// manage to keep its keyroster_user_ca.pub equal to the output of
+// keyroster host ca-key, says when to replace it, and that such a host is
+// outside the live count of host status.
+func TestHostSetupHandManagedCAKeyRule(t *testing.T) {
+	flat := htrbFlat(hostSetupSection(t, "1."))
+	for _, want := range []string{
+		"must always equal the output of `keyroster host ca-key`",
+		"after an abort",
+		"when a draining key ends",
+		"not in the live count",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("host-setup.md step 1 does not contain %q", want)
+		}
+	}
+}
+
 // TestHostSetupSignerCheck: host principals and host ca-key render what
 // the server serves, and a compromised server can serve any older
 // version the admins or roots once signed. keyroster directory show reads
