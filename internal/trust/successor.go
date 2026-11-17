@@ -3,6 +3,7 @@ package trust
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 )
@@ -50,7 +51,11 @@ type CARef struct {
 // are prev's, unchanged, and so are its CA entries, except that each
 // o.CANext entry is added in state next, in generation order within its
 // role, and each o.CARetire reference, which must name a next entry of
-// prev, is retired (an abort; CA rotation, KEY-08, 03-12b).
+// prev, is retired (an abort; CA rotation, KEY-08, 03-12b). For each role
+// of o.CASwitch, first, the role's next entry becomes active and its
+// active entry draining until DrainFloor of o.IssuedAt and the role's
+// max_ttl_seconds in prevPolicy and in o.Policy, plus o.DrainAllowance
+// (the switch, 03-12e).
 //
 // The result satisfies every rule of VerifySuccessor that does not involve
 // a signature (checkSuccessorChain, which the two share), and is refused
@@ -72,6 +77,9 @@ func BuildSuccessor(prev *Bundle, prevCanonical, prevPolicy []byte, o SuccessorO
 		Log:            prev.Log,
 		PolicySHA256:   SHA256Hex(o.Policy),
 		InstallationID: o.InstallationID,
+	}
+	if err := applySwitch(next, prevPolicy, o); err != nil {
+		return nil, err
 	}
 	for _, add := range o.CANext {
 		add.State = "next"
@@ -99,6 +107,50 @@ func BuildSuccessor(prev *Bundle, prevCanonical, prevPolicy []byte, o SuccessorO
 		return nil, err
 	}
 	return next, nil
+}
+
+// applySwitch applies the switch of every role of o.CASwitch to next, a
+// copy of prev's CA entries (03-12e): the role's next entry becomes active
+// and its active entry draining until the switch floor plus
+// o.DrainAllowance.
+func applySwitch(next *Bundle, prevPolicy []byte, o SuccessorOptions) error {
+	if len(o.CASwitch) == 0 {
+		return nil
+	}
+	pp, err := ParsePolicy(prevPolicy)
+	if err != nil {
+		return fmt.Errorf("previous policy: %w", err)
+	}
+	np, err := ParsePolicy(o.Policy)
+	if err != nil {
+		return fmt.Errorf("policy: %w", err)
+	}
+	allowance := uint64(max(o.DrainAllowance, 0) / time.Second)
+	for _, role := range o.CASwitch {
+		ni, ai := roleEntry(next.CAs, role, "next"), roleEntry(next.CAs, role, "active")
+		if ni < 0 {
+			return fmt.Errorf("%w: CA %s: no next entry to switch to", ErrVersionChain, role)
+		}
+		if ai < 0 {
+			return fmt.Errorf("%w: CA %s: no active entry to drain", ErrVersionChain, role)
+		}
+		ttlPrev, okPrev := RoleMaxTTL(pp, role)
+		ttlNext, okNext := RoleMaxTTL(np, role)
+		if !okPrev || !okNext {
+			return fmt.Errorf("%w: CA %s: the switch floor cannot be computed: a policy has no %s profile", ErrVersionChain, role, role)
+		}
+		floor, err := DrainFloor(o.IssuedAt, ttlPrev, ttlNext)
+		if err != nil {
+			return fmt.Errorf("%w: CA %s: the switch floor cannot be computed: %w", ErrVersionChain, role, err)
+		}
+		if floor > math.MaxInt64-allowance {
+			return fmt.Errorf("%w: CA %s: the switch floor %d plus the allowance overflows", ErrInvalid, role, floor)
+		}
+		end := int64(floor + allowance) //nolint:gosec // G115: at most math.MaxInt64, checked above
+		next.CAs[ai].State, next.CAs[ai].TrustedUntil = "draining", time.Unix(end, 0).UTC().Format(TimeFormat)
+		next.CAs[ni].State = "active"
+	}
+	return nil
 }
 
 // insertCA inserts e into cas, which are ordered by role and then by

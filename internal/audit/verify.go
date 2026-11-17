@@ -184,6 +184,10 @@ type anchor struct {
 	// gens are the CA key generations the log records (03-12): the
 	// ca_init keys as generation 1 and every ca_generation entry.
 	gens generationRegistry
+	// drain is the drain accumulator (03-12e): per CA key, the logged
+	// certificate with the largest ValidBefore among the leaves verified
+	// so far, fed from tlog.LeafCertificates as the signer's install is.
+	drain *krl.DrainMax
 }
 
 // generationRegistry is what audit verify has recorded of the CA key
@@ -360,6 +364,11 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 	if err := a.gens.checkLoggedGenerations(b); err != nil {
 		return err
 	}
+	// The switch's binding, re-derived from the leaves before this one
+	// (03-12e).
+	if err := a.checkDrainBinding(b); err != nil {
+		return err
+	}
 	logKey, err := trust.ParseKey(b.Log.Key)
 	if err != nil {
 		return fmt.Errorf("bundle_install: log key: %w", err)
@@ -397,6 +406,97 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 		}
 	}
 	return nil
+}
+
+// feedDrain adds every certificate that leaf l, entry idx, records to acc
+// (03-12e). A certificate that cannot be read is an error, never skipped.
+func feedDrain(acc *krl.DrainMax, idx uint64, l tlog.Leaf) error {
+	if acc == nil {
+		return errors.New("the verifier holds no scan of the log")
+	}
+	certs, err := tlog.LeafCertificates(l)
+	if err != nil {
+		return err
+	}
+	for _, c := range certs {
+		if err := acc.Add(idx, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkDrainBinding applies the signer's install binding to b, the bundle
+// about to replace a.bundle (03-12e): for each CA entry b has as draining
+// and a.bundle does not, by role and generation, the largest ValidBefore
+// that the verified leaves before it record for its key must leave no
+// certificate live at its trusted_until (krl.DrainBindingHolds), the one
+// rule the signer applies too. An entry that was already draining is not
+// bound again, because its end never changes.
+func (a *anchor) checkDrainBinding(b *trust.Bundle) error {
+	for _, ca := range b.CAs {
+		if ca.State != "draining" || a.wasDraining(ca) {
+			continue
+		}
+		if a.drain == nil {
+			return fmt.Errorf("drain scan: trust bundle v%d switches CA %s, but the verifier holds no scan of the log", b.Version, ca.Role)
+		}
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			return fmt.Errorf("bundle_install: %s CA key: %w", ca.Role, err)
+		}
+		end, err := time.Parse(trust.TimeFormat, ca.TrustedUntil)
+		if err != nil || end.Unix() < 0 {
+			return fmt.Errorf("trust bundle v%d: CA %s generation %d: trusted_until %q cannot be bound", b.Version, ca.Role, ca.Generation, ca.TrustedUntil)
+		}
+		m, ok := a.drain.For(pub.Marshal())
+		if ok && !krl.DrainBindingHolds(m.ValidBefore, uint64(end.Unix())) { //nolint:gosec // G115: not before 1970, checked above
+			return fmt.Errorf("drain_window_too_short: the switch of CA %s ends trust at %s, but the log records a certificate of generation %d valid until %s (serial %d, key ID %s, leaf %d); the earliest acceptable trusted_until is %s",
+				ca.Role, ca.TrustedUntil, ca.Generation, drainTime(m.ValidBefore), m.Serial, m.KeyID, m.Leaf, earliestTrustedUntil(m.ValidBefore))
+		}
+	}
+	return nil
+}
+
+// wasDraining reports whether the bundle in force has ca's role and
+// generation as draining (03-12e).
+func (a *anchor) wasDraining(ca trust.CAEntry) bool {
+	if a.bundle == nil {
+		return false
+	}
+	for _, old := range a.bundle.CAs {
+		if old.Role == ca.Role && old.Generation == ca.Generation && old.State == "draining" {
+			return true
+		}
+	}
+	return false
+}
+
+// maxTimeFormat is the last second trust.TimeFormat renders,
+// 9999-12-31T23:59:59Z.
+const maxTimeFormat = 253402300799
+
+// drainTime renders Unix seconds u as the signer's refusal does (03-12e):
+// in trust.TimeFormat when that format can render it, as "forever" for
+// ssh.CertTimeInfinity and as the decimal seconds otherwise.
+func drainTime(u uint64) string {
+	switch {
+	case u <= maxTimeFormat:
+		return time.Unix(int64(u), 0).UTC().Format(trust.TimeFormat)
+	case u == math.MaxUint64:
+		return "forever"
+	}
+	return fmt.Sprintf("%d s after 1970", u)
+}
+
+// earliestTrustedUntil renders krl.EarliestTrustedUntil(validBefore)
+// (03-12e).
+func earliestTrustedUntil(validBefore uint64) string {
+	e, ok := krl.EarliestTrustedUntil(validBefore)
+	if !ok {
+		return "none (that certificate never expires)"
+	}
+	return drainTime(e)
 }
 
 // verifySelfSignedGenesis verifies the first bundle_install entry as a
@@ -947,7 +1047,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	rep := &Report{Counts: map[tlog.Kind]uint64{}, IssuedByCA: map[string]int{}}
 	tree := tlog.NewLog()
 	var (
-		trustState anchor
+		trustState = anchor{drain: krl.NewDrainMax()}
 		dirState   directoryInForce
 		hashes     [][]byte
 		checkpoint []byte
@@ -1265,6 +1365,11 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			// version. It is kept as the guard that makes a kind added to
 			// tlog later fail closed until audit verify has a check for it.
 			return nil, fmt.Errorf("audit: entry %d (%s): not verifiable by this version", want, leaf.Kind)
+		}
+		// The drain scan, once per leaf the kind switch above accepted
+		// (03-12e): every refusal of a leaf returns before it.
+		if err := feedDrain(trustState.drain, want, leaf); err != nil {
+			return nil, fmt.Errorf("audit: entry %d (%s): drain scan: %w", want, leaf.Kind, err)
 		}
 		hash := tlog.HashLeaf(raw)
 		if err := tree.Append(hash); err != nil {

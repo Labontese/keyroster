@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/mod/sumdb/note"
 
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -42,6 +43,10 @@ type logState struct {
 	// the policy against its root sets; loadDirectory compares its last
 	// directory_install body with the stored directory.
 	loaded loggedInstalls
+	// rebuildOpts are what every rebuild of this Signer's log takes
+	// (03-12e): only InstallBundleWithPrevious's log writer asks for the
+	// drain scan and the previous checkpoint (newLogWriterWith).
+	rebuildOpts rebuildOptions
 
 	// pending is the state after the appends of the open transaction. It
 	// replaces tree only after COMMIT succeeded.
@@ -111,7 +116,16 @@ func (s *Signer) loadLog(ctx context.Context) error {
 // key and to match the recomputed size and root. It also returns what the
 // bundle_install leaves record.
 func (s *Signer) rebuildLog(ctx context.Context) (*tlog.Log, uint64, loggedInstalls, error) {
-	return rebuildLogFrom(ctx, s.db, s.cpVerifier)
+	return rebuildLogFromWith(ctx, s.db, s.cpVerifier, s.rebuildOpts)
+}
+
+// rebuildOptions are what a log walk does beside the rebuild (03-12e).
+// With drain, it feeds every certificate the leaves record into a drain
+// accumulator (loggedInstalls.drain); with previous, a checkpoint that the
+// caller verified with the log key, it requires the log to extend it.
+type rebuildOptions struct {
+	drain    bool
+	previous *tlog.Checkpoint
 }
 
 // loggedInstalls is what the install leaves of a log record: the body of
@@ -144,6 +158,11 @@ type loggedInstalls struct {
 	// machines is the machine index (03-11), rebuilt and followed like
 	// hosts (pendingMachines).
 	machines machineIndex
+	// drain is the drain accumulator of the walk (03-12e): per CA key, the
+	// logged certificate with the largest ValidBefore. Only a walk with
+	// rebuildOptions.drain fills it; nil otherwise, which the install
+	// binding refuses (drain_scan_missing).
+	drain *krl.DrainMax
 }
 
 // add records the bundle_install leaf idx with body.
@@ -337,6 +356,17 @@ func CheckTrust(ctx context.Context, db *signerdb.DB) error {
 // cannot make a healthy log look inconsistent (doctor runs against a live
 // signer).
 func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlog.Log, uint64, loggedInstalls, error) {
+	return rebuildLogFromWith(ctx, db, v, rebuildOptions{})
+}
+
+// rebuildLogFromWith is rebuildLogFrom with opts (03-12e). With opts.drain
+// the last step of each leaf's callback, after the leaf's own checks, its
+// index applies and its kind decode, feeds every certificate the leaf
+// records into installs.drain (drainFeed), so a leaf the rebuild refuses
+// for its own reasons keeps that refusal. With opts.previous it refuses
+// install_previous_not_extended when the checkpoint covers more entries
+// than the log.
+func rebuildLogFromWith(ctx context.Context, db *signerdb.DB, v note.Verifier, opts rebuildOptions) (*tlog.Log, uint64, loggedInstalls, error) {
 	var (
 		last     uint64
 		hashes   [][]byte
@@ -345,6 +375,9 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		revoked  = loggedRevocations{}
 		gens     = loggedGenerations{}
 	)
+	if opts.drain {
+		installs.drain = krl.NewDrainMax()
+	}
 	// ReadLogWithHashes yields idx = 0, 1, 2, ... without gaps.
 	snap, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
 		l, err := tlog.DecodeLeaf(leaf)
@@ -476,6 +509,13 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 				return err
 			}
 		}
+		// The drain scan, last, over a leaf the walk has accepted
+		// (03-12e).
+		if installs.drain != nil {
+			if err := drainFeed(installs.drain, idx, l); err != nil {
+				return err
+			}
+		}
 		last = l.TimeMicros
 		hashes = append(hashes, hash)
 		return nil
@@ -506,6 +546,9 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		if err := revoked.check(snap.Revocations); err != nil {
 			return nil, 0, loggedInstalls{}, err
 		}
+		if err := checkPreviousExtended(opts.previous, tree); err != nil {
+			return nil, 0, loggedInstalls{}, err
+		}
 		installs.revoked = revoked
 		return tree, 0, installs, nil
 	}
@@ -526,8 +569,25 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 	if err := revoked.check(snap.Revocations); err != nil {
 		return nil, 0, loggedInstalls{}, err
 	}
+	if err := checkPreviousExtended(opts.previous, tree); err != nil {
+		return nil, 0, loggedInstalls{}, err
+	}
 	installs.revoked = revoked
 	return tree, last, installs, nil
+}
+
+// checkPreviousExtended refuses install_previous_not_extended when
+// previous, a checkpoint verified with the log key (nil for none), covers
+// more entries than tree, the rebuilt log (03-12e).
+func checkPreviousExtended(previous *tlog.Checkpoint, tree *tlog.Log) error {
+	if previous == nil {
+		return nil
+	}
+	if previous.Size > tree.Size() {
+		return fmt.Errorf("%w: the log does not extend the checkpoint in --previous (it covers %d entries, this log has %d)",
+			ErrInstallPreviousNotExtended, previous.Size, tree.Size())
+	}
+	return nil
 }
 
 // errGenerationsNotLogged is the generations_not_logged start-up refusal

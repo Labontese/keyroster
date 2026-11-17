@@ -2,6 +2,7 @@ package trust
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -114,7 +115,10 @@ func UserCAKeysFileExcept(b *Bundle, t time.Time, skip func(CAEntry) bool) ([]by
 }
 
 // DrainMargin is how long, in seconds, a switch's trusted_until must lie
-// past the end of what it covers (03-12e).
+// past the end of what it covers (03-12e): past the floor's longest
+// possible certificate here, and past every logged certificate of the
+// draining key in the signer's install binding. It equals krl.PruneMargin,
+// which internal/krl's tests assert, since trust cannot import krl.
 const DrainMargin = 300
 
 // MaxDrainAllowance is the largest allowance a switch may add to its floor
@@ -122,8 +126,42 @@ const DrainMargin = 300
 const MaxDrainAllowance = 7 * 24 * time.Hour
 
 // DrainFloor is the earliest trusted_until a switch issued at issuedAt may
-// carry (03-12e).
-func DrainFloor(_ string, _, _ uint64) (uint64, error) { return 0, nil }
+// carry (03-12e): the Unix seconds of issuedAt plus the larger of ttlPrev
+// and ttlNext plus DrainMargin. The chain rule, BuildSuccessor and the
+// ceremony's printed advice all take the floor from here. An issuedAt that
+// does not parse or lies before 1970, and a sum that would overflow, are
+// errors, never a wrapped value.
+func DrainFloor(issuedAt string, ttlPrev, ttlNext uint64) (uint64, error) {
+	t, err := time.Parse(TimeFormat, issuedAt)
+	if err != nil {
+		return 0, fmt.Errorf("issued_at %q: %w", issuedAt, err)
+	}
+	if t.Unix() < 0 {
+		return 0, fmt.Errorf("issued_at %s is before 1970", issuedAt)
+	}
+	floor := uint64(t.Unix()) //nolint:gosec // G115: not before 1970, checked above
+	for _, add := range []uint64{max(ttlPrev, ttlNext), DrainMargin} {
+		if floor > math.MaxUint64-add {
+			return 0, fmt.Errorf("issued_at %s plus %d s overflows", issuedAt, add)
+		}
+		floor += add
+	}
+	return floor, nil
+}
+
+// RoleMaxTTL returns the max_ttl_seconds of role's CA profile in p, and
+// false when p has none (03-12e).
+func RoleMaxTTL(p *Policy, role string) (uint64, bool) {
+	if p == nil {
+		return 0, false
+	}
+	for _, prof := range p.CAProfiles {
+		if prof.Role == role {
+			return prof.MaxTTLSeconds, true
+		}
+	}
+	return 0, false
+}
 
 // checkCATransitions is the chain rule for CA entries (03-12b). Entries
 // are never removed, so next lists every generation prev lists, and for
@@ -137,11 +175,16 @@ func DrainFloor(_ string, _, _ uint64) (uint64, error) { return 0, nil }
 //     prev (any CA entry in any state, the ops key, the log key, any root
 //     key) and no key added for another role in this successor;
 //   - one next entry becomes retired (an abort) with every other field
-//     unchanged.
+//     unchanged;
+//   - the switch (03-12e): the role's next entry becomes active and its
+//     active entry becomes draining with a trusted_until, every other
+//     field of both unchanged, counted as one change.
 //
 // Anything else is ErrVersionChain naming the role and the generation. The
 // count of a role's changes is checked before any addition's own
-// conditions, so a role with two changes always reports the count.
+// conditions, so a role with two changes always reports the count. A
+// draining entry, once made, never changes: its trusted_until is
+// immutable and it never becomes retired or active again.
 // checkSuccessorChain runs it for the signer, every agent, audit, root
 // sign --prev and trust verify --prev; the client commands that only
 // verify a served bundle against the pins run no chain rule. 03-12e adds
@@ -201,6 +244,34 @@ func checkRoleTransition(role string, prev, next *Bundle, _, _ *Policy, prevKeys
 	// production) shows as an addition, not as a change. What is left of
 	// next is added.
 	used := make([]bool, len(after))
+	var changes []uint32
+	// The switch (03-12e) is matched first: prev's next entry must reappear
+	// as active and prev's active entry as draining with a trusted_until,
+	// every other field of both unchanged. The pair is one change of the
+	// role; every other entry still has to match below.
+	switched := map[int]bool{}
+	if pn, pa := roleEntry(prev.CAs, role, "next"), roleEntry(prev.CAs, role, "active"); pn >= 0 && pa >= 0 {
+		activated := prev.CAs[pn]
+		activated.State = "active"
+		jn, ja := -1, -1
+		for j, cur := range after {
+			switch {
+			case jn < 0 && cur == activated:
+				jn = j
+			case ja < 0 && cur.State == "draining" && cur.TrustedUntil != "":
+				drained := cur
+				drained.State, drained.TrustedUntil = "active", ""
+				if drained == prev.CAs[pa] {
+					ja = j
+				}
+			}
+		}
+		if jn >= 0 && ja >= 0 {
+			used[jn], used[ja] = true, true
+			switched[pn], switched[pa] = true, true
+			changes = append(changes, prev.CAs[pa].Generation)
+		}
+	}
 	match := func(old CAEntry) int {
 		for _, identical := range []bool{true, false} {
 			for j, cur := range after {
@@ -214,14 +285,16 @@ func checkRoleTransition(role string, prev, next *Bundle, _, _ *Policy, prevKeys
 	}
 	var maxGen uint32
 	hasNext := false
-	var changes []uint32
-	for _, old := range prev.CAs {
+	for i, old := range prev.CAs {
 		if old.Role != role {
 			continue
 		}
 		maxGen = max(maxGen, old.Generation)
 		if old.State == "next" {
 			hasNext = true
+		}
+		if switched[i] {
+			continue
 		}
 		j := match(old)
 		if j < 0 {
@@ -272,4 +345,10 @@ func checkRoleTransition(role string, prev, next *Bundle, _, _ *Policy, prevKeys
 		added[k] = true
 	}
 	return nil
+}
+
+// roleEntry returns the index in cas of the first entry of role in state,
+// or -1 (03-12e).
+func roleEntry(cas []CAEntry, role, state string) int {
+	return slices.IndexFunc(cas, func(c CAEntry) bool { return c.Role == role && c.State == state })
 }
