@@ -1412,9 +1412,10 @@ whose last check is older than its last apply is not counted until the
 agent's own next clean check reaches the server (the agent checks after
 every apply it runs itself and every 15 min, with a random 60 s either
 way; after `keyroster-agent apply --once` by hand the next periodic
-check counts), and a note names the reason. A check that ends after an
-apply committed a newer generation is not reported as the host's last
-check: the host waits for a check of the new generation. Running
+check counts), and a note names the reason. A clean check that ends
+after an apply committed a newer generation is not reported as the
+host's last check: the host waits for a check of the new generation
+(drift a check finds is always reported). Running
 `keyroster-agent check` as root on the host shows the host's own report,
 but it writes no status and so does not change the count. A stuck host
 is not counted until root has recovered it
