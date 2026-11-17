@@ -246,8 +246,15 @@ func (f *liveFix) render(now time.Time, rows ...serverclient.HostStatusRow) stri
 func hostStatusLiveCases(t *testing.T) {
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	live := func(n, m int) string { return fmt.Sprintf("user CA keys of bundle v3 live on %d/%d hosts\n", n, m) }
+	// The remedy of the note: a stuck host is recovered by root, the others
+	// wait for the agent's own next check (keyroster-agent check writes no
+	// status, so it never changes the count).
 	notConfirmed := func(host, reason string) string {
-		return fmt.Sprintf("%s: user CA keys not confirmed: %s; run keyroster-agent check as root on the host\n", host, reason)
+		remedy := "it is counted after the agent's next clean check; keyroster-agent check as root on the host shows its own report but does not change the count"
+		if reason == "it is stuck" {
+			remedy = "it is counted after root runs `sudo keyroster-agent apply --once --recover-to-last-good` on the host (docs/runbooks/host-setup.md \"Manual recovery\") and the agent's next clean check"
+		}
+		return fmt.Sprintf("%s: user CA keys not confirmed: %s; %s\n", host, reason, remedy)
 	}
 	want := func(t *testing.T, out string, wants ...string) {
 		t.Helper()

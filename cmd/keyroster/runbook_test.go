@@ -108,6 +108,26 @@ func TestHostSetupHandManagedCAKeyRule(t *testing.T) {
 	}
 }
 
+// TestHostSetupLiveCountRemedy (03-12d, T-03-447): the live count follows
+// the agent's own next check, keyroster-agent check writes no status (so
+// it never changes the count), and a stuck host waits for the manual
+// recovery.
+func TestHostSetupLiveCountRemedy(t *testing.T) {
+	flat := htrbFlat(hostSetupSection(t, "Running the agent"))
+	for _, want := range []string{
+		"not counted until the agent's own next clean check",
+		"writes no status and so does not change the count",
+		"A stuck host is not counted until root has recovered it ([Manual recovery](#manual-recovery))",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("host-setup.md Running the agent does not contain %q", want)
+		}
+	}
+	if strings.Contains(flat, "as root on the host runs one") {
+		t.Error("host-setup.md Running the agent still says keyroster-agent check moves the count")
+	}
+}
+
 // TestHostSetupSignerCheck: host principals and host ca-key render what
 // the server serves, and a compromised server can serve any older
 // version the admins or roots once signed. keyroster directory show reads
