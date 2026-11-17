@@ -352,16 +352,57 @@ func TestHostTrustName(t *testing.T) {
 // TestHostTrustCAs (03-09b): the host CAs clients trust.
 func TestHostTrustCAs(t *testing.T) {
 	key := func() string { return trust.FormatKey(htSigner(t).PublicKey()) }
-	t.Run("active_and_next_sorted_by_generation_then_key", func(t *testing.T) {
+	t.Run("active_and_next_sorted_by_generation", func(t *testing.T) {
+		// 03-12d: three distinct generations given out of order; the old
+		// leaf's two next entries at one generation are a bundle Validate
+		// refuses since 03-12c, so the key tie-break is gone.
 		k1, k2, k3 := key(), key(), key()
-		hi, lo := max(k2, k3), min(k2, k3)
 		b := &trust.Bundle{CAs: []trust.CAEntry{
-			{Role: trust.RoleHost, Key: hi, State: "next", Generation: 2},
+			{Role: trust.RoleHost, Key: k3, State: "next", Generation: 3},
 			{Role: trust.RoleHost, Key: k1, State: "active", Generation: 1},
-			{Role: trust.RoleHost, Key: lo, State: "next", Generation: 2},
+			{Role: trust.RoleHost, Key: k2, State: "next", Generation: 2},
 		}}
 		got := hostTrustCAs(b, time.Now())
-		if len(got) != 3 || got[0].Key != k1 || got[1].Key != lo || got[2].Key != hi {
+		if len(got) != 3 || got[0].Key != k1 || got[1].Key != k2 || got[2].Key != k3 {
+			t.Fatalf("hostTrustCAs = %+v", got)
+		}
+	})
+	t.Run("next_and_draining_host_ca", func(t *testing.T) {
+		// 03-12d: a draining host CA is trusted until its end, on the
+		// clock given.
+		end := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+		k1, k2, k3, k4 := key(), key(), key(), key()
+		b := &trust.Bundle{CAs: []trust.CAEntry{
+			{Role: trust.RoleHost, Key: k1, State: "retired", Generation: 1},
+			{Role: trust.RoleHost, Key: k2, State: "draining", Generation: 2, TrustedUntil: end.Format(trust.TimeFormat)},
+			{Role: trust.RoleHost, Key: k3, State: "active", Generation: 3},
+			{Role: trust.RoleHost, Key: k4, State: "next", Generation: 4},
+		}}
+		keys := func(cas []trust.CAEntry) []string {
+			var out []string
+			for _, ca := range cas {
+				out = append(out, ca.Key)
+			}
+			return out
+		}
+		if got := keys(hostTrustCAs(b, end.Add(-time.Second))); !slices.Equal(got, []string{k2, k3, k4}) {
+			t.Fatalf("at the end minus 1s: hostTrustCAs keys = %q, want generations 2, 3 and 4", got)
+		}
+		for _, at := range []time.Time{end, end.Add(time.Hour)} {
+			if got := keys(hostTrustCAs(b, at)); !slices.Equal(got, []string{k3, k4}) {
+				t.Fatalf("at %s: hostTrustCAs keys = %q, want generations 3 and 4", at, got)
+			}
+		}
+	})
+	t.Run("drained_and_retired_excluded", func(t *testing.T) {
+		now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+		k := key()
+		b := &trust.Bundle{CAs: []trust.CAEntry{
+			{Role: trust.RoleHost, Key: key(), State: "retired", Generation: 1},
+			{Role: trust.RoleHost, Key: key(), State: "draining", Generation: 2, TrustedUntil: now.Add(-time.Hour).Format(trust.TimeFormat)},
+			{Role: trust.RoleHost, Key: k, State: "active", Generation: 3},
+		}}
+		if got := hostTrustCAs(b, now); len(got) != 1 || got[0].Key != k {
 			t.Fatalf("hostTrustCAs = %+v", got)
 		}
 	})
@@ -412,6 +453,42 @@ func TestKnownHosts(t *testing.T) {
 		}
 		if got := f.file(t, hostTrustSSHConfig); got != htConfig("web1", "web1.lab.example") {
 			t.Fatalf("config\n%s", got)
+		}
+	})
+	t.Run("next_and_draining_host_ca", func(t *testing.T) {
+		// 03-12d (M149): the writer lists a draining host CA until its
+		// end on the clock hostTrustCAs is given, and not from its end.
+		end := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		draining := func(f *htFix) (string, string) {
+			active, next := htSigner(t), htSigner(t)
+			f.bundle.CAs = []trust.CAEntry{
+				f.bundle.CAs[0],
+				{Role: trust.RoleHost, Key: trust.FormatKey(f.hostCA.PublicKey()), State: "draining", Generation: 1, TrustedUntil: end.Format(trust.TimeFormat)},
+				{Role: trust.RoleHost, Key: trust.FormatKey(active.PublicKey()), State: "active", Generation: 2},
+				{Role: trust.RoleHost, Key: trust.FormatKey(next.PublicKey()), State: "next", Generation: 3},
+			}
+			return trust.FormatKey(active.PublicKey()), trust.FormatKey(next.PublicKey())
+		}
+		for _, c := range []struct {
+			at           time.Time
+			withDraining bool
+		}{{end.Add(-time.Second), true}, {end, false}} {
+			f := newHTFix(t, 1, 1)
+			active, next := draining(f)
+			in := f.in(t, f.dirDoc(t, 1, "", htHost(t, "web1", directory.StatusActive, "web1")), f.krlV(t, 1))
+			in.CAs = hostTrustCAs(f.bundle, c.at)
+			mustRun(t, in, hostTrustFull)
+			got := htCALines(t, f.file(t, hostTrustKnownHosts))
+			drainingKey := trust.FormatKey(f.hostCA.PublicKey())
+			if _, ok := got[active]; !ok {
+				t.Fatalf("at %s: the active host CA line is missing:\n%s", c.at, f.file(t, hostTrustKnownHosts))
+			}
+			if _, ok := got[next]; !ok {
+				t.Fatalf("at %s: the next host CA line is missing:\n%s", c.at, f.file(t, hostTrustKnownHosts))
+			}
+			if _, ok := got[drainingKey]; ok != c.withDraining || len(got) != map[bool]int{true: 3, false: 2}[c.withDraining] {
+				t.Fatalf("at %s (end %s): %d CA lines, draining line present %v; want it present %v:\n%s", c.at, end, len(got), ok, c.withDraining, f.file(t, hostTrustKnownHosts))
+			}
 		}
 	})
 	t.Run("ca_line_format_exact", func(t *testing.T) {
@@ -1723,6 +1800,204 @@ func FuzzHostTrustState(f *testing.F) {
 		enc, err := st.encode()
 		if err != nil || !bytes.Equal(enc, data) {
 			t.Fatalf("an accepted state re-encodes differently: %v", err)
+		}
+	})
+}
+
+// nkLines splits data after each newline, as narrowKnownHosts does
+// (03-12d): every line keeps its own bytes.
+func nkLines(data []byte) []string {
+	var out []string
+	for len(data) > 0 {
+		i := bytes.IndexByte(data, '\n')
+		if i < 0 {
+			out = append(out, string(data))
+			break
+		}
+		out = append(out, string(data[:i+1]))
+		data = data[i+1:]
+	}
+	return out
+}
+
+// nkSubsequence reports whether out is in's lines minus some of them:
+// every line of out is a line of in, in order, and nothing else.
+func nkSubsequence(in, out []byte) bool {
+	src, j := nkLines(in), 0
+	var kept []byte
+	for _, l := range nkLines(out) {
+		for j < len(src) && src[j] != l {
+			j++
+		}
+		if j == len(src) {
+			return false
+		}
+		kept = append(kept, src[j]...)
+		j++
+	}
+	return bytes.Equal(kept, out)
+}
+
+// nkSound returns an error for the first line of out that is a CA line
+// (its first space-or-tab field is @cert-authority, without regard to
+// case) without four fields and a key field pair in trusted (03-12d).
+func nkSound(out []byte, trusted []string) error {
+	for _, l := range nkLines(out) {
+		s := strings.TrimSuffix(strings.TrimSuffix(l, "\n"), "\r")
+		f := strings.FieldsFunc(s, func(r rune) bool { return r == ' ' || r == '\t' })
+		if len(f) == 0 || !strings.EqualFold(f[0], "@cert-authority") {
+			continue
+		}
+		if len(f) < 4 || !slices.Contains(trusted, f[2]+" "+f[3]) {
+			return fmt.Errorf("an untrusted or malformed CA line was kept: %q", l)
+		}
+	}
+	return nil
+}
+
+// TestNarrowKnownHosts (03-12d, NP-19, NP-25, T-03-444): the pure line
+// filter of the managed known_hosts file. It removes the CA lines whose
+// key is not trusted, and keeps every other line byte for byte.
+func TestNarrowKnownHosts(t *testing.T) {
+	key := func() string { return trust.FormatKey(htSigner(t).PublicKey()) }
+	kA, kN, kU := key(), key(), key()
+	trusted := []string{kA, kN}
+	ca := func(k string, g int) string {
+		return fmt.Sprintf("@cert-authority web1,web1.lab.example %s keyroster host CA generation %d\n", k, g)
+	}
+	tabbed := func(k string) string { return strings.Replace(k, " ", "\t", 1) }
+	head := htKnownHostsHead
+	info := "# directory version 1 (sha256 " + strings.Repeat("ab", 32) + "), trust bundle version 1, KRL version 1 (informational; never read back)\n"
+	check := func(t *testing.T, in string, set []string, want string, wantN int) {
+		t.Helper()
+		out, n := narrowKnownHosts([]byte(in), set)
+		if string(out) != want || n != wantN {
+			t.Fatalf("narrowKnownHosts(%q) = %q, %d; want %q, %d", in, out, n, want, wantN)
+		}
+	}
+	t.Run("drops_untrusted_ca_line", func(t *testing.T) {
+		check(t, head+ca(kA, 1)+ca(kU, 2), trusted, head+ca(kA, 1), 1)
+	})
+	t.Run("keeps_trusted_ca_lines", func(t *testing.T) {
+		in := head + info + ca(kA, 2) + ca(kN, 3)
+		check(t, in, trusted, in, 0)
+	})
+	t.Run("keeps_other_lines_byte_for_byte", func(t *testing.T) {
+		in := head + info + "\n" + "web1 " + kU + "\n" + "@revoked web1 " + kU + "\n" + "# a comment\n"
+		check(t, in, trusted, in, 0)
+	})
+	t.Run("drops_a_foreign_ca_line", func(t *testing.T) {
+		check(t, head+ca(key(), 7)+ca(kA, 1), trusted, head+ca(kA, 1), 1)
+	})
+	t.Run("drops_malformed_ca_lines", func(t *testing.T) {
+		typ, b64, _ := strings.Cut(kA, " ")
+		for _, m := range []string{
+			"@cert-authority\n",
+			"@cert-authority web1 " + typ + "\n",
+			"@cert-authority web1 " + strings.ToUpper(typ) + " " + b64 + "\n",
+		} {
+			check(t, head+ca(kA, 1)+m, trusted, head+ca(kA, 1), 1)
+		}
+	})
+	t.Run("leading_whitespace_ca_line_is_narrowed", func(t *testing.T) {
+		for _, p := range []string{"  ", "\t", " \t "} {
+			check(t, head+p+ca(kU, 1)+p+ca(kA, 2), trusted, head+p+ca(kA, 2), 1)
+		}
+	})
+	t.Run("tab_separated_ca_line_is_narrowed", func(t *testing.T) {
+		bad := "@cert-authority\tweb1\t" + tabbed(kU) + "\tkeyroster host CA generation 1\n"
+		good := "@cert-authority\tweb1\t" + tabbed(kA) + "\tkeyroster host CA generation 2\n"
+		check(t, head+bad+good, trusted, head+good, 1)
+	})
+	t.Run("marker_case_is_not_a_bypass", func(t *testing.T) {
+		in := head + "@CERT-AUTHORITY web1 " + kU + "\n" + ca(kA, 2) + "@Cert-Authority web1 " + kU + " c\n"
+		check(t, in, trusted, head+ca(kA, 2), 2)
+	})
+	t.Run("crlf_and_a_missing_final_newline_are_preserved", func(t *testing.T) {
+		in := "# header\r\n" + "@cert-authority web1 " + kA + "\r\n" + "@cert-authority web1 " + kU + " c\r\n" + "@cert-authority web1 " + kN + " c"
+		check(t, in, trusted, "# header\r\n"+"@cert-authority web1 "+kA+"\r\n"+"@cert-authority web1 "+kN+" c", 1)
+		check(t, ca(kA, 1)+"@cert-authority web1 "+kU, trusted, ca(kA, 1), 1)
+	})
+	t.Run("an_empty_trusted_set_drops_every_ca_line", func(t *testing.T) {
+		in := head + info + ca(kA, 1) + "web1 " + kU + "\n" + ca(kN, 2)
+		check(t, in, nil, head+info+"web1 "+kU+"\n", 2)
+	})
+	t.Run("reports_the_count_removed", func(t *testing.T) {
+		check(t, ca(key(), 1)+ca(kA, 2)+ca(key(), 3)+ca(kU, 4), trusted, ca(kA, 2), 3)
+	})
+	templates := []string{
+		head, info, "\n", "web1 " + kU + "\n", "@revoked web1 " + kU + "\n",
+		ca(kA, 1), "@cert-authority\tweb1\t" + tabbed(kN) + "\r\n", ca(kU, 3),
+		"@cert-authority\n", "@cert-authority web1 ssh-ed25519\n", "  \t" + ca(kU, 4), "@CERT-AUTHORITY web1 " + kU + "\n",
+	}
+	sets := [][]string{trusted, {kN}}
+	t.Run("output_lines_are_a_subset_of_input", func(t *testing.T) {
+		for _, set := range sets {
+			for _, a := range templates {
+				for _, b := range templates {
+					in := []byte(a + b)
+					out, n := narrowKnownHosts(in, set)
+					if !nkSubsequence(in, out) || len(out) > len(in) || n != len(nkLines(in))-len(nkLines(out)) {
+						t.Fatalf("narrowKnownHosts(%q) = %q, %d: not the input minus %d of its lines", in, out, n, n)
+					}
+				}
+			}
+		}
+	})
+	t.Run("idempotent", func(t *testing.T) {
+		for _, set := range sets {
+			for _, a := range templates {
+				for _, b := range templates {
+					out, _ := narrowKnownHosts([]byte(a+b), set)
+					again, n := narrowKnownHosts(out, set)
+					if !bytes.Equal(again, out) || n != 0 {
+						t.Fatalf("narrowing %q again gave %q, %d", out, again, n)
+					}
+				}
+			}
+		}
+	})
+	t.Run("empty_input_is_empty", func(t *testing.T) {
+		for _, in := range [][]byte{nil, {}} {
+			if out, n := narrowKnownHosts(in, trusted); len(out) != 0 || n != 0 {
+				t.Fatalf("narrowKnownHosts(%q) = %q, %d", in, out, n)
+			}
+		}
+	})
+}
+
+// nkSeedKey is a fixed Ed25519 key in canonical form, from a seed of b.
+func nkSeedKey(t testing.TB, b byte) string {
+	t.Helper()
+	priv := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{b}, ed25519.SeedSize))
+	pub, err := ssh.NewPublicKey(priv.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return trust.FormatKey(pub)
+}
+
+// FuzzNarrowKnownHosts (03-12d, T-03-444): over arbitrary bytes the
+// filter's output is its input minus whole lines, narrowing it again
+// changes nothing, and no untrusted or malformed CA line is kept (the
+// soundness property). Each seed holds an untrusted CA line.
+func FuzzNarrowKnownHosts(f *testing.F) {
+	trusted := []string{nkSeedKey(f, 1), nkSeedKey(f, 2)}
+	untrusted := nkSeedKey(f, 3)
+	f.Add([]byte("@cert-authority web1 " + untrusted + " keyroster host CA generation 1\n"))
+	f.Add([]byte("@cert-authority\tweb1\t" + strings.Replace(untrusted, " ", "\t", 1) + "\n"))
+	f.Add([]byte("@CERT-AUTHORITY web1 " + untrusted + "\n"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		out, n := narrowKnownHosts(data, trusted)
+		if !nkSubsequence(data, out) || n != len(nkLines(data))-len(nkLines(out)) {
+			t.Fatalf("narrowKnownHosts(%q) = %q, %d: not the input minus %d of its lines", data, out, n, n)
+		}
+		again, n2 := narrowKnownHosts(out, trusted)
+		if !bytes.Equal(again, out) || n2 != 0 {
+			t.Fatalf("narrowing %q again gave %q, %d", out, again, n2)
+		}
+		if err := nkSound(out, trusted); err != nil {
+			t.Fatal(err)
 		}
 	})
 }

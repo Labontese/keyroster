@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/directory"
@@ -396,6 +399,126 @@ func TestHostCAKey(t *testing.T) {
 	if code != 0 || want == "" || out != want {
 		t.Fatalf("host ca-key: exit %d, stderr %q, stdout %q; want %q", code, errOut, out, want)
 	}
+}
+
+// plantHostTrust writes the managed files as a refresh of trust bundle
+// version version would have left them (03-12d): a state of e's
+// installation and ops key at that version over names, a
+// keyroster_known_hosts with a line per CA of cas, and sentinel bytes for
+// the KRL and the ssh config. It returns the ~/.ssh it installed.
+func plantHostTrust(t *testing.T, e *dirEnv, version uint64, cas []trust.CAEntry, names []string) string {
+	t.Helper()
+	dir := useSSHDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st := &hostTrustState{Format: 1, InstallationID: e.bundle.InstallationID, BundleVersion: version, OpsKey: e.bundle.OpsKey.Key, Names: slices.Clone(names)}
+	data, err := st.encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := hostTrustStatePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStateFile(path, data); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(dir, hostTrustKnownHosts), knownHostsFile(cas, names, st))
+	writeTestFile(t, filepath.Join(dir, hostTrustKRLFile), []byte("sentinel KRL bytes\n"))
+	writeTestFile(t, filepath.Join(dir, hostTrustSSHConfig), []byte("# sentinel ssh config\n"))
+	return dir
+}
+
+// hostTrustSnapshot returns the bytes of the state and the three managed
+// files under sshDir, by name ("" when absent).
+func hostTrustSnapshot(t *testing.T, sshDir string) map[string]string {
+	t.Helper()
+	statePath, err := hostTrustStatePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for name, p := range map[string]string{
+		hostTrustStateFile:  statePath,
+		hostTrustKnownHosts: filepath.Join(sshDir, hostTrustKnownHosts),
+		hostTrustKRLFile:    filepath.Join(sshDir, hostTrustKRLFile),
+		hostTrustSSHConfig:  filepath.Join(sshDir, hostTrustSSHConfig),
+	} {
+		data, err := os.ReadFile(p) //nolint:gosec // a test path
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		out[name] = string(data)
+	}
+	return out
+}
+
+// TestHostCAKeyNarrows (03-12d, the tracer, D-14, T-03-430): host ca-key
+// verifies the bundle, and the managed known_hosts loses the line of a
+// host CA whose drain has ended, with every other byte and file unchanged.
+func TestHostCAKeyNarrows(t *testing.T) {
+	t.Run("tracer_narrows_the_drained_line", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+		prev := trustClock
+		trustClock = func() time.Time { return now }
+		t.Cleanup(func() { trustClock = prev })
+		e.serveRotated(t, 3, func(b *trust.Bundle) {
+			var cas []trust.CAEntry
+			for _, ca := range b.CAs {
+				if ca.Role != trust.RoleHost {
+					cas = append(cas, ca)
+					continue
+				}
+				drained := ca
+				drained.State, drained.TrustedUntil = "draining", now.Add(-time.Hour).Format(trust.TimeFormat)
+				active, next := ca, ca
+				active.Key, active.Generation = rotatedCAKey(t, ca.Alg), ca.Generation+1
+				next.Key, next.State, next.Generation = rotatedCAKey(t, ca.Alg), "next", ca.Generation+2
+				cas = append(cas, drained, active, next)
+			}
+			b.CAs = cas
+		})
+		var hostCAs []trust.CAEntry
+		userCA := ""
+		for _, ca := range e.bundle.CAs {
+			switch {
+			case ca.Role == trust.RoleHost:
+				hostCAs = append(hostCAs, ca)
+			case ca.Role == trust.RoleUser && ca.State == "active":
+				userCA = ca.Key
+			}
+		}
+		if len(hostCAs) != 3 || hostCAs[0].State != "draining" || userCA == "" {
+			t.Fatalf("the rotated bundle's host CAs %+v, user CA %q", hostCAs, userCA)
+		}
+		names := []string{"web1", "web1.lab.example"}
+		sshDir := plantHostTrust(t, e, 2, hostCAs, names)
+		before := hostTrustSnapshot(t, sshDir)
+		drainedLine := fmt.Sprintf("@cert-authority %s %s keyroster host CA generation %d\n", strings.Join(names, ","), hostCAs[0].Key, hostCAs[0].Generation)
+		if strings.Count(before[hostTrustKnownHosts], drainedLine) != 1 {
+			t.Fatalf("the planted known_hosts does not hold the drained line once:\n%s", before[hostTrustKnownHosts])
+		}
+
+		code, out, errOut := run(t, "host", "ca-key")
+		if want := userCA + " keyroster user CA (bundle v3)\n"; code != 0 || out != want {
+			t.Fatalf("host ca-key: exit %d, stdout %q, stderr:\n%s\nwant exit 0 and stdout %q", code, out, errOut, want)
+		}
+		wantNote := fmt.Sprintf("Host trust narrowed: removed 1 CA line(s) of host CAs the trust bundle no longer trusts from %s.\n", filepath.Join(sshDir, hostTrustKnownHosts))
+		if strings.Count(errOut, wantNote) != 1 || strings.Count(errOut, "Host trust narrowed") != 1 {
+			t.Fatalf("host ca-key stderr:\n%s\nwant the narrowing line once: %q", errOut, wantNote)
+		}
+		after := hostTrustSnapshot(t, sshDir)
+		if want := strings.Replace(before[hostTrustKnownHosts], drainedLine, "", 1); after[hostTrustKnownHosts] != want {
+			t.Fatalf("known_hosts after host ca-key:\n%s\nwant the planted file minus the drained line:\n%s", after[hostTrustKnownHosts], want)
+		}
+		for _, n := range []string{hostTrustStateFile, hostTrustKRLFile, hostTrustSSHConfig} {
+			if after[n] != before[n] {
+				t.Fatalf("%s changed:\n%s\nwas:\n%s", n, after[n], before[n])
+			}
+		}
+	})
 }
 
 // TestRolePeerText (T-02-93): a hostile server's error text on the
