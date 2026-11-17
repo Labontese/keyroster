@@ -328,7 +328,7 @@ func runHostCAKey(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
-	b, _, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
+	b, _, err := verifiedTrust(ctx, client, cfg, stderr)
 	if err != nil {
 		return err
 	}
