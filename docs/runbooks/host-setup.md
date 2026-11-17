@@ -1407,12 +1407,18 @@ not older than its last apply. A host that holds a next line back is not
 counted although its bundle version matches. The count is made only
 against the bundle the server serves as current; otherwise the line
 reads `user CA keys not counted: ...` and says why. A host whose last
-drift check found drift or failed, that is stuck, that has not run a
-check yet, or whose last check is older than its last apply is not
-counted until its next clean check (at most the check period; running
-`keyroster-agent check` as root on the host runs one), and a note names
-the reason. A host with 255 or more principals files cannot be confirmed
-from its status, which lists only its first 256 files
+drift check found drift or failed, that has not run a check yet, or
+whose last check is older than its last apply is not counted until the
+agent's own next clean check reaches the server (the agent checks after
+every apply and every 15 min, with a random 60 s either way), and a note
+names the reason. A check that ends after an apply committed a newer
+generation is not reported as the host's last check: the host waits for
+a check of the new generation. Running `keyroster-agent check` as root
+on the host shows the host's own report, but it writes no status and so
+does not change the count. A stuck host is not counted until root has
+recovered it ([Manual recovery](#manual-recovery)) and the agent's next
+clean check has run. A host with 255 or more principals files cannot be
+confirmed from its status, which lists only its first 256 files
 (`files_truncated`); check it by running `keyroster-agent check` as root
 on the host. M counts every row, so a removed host that is still served
 keeps M above X until `keyroster host forget`. Hosts that keyroster-agent
