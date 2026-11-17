@@ -221,7 +221,14 @@ func userCAKeysLive(a *serverclient.HostsStatusAnswer, b *trust.Bundle, now time
 			continue
 		}
 		if reason := liveReportReason(st); reason != "" {
-			notes = append(notes, fmt.Sprintf("%s: user CA keys not confirmed: %s; run keyroster-agent check as root on the host", r.Name, reason))
+			// keyroster-agent check writes no status, so only the agent's
+			// own next check moves the count; a stuck host stays stuck, and
+			// applies nothing, until root runs the manual recovery.
+			remedy := "it is counted after the agent's next clean check; keyroster-agent check as root on the host shows its own report but does not change the count"
+			if st.Stuck != "" {
+				remedy = fmt.Sprintf("it is counted after root runs `%s` on the host (docs/runbooks/host-setup.md \"Manual recovery\") and the agent's next clean check", recoveryCommand)
+			}
+			notes = append(notes, fmt.Sprintf("%s: user CA keys not confirmed: %s; %s", r.Name, reason, remedy))
 			continue
 		}
 		n++
