@@ -174,3 +174,48 @@ func TestKnownHostsUnix(t *testing.T) {
 		}
 	})
 }
+
+// TestNarrowHostTrustUnix (03-12d, NP-15, NP-17, T-03-444): the narrowing
+// never reads through a symlink at the managed name and never trusts a
+// symlinked state.
+func TestNarrowHostTrustUnix(t *testing.T) {
+	t.Run("skipped_for_a_symlink_at_the_name", func(t *testing.T) {
+		f := newNHFix(t)
+		target := filepath.Join(t.TempDir(), "elsewhere")
+		writeTestFile(t, target, []byte(f.kh))
+		if err := os.Remove(f.khPath()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, f.khPath()); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := htNarrow(t, f.bundle, f.now), f.warn("it is not a regular file"); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		if fi, err := os.Lstat(f.khPath()); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link at the name was replaced: %v", err)
+		}
+		if got := string(readTestFile(t, target)); got != f.kh {
+			t.Fatalf("the link's target changed:\n%s", got)
+		}
+	})
+	t.Run("skipped_for_a_symlinked_state", func(t *testing.T) {
+		f := newNHFix(t)
+		stateTarget := filepath.Join(t.TempDir(), "host-trust.json")
+		writeTestFile(t, stateTarget, []byte(f.file(t, hostTrustStateFile)))
+		if err := os.Remove(f.statePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(stateTarget, f.statePath); err != nil {
+			t.Fatal(err)
+		}
+		got := htNarrow(t, f.bundle, f.now)
+		prefix := strings.TrimSuffix(f.warn("the host trust state is damaged ("), ".\n")
+		if !strings.HasPrefix(got, prefix) || strings.Count(got, "\n") != 1 {
+			t.Fatalf("stderr %q, want one line starting %q", got, prefix)
+		}
+		if kh := f.file(t, hostTrustKnownHosts); kh != f.kh {
+			t.Fatalf("the file changed:\n%s", kh)
+		}
+	})
+}

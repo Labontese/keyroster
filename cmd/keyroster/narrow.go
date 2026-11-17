@@ -37,6 +37,22 @@ import (
 // init and host status. Tests replace it.
 var trustClock = time.Now
 
+// maxNarrowFile bounds the managed known_hosts file the narrowing reads
+// (03-12d): five times the names bound of the state. Tests lower it.
+var maxNarrowFile = int64(5 * maxHostTrustNames)
+
+// narrowReplace is the narrowing's one write (03-12d); tests replace it
+// with one that fails.
+var narrowReplace = replaceManagedFile
+
+// narrowHook, when set (tests only), runs between the narrowing's read of
+// the file and its write, as hostTrustMergeHook does for the writer.
+var narrowHook func()
+
+// errNoHomeDir is the error, wrapped, of a ~/.ssh that cannot be resolved
+// because there is no home directory (03-12d).
+var errNoHomeDir = errors.New("no home directory")
+
 // verifiedTrust is the one caller of serverclient.Trust of the CLI
 // (03-12d, NP-05, NP-06): it calls Trust and, when Trust verified a
 // bundle, narrows the managed known_hosts with it on the client's clock.

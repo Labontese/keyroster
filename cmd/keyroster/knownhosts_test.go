@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,7 +34,7 @@ import (
 // temporary directory with useSSHDir.
 func TestMain(m *testing.M) {
 	userSSHDir = func() (string, error) {
-		return "", errors.New("no ~/.ssh in this test (useSSHDir installs one)")
+		return "", fmt.Errorf("%w: no ~/.ssh in this test (useSSHDir installs one)", errNoHomeDir)
 	}
 	os.Exit(m.Run())
 }
@@ -489,6 +490,30 @@ func TestKnownHosts(t *testing.T) {
 			if _, ok := got[drainingKey]; ok != c.withDraining || len(got) != map[bool]int{true: 3, false: 2}[c.withDraining] {
 				t.Fatalf("at %s (end %s): %d CA lines, draining line present %v; want it present %v:\n%s", c.at, end, len(got), ok, c.withDraining, f.file(t, hostTrustKnownHosts))
 			}
+		}
+	})
+	t.Run("narrowing_skipped_for_older_served_bundle", func(t *testing.T) {
+		// 03-12d (NP-11, M151, T-03-445): a bundle older than the state's
+		// floor does not name later keys, so it narrows nothing.
+		f := newNHFix(t)
+		before := f.files(t)
+		want := f.warn("the server serves trust bundle version 3, older than version 4, which this client verified before")
+		if got := htNarrow(t, f.at(3), f.now); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("narrowing_never_adds", func(t *testing.T) {
+		// 03-12d (M238, T-03-444): the bundle trusts g2 and g3, the file
+		// holds g1 and g2; the narrowing leaves g2 alone and adds no g3.
+		f := newNHFix(t)
+		before := f.files(t)
+		if got := htNarrow(t, f.bundle, f.now); got != f.narrowed(1) {
+			t.Fatalf("stderr %q, want %q", got, f.narrowed(1))
+		}
+		f.requireFiles(t, f.narrowedFiles(before))
+		if kh := f.file(t, hostTrustKnownHosts); strings.Contains(kh, f.g3) || strings.Count(kh, "@cert-authority ") != 1 {
+			t.Fatalf("known_hosts after the narrowing:\n%s\nwant the g2 line only", kh)
 		}
 	})
 	t.Run("ca_line_format_exact", func(t *testing.T) {
@@ -1999,5 +2024,393 @@ func FuzzNarrowKnownHosts(f *testing.F) {
 		if err := nkSound(out, trusted); err != nil {
 			t.Fatal(err)
 		}
+	})
+}
+
+// nhFix is the narrowing's fixture (03-12d): an htFix whose bundle is
+// version 5, with host g1 draining and ended at now, g2 active and g3
+// next, the fixture's installation and ops key; a planted state of bundle
+// version 4 of the same installation and ops key; a keyroster_known_hosts
+// holding the g1 and g2 lines of an earlier refresh; and sentinel bytes
+// for the KRL and the ssh config.
+type nhFix struct {
+	*htFix
+	now        time.Time
+	g1, g2, g3 string
+	kh         string // the planted keyroster_known_hosts
+	g1Line     string
+}
+
+func newNHFix(t *testing.T) *nhFix {
+	t.Helper()
+	f := &nhFix{htFix: newHTFix(t, 1, 1), now: time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)}
+	f.g1 = trust.FormatKey(f.hostCA.PublicKey())
+	f.g2, f.g3 = trust.FormatKey(htSigner(t).PublicKey()), trust.FormatKey(htSigner(t).PublicKey())
+	f.bundle.Version, f.bundle.Prev = 5, strings.Repeat("ab", 32)
+	f.bundle.CAs = []trust.CAEntry{
+		f.bundle.CAs[0],
+		{Role: trust.RoleHost, Key: f.g1, State: "draining", Generation: 1, TrustedUntil: f.now.Add(-time.Hour).Format(trust.TimeFormat)},
+		{Role: trust.RoleHost, Key: f.g2, State: "active", Generation: 2},
+		{Role: trust.RoleHost, Key: f.g3, State: "next", Generation: 3},
+	}
+	st := f.plantState(t, 4, f.install, trust.FormatKey(f.ops.PublicKey()))
+	if err := os.MkdirAll(f.sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.kh = string(knownHostsFile(f.bundle.CAs[1:3], []string{"web1"}, st))
+	f.g1Line = "@cert-authority web1 " + f.g1 + " keyroster host CA generation 1\n"
+	if strings.Count(f.kh, f.g1Line) != 1 {
+		t.Fatalf("the planted file does not hold the g1 line once:\n%s", f.kh)
+	}
+	writeTestFile(t, filepath.Join(f.sshDir, hostTrustKnownHosts), []byte(f.kh))
+	writeTestFile(t, filepath.Join(f.sshDir, hostTrustKRLFile), []byte("sentinel KRL bytes\n"))
+	writeTestFile(t, filepath.Join(f.sshDir, hostTrustSSHConfig), []byte("# sentinel ssh config\n"))
+	return f
+}
+
+// plantState writes a state of the given bundle version, installation
+// and ops key over the name web1, and returns it.
+func (f *nhFix) plantState(t *testing.T, version uint64, installation, ops string) *hostTrustState {
+	t.Helper()
+	st := &hostTrustState{Format: 1, InstallationID: installation, BundleVersion: version, OpsKey: ops, Names: []string{"web1"}}
+	data, err := st.encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStateFile(f.statePath, data); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// at returns a copy of f's bundle at version v.
+func (f *nhFix) at(v uint64) *trust.Bundle {
+	b := *f.bundle
+	b.Version = v
+	return &b
+}
+
+// khPath is the managed known_hosts file's path.
+func (f *nhFix) khPath() string { return filepath.Join(f.sshDir, hostTrustKnownHosts) }
+
+// warn is the narrowing's warning line for reason.
+func (f *nhFix) warn(reason string) string {
+	return fmt.Sprintf("Warning: host CA lines not narrowed in %s: %s.\n", f.khPath(), reason)
+}
+
+// narrowed is the narrowing's line for n removed lines.
+func (f *nhFix) narrowed(n int) string {
+	return fmt.Sprintf("Host trust narrowed: removed %d CA line(s) of host CAs the trust bundle no longer trusts from %s.\n", n, f.khPath())
+}
+
+// htNarrow runs narrowHostTrust for b at now and returns its stderr.
+func htNarrow(t *testing.T, b *trust.Bundle, now time.Time) string {
+	t.Helper()
+	var stderr strings.Builder
+	narrowHostTrust(b, now, &stderr)
+	return stderr.String()
+}
+
+// requireFiles fails unless the four files hold want's bytes.
+func (f *nhFix) requireFiles(t *testing.T, want map[string]string) {
+	t.Helper()
+	got := f.files(t)
+	for n, w := range want {
+		if got[n] != w {
+			t.Fatalf("%s:\n%s\nwant:\n%s", n, got[n], w)
+		}
+	}
+}
+
+// narrowedFiles is before with the g1 line gone from the known_hosts.
+func (f *nhFix) narrowedFiles(before map[string]string) map[string]string {
+	want := map[string]string{}
+	for n, v := range before {
+		want[n] = v
+	}
+	want[hostTrustKnownHosts] = strings.Replace(before[hostTrustKnownHosts], f.g1Line, "", 1)
+	return want
+}
+
+// TestNarrowHostTrust (03-12d, NP-11 to NP-22, NP-26, NP-27, T-03-444 to
+// T-03-446): every guard of the narrowing. A refusal narrows nothing and
+// prints one warning line with its reason; a command with nothing to
+// narrow stays silent.
+func TestNarrowHostTrust(t *testing.T) {
+	t.Run("narrows_with_a_newer_bundle_and_moves_no_floor", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		if got := htNarrow(t, f.bundle, f.now); got != f.narrowed(1) {
+			t.Fatalf("stderr %q, want %q", got, f.narrowed(1))
+		}
+		f.requireFiles(t, f.narrowedFiles(before))
+	})
+	t.Run("narrows_with_the_equal_version_and_the_same_ops_key", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		if got := htNarrow(t, f.at(4), f.now); got != f.narrowed(1) {
+			t.Fatalf("stderr %q, want %q", got, f.narrowed(1))
+		}
+		f.requireFiles(t, f.narrowedFiles(before))
+	})
+	t.Run("skipped_for_the_equal_version_with_another_ops_key", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		b := f.at(4)
+		b.OpsKey.Key = trust.FormatKey(htSigner(t).PublicKey())
+		want := f.warn("trust bundle version 4 names another ops key than the version this client verified before")
+		if got := htNarrow(t, b, f.now); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("skipped_for_another_installation", func(t *testing.T) {
+		f := newNHFix(t)
+		other := htInstall(t)
+		f.plantState(t, 4, other, trust.FormatKey(f.ops.PublicKey()))
+		before := f.files(t)
+		want := f.warn(fmt.Sprintf("the host trust state belongs to installation %s, not to %s", other, f.install))
+		if got := htNarrow(t, f.bundle, f.now); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("skipped_without_a_state", func(t *testing.T) {
+		f := newNHFix(t)
+		if err := os.Remove(f.statePath); err != nil {
+			t.Fatal(err)
+		}
+		before := f.files(t)
+		if got, want := htNarrow(t, f.bundle, f.now), f.warn("the host trust state is missing"); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("skipped_for_a_damaged_state", func(t *testing.T) {
+		f := newNHFix(t)
+		writeTestFile(t, f.statePath, []byte("not a state\n"))
+		before := f.files(t)
+		got := htNarrow(t, f.bundle, f.now)
+		prefix := strings.TrimSuffix(f.warn("the host trust state is damaged ("), ".\n")
+		if !strings.HasPrefix(got, prefix) || !strings.HasSuffix(got, ").\n") || strings.Count(got, "\n") != 1 {
+			t.Fatalf("stderr %q, want one line starting %q", got, prefix)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("skipped_for_a_directory_at_the_name", func(t *testing.T) {
+		f := newNHFix(t)
+		if err := os.Remove(f.khPath()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(f.khPath(), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := htNarrow(t, f.bundle, f.now), f.warn("it is not a regular file"); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		if fi, err := os.Lstat(f.khPath()); err != nil || !fi.IsDir() {
+			t.Fatalf("the directory at the name is gone: %v", err)
+		}
+	})
+	t.Run("skipped_for_an_oversize_file", func(t *testing.T) {
+		f := newNHFix(t)
+		prev := maxNarrowFile
+		maxNarrowFile = 1024
+		t.Cleanup(func() { maxNarrowFile = prev })
+		big := f.kh + "# " + strings.Repeat("x", 2048-len(f.kh)-3) + "\n"
+		if len(big) != 2048 {
+			t.Fatalf("the padded file has %d bytes", len(big))
+		}
+		writeTestFile(t, f.khPath(), []byte(big))
+		before := f.files(t)
+		if got, want := htNarrow(t, f.bundle, f.now), f.warn("it is larger than 1024 bytes"); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("stops_when_the_file_changed_meanwhile", func(t *testing.T) {
+		f := newNHFix(t)
+		fourth := "@cert-authority web1 " + trust.FormatKey(htSigner(t).PublicKey()) + " keyroster host CA generation 4\n"
+		prev := narrowHook
+		narrowHook = func() {
+			fh, err := os.OpenFile(f.khPath(), os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_, err = fh.WriteString(fourth)
+			if cerr := fh.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
+				t.Error(err)
+			}
+		}
+		t.Cleanup(func() { narrowHook = prev })
+		want := f.files(t)
+		want[hostTrustKnownHosts] = f.kh + fourth
+		if got, w := htNarrow(t, f.bundle, f.now), f.warn("the file changed while it was read"); got != w {
+			t.Fatalf("stderr %q, want %q", got, w)
+		}
+		f.requireFiles(t, want)
+	})
+	t.Run("stops_when_a_newer_state_appears_meanwhile", func(t *testing.T) {
+		f := newNHFix(t)
+		var st *hostTrustState
+		prev := narrowHook
+		narrowHook = func() { st = f.plantState(t, 9, f.install, trust.FormatKey(f.ops.PublicKey())) }
+		t.Cleanup(func() { narrowHook = prev })
+		if got, w := htNarrow(t, f.bundle, f.now), f.warn("another run recorded a newer host trust state meanwhile"); got != w {
+			t.Fatalf("stderr %q, want %q", got, w)
+		}
+		if st == nil || f.file(t, hostTrustKnownHosts) != f.kh {
+			t.Fatalf("the hook did not run, or the file changed:\n%s", f.file(t, hostTrustKnownHosts))
+		}
+	})
+	t.Run("stops_when_a_newer_directory_state_appears_meanwhile", func(t *testing.T) {
+		f := newNHFix(t)
+		ran := false
+		prev := narrowHook
+		narrowHook = func() {
+			st := &hostTrustState{Format: 1, InstallationID: f.install, BundleVersion: 4, OpsKey: trust.FormatKey(f.ops.PublicKey()),
+				DirectoryVersion: 7, DirectorySHA256: strings.Repeat("cd", 32), Names: []string{"web1"}}
+			data, err := st.encode()
+			if err == nil {
+				err = writeStateFile(f.statePath, data)
+			}
+			if err != nil {
+				t.Error(err)
+			}
+			ran = true
+		}
+		t.Cleanup(func() { narrowHook = prev })
+		if got, w := htNarrow(t, f.bundle, f.now), f.warn("another run recorded a newer host trust state meanwhile"); got != w {
+			t.Fatalf("stderr %q, want %q", got, w)
+		}
+		if !ran || f.file(t, hostTrustKnownHosts) != f.kh {
+			t.Fatalf("the hook did not run, or the file changed:\n%s", f.file(t, hostTrustKnownHosts))
+		}
+	})
+	t.Run("unparsable_trusted_key_narrows_nothing", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		typ, b64, _ := strings.Cut(f.g2, " ")
+		f.bundle.CAs[2].Key = strings.ToUpper(typ) + " " + b64
+		if got, w := htNarrow(t, f.bundle, f.now), f.warn("a trusted CA key of the bundle does not parse"); got != w {
+			t.Fatalf("stderr %q, want %q", got, w)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("never_creates_the_file", func(t *testing.T) {
+		f := newNHFix(t)
+		if err := os.Remove(f.khPath()); err != nil {
+			t.Fatal(err)
+		}
+		before := f.files(t)
+		if got := htNarrow(t, f.bundle, f.now); got != "" {
+			t.Fatalf("stderr %q, want none", got)
+		}
+		f.requireFiles(t, before)
+		if _, err := os.Lstat(f.khPath()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the file was created: %v", err)
+		}
+	})
+	t.Run("narrowing_writes_no_other_file", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		names := func() []string {
+			var out []string
+			for _, d := range []string{f.sshDir, filepath.Dir(f.statePath)} {
+				es, err := os.ReadDir(d)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, e := range es {
+					out = append(out, filepath.Join(d, e.Name()))
+				}
+			}
+			return out
+		}
+		listed := names()
+		if got := htNarrow(t, f.bundle, f.now); got != f.narrowed(1) {
+			t.Fatalf("stderr %q, want %q", got, f.narrowed(1))
+		}
+		f.requireFiles(t, f.narrowedFiles(before))
+		if after := names(); !slices.Equal(after, listed) {
+			t.Fatalf("the directories hold %q after the narrowing, %q before", after, listed)
+		}
+	})
+	t.Run("write_failure_warns_and_changes_nothing_else", func(t *testing.T) {
+		f := newNHFix(t)
+		prev := narrowReplace
+		narrowReplace = func(string, string, []byte, fs.FileMode, func() error) error {
+			return errors.New("injected write failure")
+		}
+		t.Cleanup(func() { narrowReplace = prev })
+		before := f.files(t)
+		if got, w := htNarrow(t, f.bundle, f.now), f.warn("writing it failed: injected write failure"); got != w {
+			t.Fatalf("stderr %q, want %q", got, w)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("no_ssh_dir_is_silent", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		prev := userSSHDir
+		userSSHDir = func() (string, error) { return "", fmt.Errorf("%w: no $HOME", errNoHomeDir) }
+		t.Cleanup(func() { userSSHDir = prev })
+		if got := htNarrow(t, f.bundle, f.now); got != "" {
+			t.Fatalf("stderr %q, want none", got)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("home_mismatch_warns", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		mismatch := errors.New("$HOME (/home/other) is not your account home (/home/user), which ssh reads")
+		prev := userSSHDir
+		userSSHDir = func() (string, error) { return "", mismatch }
+		t.Cleanup(func() { userSSHDir = prev })
+		want := "Warning: host CA lines not narrowed in ~/.ssh/keyroster_known_hosts: " + mismatch.Error() + ".\n"
+		if got := htNarrow(t, f.bundle, f.now); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("no_warning_when_nothing_to_narrow", func(t *testing.T) {
+		for _, c := range []struct {
+			name  string
+			state func(f *nhFix)
+		}{
+			{"older_state", func(f *nhFix) { f.plantState(t, 9, f.install, trust.FormatKey(f.ops.PublicKey())) }},
+			{"no_state", func(f *nhFix) {
+				if err := os.Remove(f.statePath); err != nil {
+					t.Fatal(err)
+				}
+			}},
+			{"another_installation", func(f *nhFix) { f.plantState(t, 4, htInstall(t), trust.FormatKey(f.ops.PublicKey())) }},
+		} {
+			f := newNHFix(t)
+			writeTestFile(t, f.khPath(), []byte(strings.Replace(f.kh, f.g1Line, "", 1)))
+			c.state(f)
+			before := f.files(t)
+			if got := htNarrow(t, f.bundle, f.now); got != "" {
+				t.Fatalf("%s: stderr %q, want none", c.name, got)
+			}
+			f.requireFiles(t, before)
+		}
+	})
+	t.Run("home_lookup_warning_uses_its_directory", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		prev := userSSHDir
+		userSSHDir = func() (string, error) {
+			return f.sshDir, &homeLookupWarning{dir: f.sshDir, err: errors.New("no such user")}
+		}
+		t.Cleanup(func() { userSSHDir = prev })
+		if got := htNarrow(t, f.bundle, f.now); got != f.narrowed(1) {
+			t.Fatalf("stderr %q, want only %q", got, f.narrowed(1))
+		}
+		f.requireFiles(t, f.narrowedFiles(before))
 	})
 }
