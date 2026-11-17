@@ -202,6 +202,16 @@ func activeUserCA(b *trust.Bundle) (ssh.PublicKey, error) {
 	return nil, errors.New("the root-signed trust bundle has no active user CA")
 }
 
+// issuingUserCAs returns the user CA keys a login certificate may be
+// signed by (03-12d). Not implemented yet: the active key alone.
+func issuingUserCAs(b *trust.Bundle) ([]ssh.PublicKey, error) {
+	ca, err := activeUserCA(b)
+	if err != nil {
+		return nil, err
+	}
+	return []ssh.PublicKey{ca}, nil
+}
+
 // loginRun is one keyroster login.
 type loginRun struct {
 	client *serverclient.Client

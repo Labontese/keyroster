@@ -516,6 +516,30 @@ func TestMachineRenewNeverWritesKey(t *testing.T) {
 	check("the request bytes", in.Request)
 }
 
+// rotatedMachineCAs is an edit for serveRotated (03-12d): the machine
+// role's active entry gets state (a draining one ends at end) and a new
+// active entry for active's key follows it.
+func rotatedMachineCAs(state string, end time.Time, active ssh.Signer) func(b *trust.Bundle) {
+	return func(b *trust.Bundle) {
+		var cas []trust.CAEntry
+		for _, ca := range b.CAs {
+			if ca.Role != trust.RoleMachine || ca.State != "active" {
+				cas = append(cas, ca)
+				continue
+			}
+			old := ca
+			old.State = state
+			if state == "draining" {
+				old.TrustedUntil = end.UTC().Truncate(time.Second).Format(trust.TimeFormat)
+			}
+			next := ca
+			next.Key, next.Alg, next.Generation = trust.FormatKey(active.PublicKey()), active.PublicKey().Type(), ca.Generation+1
+			cas = append(cas, old, next)
+		}
+		b.CAs = cas
+	}
+}
+
 // TestMachineRenewChecksAnswer pins the answer check of machine renew
 // (03-11b): each broken certificate is refused, nothing is written, and
 // the text says the certificate was issued and counts toward the rate.
@@ -537,6 +561,16 @@ func TestMachineRenewChecksAnswer(t *testing.T) {
 					Custody: last.Custody, State: "retired", Generation: last.Generation + 1})
 			})
 			return renewOpts{ca: old}
+		}, "it is not signed by an active or next machine CA key of your root-signed trust bundle"},
+		{"answer_by_draining_refused", func(t *testing.T, e *dirEnv) renewOpts {
+			// 03-12d (M254): machine g1 draining until an hour after the
+			// fixed clock, g2 active, served as version 2 (Validate refuses
+			// a draining entry in a version 1 bundle). The answer signed by
+			// g1 is inside g1's window, so only the issuing rule refuses it.
+			fixed := time.Now().Truncate(time.Second)
+			useRenewClock(t, fixed)
+			e.serveRotated(t, 2, rotatedMachineCAs("draining", fixed.Add(time.Hour), newCASigner(t, ssh.KeyAlgoECDSA256)))
+			return renewOpts{ca: machineCASigner(t, e)}
 		}, "it is not signed by an active or next machine CA key of your root-signed trust bundle"},
 		{"bad_signature", func(t *testing.T, e *dirEnv) renewOpts {
 			return renewOpts{ca: otherEd(t), claimCA: machineCASigner(t, e)}
@@ -701,6 +735,34 @@ func TestMachineRenewIfDue(t *testing.T) {
 		due := time.Unix(int64(machineCertDue(c)), 0).UTC().Format(time.RFC3339) //nolint:gosec // G115: a test time
 		if code != 0 || !strings.HasPrefix(out, "not due: ") || !strings.Contains(out, "renews from "+due+"; nothing was sent") || sent != 0 {
 			t.Fatalf("exit %d, %d sent: %s", code, sent, out)
+		}
+	})
+	// rotatedIfDue serves version 2 with the machine CA g1 in state (a
+	// draining one ends at end) and a new active g2 that signs the fresh
+	// answer, and runs --if-due with a cached certificate by g1 issued at
+	// now for 24 h, on the fixed clock now (03-12d, M153).
+	rotatedIfDue := func(t *testing.T, state string, end time.Time) (int, string, int) {
+		t.Helper()
+		useRenewClock(t, now)
+		e, path, pub := keyed(t)
+		g1, g2 := machineCASigner(t, e), newCASigner(t, ssh.KeyAlgoECDSA256)
+		e.serveRotated(t, 2, rotatedMachineCAs(state, end, g2))
+		renewAnswer(t, e, renewOpts{ca: g2})
+		return ifDue(t, e, buildMachineCert(t, g1, pub, "ci", now, 24*time.Hour, rand.Reader), "--key", path)
+	}
+	t.Run("if_due_draining_cached_kept", func(t *testing.T) {
+		if code, out, sent := rotatedIfDue(t, "draining", now.Add(2*time.Hour)); code != 0 || !strings.HasPrefix(out, "not due: ") || sent != 0 {
+			t.Fatalf("a cached certificate of a draining machine CA, not due: exit %d, %d sent: %s; want it kept", code, sent, out)
+		}
+	})
+	t.Run("if_due_drained_cached_renewed", func(t *testing.T) {
+		if code, out, sent := rotatedIfDue(t, "draining", now.Add(-time.Hour)); code != 0 || strings.Contains(out, "not due") || sent != 1 {
+			t.Fatalf("a cached certificate of a drained machine CA: exit %d, %d sent: %s; want one renewal", code, sent, out)
+		}
+	})
+	t.Run("if_due_retired_cached_renewed", func(t *testing.T) {
+		if code, out, sent := rotatedIfDue(t, "retired", time.Time{}); code != 0 || strings.Contains(out, "not due") || sent != 1 {
+			t.Fatalf("a cached certificate of a retired machine CA: exit %d, %d sent: %s; want one renewal", code, sent, out)
 		}
 	})
 	t.Run("due_at_threshold", func(t *testing.T) {

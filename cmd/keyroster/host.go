@@ -307,6 +307,12 @@ func runHostPrincipals(ctx context.Context, args []string, stdout, stderr io.Wri
 	return err
 }
 
+// caStateText is the state of ca as the CLI shows it at now (03-12d). Not
+// implemented yet: the bundle's state.
+func caStateText(ca trust.CAEntry, _ time.Time) string {
+	return ca.State
+}
+
 // runHostCAKey is keyroster host ca-key: the active user CA key of the
 // trust bundle the server serves, verified against the saved root pins
 // (Trust), as an authorized_keys line for TrustedUserCAKeys. It needs the
