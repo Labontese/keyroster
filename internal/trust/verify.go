@@ -397,7 +397,7 @@ func checkSuccessorChain(prev *Bundle, prevCanonical, prevPolicy []byte, next *B
 	if err := checkCarriedCustody(prev, next); err != nil {
 		return nil, err
 	}
-	if err := checkCATransitions(prev, next); err != nil {
+	if err := checkCATransitions(prev, next, pp, p); err != nil {
 		return nil, err
 	}
 	// A root that next retires may still exist, so it must not become an

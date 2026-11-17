@@ -133,9 +133,10 @@ func UserCAKeysFileExcept(b *Bundle, t time.Time, skip func(CAEntry) bool) ([]by
 // checkSuccessorChain runs it for the signer, every agent, audit, root
 // sign --prev and trust verify --prev; the client commands that only
 // verify a served bundle against the pins run no chain rule. 03-12e adds
-// the switch here, and the policy parameters when its rule needs them.
-// Both bundles must already be structurally valid.
-func checkCATransitions(prev, next *Bundle) error {
+// the switch here; prevPol and nextPol are the previous and the new
+// policy, which its rule reads. Both bundles must already be structurally
+// valid.
+func checkCATransitions(prev, next *Bundle, prevPol, nextPol *Policy) error {
 	prevKeys := map[string]bool{}
 	addKey := func(where, key string) error {
 		pub, err := ParseKey(key)
@@ -163,7 +164,7 @@ func checkCATransitions(prev, next *Bundle) error {
 	}
 	added := map[string]bool{}
 	for _, role := range caRoles {
-		if err := checkRoleTransition(role, prev, next, prevKeys, added); err != nil {
+		if err := checkRoleTransition(role, prev, next, prevPol, nextPol, prevKeys, added); err != nil {
 			return err
 		}
 	}
@@ -172,7 +173,7 @@ func checkCATransitions(prev, next *Bundle) error {
 
 // checkRoleTransition applies checkCATransitions's rule to one role. added
 // collects the keys this successor adds, across roles.
-func checkRoleTransition(role string, prev, next *Bundle, prevKeys, added map[string]bool) error {
+func checkRoleTransition(role string, prev, next *Bundle, _, _ *Policy, prevKeys, added map[string]bool) error {
 	refuse := func(gen uint32, reason string) error {
 		return fmt.Errorf("%w: CA %s generation %d: %s", ErrVersionChain, role, gen, reason)
 	}

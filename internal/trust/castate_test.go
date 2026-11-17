@@ -216,7 +216,7 @@ func TestCATransitions(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			prev, next := caPair(t, c.prev, c.next, c.edit)
-			err := checkCATransitions(prev, next)
+			err := checkCATransitions(prev, next, goldenPolicy(t), goldenPolicy(t))
 			if c.reason == "" {
 				if err != nil {
 					t.Fatalf("checkCATransitions: %v, want nil", err)
@@ -233,7 +233,7 @@ func TestCATransitions(t *testing.T) {
 		prev, next := caPair(t,
 			[]CAEntry{u1, caAt(t, RoleUser, seedCANext, "retired", 2)},
 			[]CAEntry{u1, caAt(t, RoleUser, seedCANext, "retired", 2), caAt(t, RoleUser, seedCANext2, "next", 2)}, nil)
-		mustChainRefusal(t, checkCATransitions(prev, next), RoleUser, 2, reasonNotAbove)
+		mustChainRefusal(t, checkCATransitions(prev, next, goldenPolicy(t), goldenPolicy(t)), RoleUser, 2, reasonNotAbove)
 		// Below it, in the order Validate requires.
 		prev, next = caPair(t,
 			[]CAEntry{u1, caAt(t, RoleUser, seedCANext, "retired", 3)},
@@ -241,7 +241,7 @@ func TestCATransitions(t *testing.T) {
 		if err := next.Validate(); err != nil {
 			t.Fatalf("the successor does not validate: %v", err)
 		}
-		mustChainRefusal(t, checkCATransitions(prev, next), RoleUser, 2, reasonNotAbove)
+		mustChainRefusal(t, checkCATransitions(prev, next, goldenPolicy(t), goldenPolicy(t)), RoleUser, 2, reasonNotAbove)
 	})
 	t.Run("installation_id_new_with_next_ok", func(t *testing.T) {
 		// The previous bundle has no installation ID; the successor adds

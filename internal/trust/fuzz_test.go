@@ -251,7 +251,7 @@ func FuzzCATransitions(f *testing.F) {
 		}
 		next := *prev
 		next.CAs = slices.Concat(nextLists[0], nextLists[1], nextLists[2])
-		err := checkCATransitions(prev, &next)
+		err := checkCATransitions(prev, &next, goldenPolicy(t), goldenPolicy(t))
 		want := caFuzzModel(prevLists, nextLists, pool, held)
 		if (err == nil) != want {
 			t.Fatalf("checkCATransitions = %v, the model accepts %t\nprev %+v\nnext %+v", err, want, prev.CAs, next.CAs)
