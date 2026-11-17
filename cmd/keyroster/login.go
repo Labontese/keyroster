@@ -184,32 +184,43 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
-	ca, err := activeUserCA(bundle)
+	cas, err := issuingUserCAs(bundle)
 	if err != nil {
 		return err
 	}
-	l := &loginRun{client: client, cfg: cfg, bundle: bundle, policy: policy, cas: []ssh.PublicKey{ca}, stdout: stdout, stderr: stderr, hostTrust: !*noKnownHosts}
+	l := &loginRun{client: client, cfg: cfg, bundle: bundle, policy: policy, cas: cas, stdout: stdout, stderr: stderr, hostTrust: !*noKnownHosts}
 	return l.run(ctx, roles, *ttl, *noBrowser)
 }
 
-// activeUserCA returns the active user CA key of the root-verified bundle.
-func activeUserCA(b *trust.Bundle) (ssh.PublicKey, error) {
-	for _, c := range b.CAs {
-		if c.Role == trust.RoleUser && c.State == "active" {
-			return trust.ParseKey(c.Key)
+// issuingUserCAs returns the user CA keys a login certificate may be
+// signed by, in generation order (03-12d, T-03-422): the root-verified
+// bundle's issuing set, its active and next user CA (trust.IssuingCAs).
+// The next key is there for a login whose bundle predates a switch, which
+// the signer answers with the new key; a draining or retired key is never
+// in it, since no fresh login is signed by one.
+func issuingUserCAs(b *trust.Bundle) ([]ssh.PublicKey, error) {
+	var keys []ssh.PublicKey
+	for _, ca := range trust.IssuingCAs(b, trust.RoleUser) {
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			return nil, err
 		}
+		keys = append(keys, pub)
 	}
-	return nil, errors.New("the root-signed trust bundle has no active user CA")
+	if len(keys) == 0 {
+		return nil, errors.New("the root-signed trust bundle has no active user CA")
+	}
+	return keys, nil
 }
 
-// issuingUserCAs returns the user CA keys a login certificate may be
-// signed by (03-12d). Not implemented yet: the active key alone.
-func issuingUserCAs(b *trust.Bundle) ([]ssh.PublicKey, error) {
-	ca, err := activeUserCA(b)
-	if err != nil {
-		return nil, err
+// inKeySet reports whether k is one of keys.
+func inKeySet(k ssh.PublicKey, keys []ssh.PublicKey) bool {
+	for _, c := range keys {
+		if bytes.Equal(k.Marshal(), c.Marshal()) {
+			return true
+		}
 	}
-	return []ssh.PublicKey{ca}, nil
+	return false
 }
 
 // loginRun is one keyroster login.
@@ -565,7 +576,7 @@ func checkLoginCert(raw []byte, cas []ssh.PublicKey, key ssh.PublicKey, req *wir
 	if !ok || c.CertType != ssh.UserCert {
 		return nil, errors.New("it is not a user certificate")
 	}
-	if !bytes.Equal(c.SignatureKey.Marshal(), cas[0].Marshal()) {
+	if !inKeySet(c.SignatureKey, cas) {
 		return nil, errors.New("it is not signed by the user CA of your root-signed trust bundle")
 	}
 	// Checked here, before CertChecker refuses them with a vaguer text.
@@ -573,7 +584,7 @@ func checkLoginCert(raw []byte, cas []ssh.PublicKey, key ssh.PublicKey, req *wir
 		return nil, errors.New("it carries critical options, which a login never requests")
 	}
 	checker := ssh.CertChecker{
-		IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), cas[0].Marshal()) },
+		IsUserAuthority: func(auth ssh.PublicKey) bool { return inKeySet(auth, cas) },
 		Clock:           func() time.Time { return serverNow },
 	}
 	principal := ""

@@ -307,16 +307,25 @@ func runHostPrincipals(ctx context.Context, args []string, stdout, stderr io.Wri
 	return err
 }
 
-// caStateText is the state of ca as the CLI shows it at now (03-12d). Not
-// implemented yet: the bundle's state.
-func caStateText(ca trust.CAEntry, _ time.Time) string {
-	return ca.State
+// caStateText is the state of ca as init, host ca-key and host status
+// show it at now (03-12d): active, next and retired as the bundle says; a
+// draining entry is "draining, trusted until <t>" while now is before its
+// trusted_until and "drained (ended <t>)" from then on, the boundary of
+// CAEntry.TrustedAt.
+func caStateText(ca trust.CAEntry, now time.Time) string {
+	if ca.State != "draining" {
+		return ca.State
+	}
+	if ca.TrustedAt(now) {
+		return "draining, trusted until " + ca.TrustedUntil
+	}
+	return "drained (ended " + ca.TrustedUntil + ")"
 }
 
-// runHostCAKey is keyroster host ca-key: the active user CA key of the
-// trust bundle the server serves, verified against the saved root pins
-// (Trust), as an authorized_keys line for TrustedUserCAKeys. It needs the
-// saved config but no admin key.
+// runHostCAKey is keyroster host ca-key: every user CA key the trust
+// bundle the server serves trusts at the client's clock (03-12d), verified
+// against the saved root pins (verifiedTrust), one authorized_keys line
+// each for TrustedUserCAKeys. It needs the saved config but no admin key.
 func runHostCAKey(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("host ca-key", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -338,19 +347,33 @@ func runHostCAKey(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
-	for _, ca := range b.CAs {
-		if ca.Role != trust.RoleUser || ca.State != "active" {
-			continue
-		}
+	if trust.ActiveCA(b, trust.RoleUser).Key == "" {
+		// Bundle validation requires exactly one active key per role.
+		return errors.New("the verified trust bundle has no active user CA key")
+	}
+	now := trustClock()
+	cas := trust.TrustedCAs(b, trust.RoleUser, now)
+	// Every user CA the bundle trusts now (03-12d, OQ-C): a host that
+	// keyroster-agent does not manage needs every line through a rotation.
+	// One active key prints exactly what it always printed; with more, the
+	// generation and state of each go to stderr, never to stdout, which is
+	// the file.
+	if len(cas) != 1 || cas[0].State != "active" {
+		_, _ = fmt.Fprintf(stderr, "keyroster host ca-key: the trust bundle trusts %d user CA keys; a host that keyroster-agent does not manage needs every line of the output.\n", len(cas))
+	}
+	var out strings.Builder
+	for _, ca := range cas {
 		pub, err := trust.ParseKey(ca.Key) // the bundle validated it
 		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(stdout, "%s keyroster user CA (bundle v%d)\n", trust.FormatKey(pub), b.Version)
-		return err
+		if len(cas) != 1 || ca.State != "active" {
+			_, _ = fmt.Fprintf(stderr, "  generation %d %s %s\n", ca.Generation, ssh.FingerprintSHA256(pub), caStateText(ca, now))
+		}
+		_, _ = fmt.Fprintf(&out, "%s keyroster user CA (bundle v%d)\n", trust.FormatKey(pub), b.Version)
 	}
-	// Bundle validation requires exactly one active key per role.
-	return errors.New("the verified trust bundle has no active user CA key")
+	_, err = io.WriteString(stdout, out.String())
+	return err
 }
 
 // errHostPoPNotEnabled refuses host enrollment while the root-signed
