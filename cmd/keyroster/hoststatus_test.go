@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/enroll"
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // hbStatus is a valid status of a host on bundle 1, directory dir, KRL
@@ -150,6 +154,308 @@ func TestHostStatus(t *testing.T) {
 		if code != 0 || !strings.Contains(out, "KRL v100 on 0/0 hosts\n") || !strings.Contains(out, "No approved host has reported yet.") {
 			t.Fatalf("no hosts: exit %d:\n%s", code, out)
 		}
+	})
+	t.Run("unknown_status_field_ignored", func(t *testing.T) {
+		// serverclient decodes leniently (json.Unmarshal), so a CLI older
+		// than its hosts' agents only lacks a column (03-12d).
+		raw, err := json.Marshal(serverclient.HostsStatusAnswer{Current: ans.Current, Hosts: []serverclient.HostStatusRow{
+			statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: hbStatus(5, 100)}),
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(string(raw), `"agent_version":`) != 1 {
+			t.Fatalf("the answer has no single agent_version field:\n%s", raw)
+		}
+		raw = []byte(strings.Replace(string(raw), `"agent_version":`, `"a_field_of_a_newer_agent":{"n":1},"agent_version":`, 1))
+		statusEnv(t, json.RawMessage(raw))
+		code, out, stderr := run(t, "host", "status")
+		if code != 0 || !strings.Contains(out, "bundle v1 on 1/1 hosts\n") || !strings.Contains(out, "web1") {
+			t.Fatalf("a status with an unknown field: exit %d:\n%s%s", code, out, stderr)
+		}
+	})
+	hostStatusLiveCases(t)
+}
+
+// liveFix is a version 3 bundle and the server's current versions that
+// name it, for the live count of TestHostStatus (03-12d, T-03-76).
+type liveFix struct {
+	b   *trust.Bundle
+	cur serverclient.HostVersions
+}
+
+// newLiveFix builds a bundle whose user CA entries are user, followed by
+// one active machine CA.
+func newLiveFix(t *testing.T, user ...trust.CAEntry) *liveFix {
+	t.Helper()
+	cas := append(slices.Clone(user), trust.CAEntry{Role: trust.RoleMachine, Key: trust.FormatKey(htSigner(t).PublicKey()), State: "active", Generation: 1})
+	b := &trust.Bundle{Version: 3, CAs: cas}
+	doc, err := b.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := strings.Repeat("ab", 32)
+	return &liveFix{b: b, cur: serverclient.HostVersions{Bundle: 3, BundleSHA256: trust.SHA256Hex(doc), Directory: 5, DirectorySHA256: h, KRL: 100, KRLSHA256: h}}
+}
+
+// liveUserCA is a user CA entry with a fresh key; a draining one ends at
+// end.
+func liveUserCA(t *testing.T, state string, gen uint32, end time.Time) trust.CAEntry {
+	t.Helper()
+	ca := trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(htSigner(t).PublicKey()), State: state, Generation: gen}
+	if state == "draining" {
+		ca.TrustedUntil = end.UTC().Format(trust.TimeFormat)
+	}
+	return ca
+}
+
+// fileHash is the SHA-256 of the user_ca_keys file of f's bundle at now,
+// without the entries skip names (nil: none).
+func (f *liveFix) fileHash(t *testing.T, now time.Time, skip func(trust.CAEntry) bool) string {
+	t.Helper()
+	data, err := trust.UserCAKeysFileExcept(f.b, now, skip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return trust.SHA256Hex(data)
+}
+
+// row is an active host on f's bundle whose status lists user_ca_keys
+// with sum ("" lists none), changed by edit (nil: unchanged).
+func (f *liveFix) row(name, sum string, edit func(s *heartbeat.Status)) serverclient.HostStatusRow {
+	st := hbStatus(5, 100)
+	st.Bundle = heartbeat.Doc{Version: f.cur.Bundle, SHA256: f.cur.BundleSHA256}
+	if sum != "" {
+		st.Files = append(st.Files, heartbeat.File{Path: "user_ca_keys", SHA256: sum})
+	}
+	if edit != nil {
+		edit(&st)
+	}
+	return statusRow(name, serverclient.HostStateActive, &heartbeat.Heartbeat{Status: st})
+}
+
+// render is host status's text for rows against f's bundle at now.
+func (f *liveFix) render(now time.Time, rows ...serverclient.HostStatusRow) string {
+	return renderHostsStatus(&serverclient.HostsStatusAnswer{Current: f.cur, Hosts: rows}, f.b, now)
+}
+
+// hostStatusLiveCases are TestHostStatus's leaves for 03-12d: the live
+// count of the user CA keys from the hash each host reports (T-03-76,
+// T-03-416, T-03-447), the AGENT and BEHIND columns (T-03-448) and the
+// draining keys.
+func hostStatusLiveCases(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	live := func(n, m int) string { return fmt.Sprintf("user CA keys of bundle v3 live on %d/%d hosts\n", n, m) }
+	// The remedy of the note: a stuck host is recovered by root, the others
+	// wait for the agent's own next check (keyroster-agent check writes no
+	// status, so it never changes the count).
+	notConfirmed := func(host, reason string) string {
+		remedy := "it is counted after the agent's next clean check; keyroster-agent check as root on the host shows its own report but does not change the count"
+		if reason == "it is stuck" {
+			remedy = "it is counted after root runs `sudo keyroster-agent apply --once --recover-to-last-good` on the host (docs/runbooks/host-setup.md \"Manual recovery\") and the agent's next clean check"
+		}
+		return fmt.Sprintf("%s: user CA keys not confirmed: %s; %s\n", host, reason, remedy)
+	}
+	want := func(t *testing.T, out string, wants ...string) {
+		t.Helper()
+		for _, w := range wants {
+			if !strings.Contains(out, w) {
+				t.Errorf("host status lacks %q:\n%s", w, out)
+			}
+		}
+	}
+	active := func(t *testing.T) *liveFix { return newLiveFix(t, liveUserCA(t, "active", 1, time.Time{})) }
+	t.Run("live_count_by_trust_file_hash", func(t *testing.T) {
+		f := active(t)
+		sum := f.fileHash(t, now, nil)
+		out := f.render(now, f.row("web1", sum, nil), f.row("web2", sum, nil), f.row("web3", strings.Repeat("cd", 32), nil))
+		want(t, out, "bundle v3 on 3/3 hosts\n", "KRL v100 on 3/3 hosts\n"+live(2, 3))
+	})
+	t.Run("held_addition_not_live", func(t *testing.T) {
+		// T-03-416: a host on the current bundle that holds the next
+		// line back reports the file without it.
+		f := newLiveFix(t, liveUserCA(t, "active", 1, time.Time{}), liveUserCA(t, "next", 2, time.Time{}))
+		held := f.fileHash(t, now, func(ca trust.CAEntry) bool { return ca.Role == trust.RoleUser && ca.State == "next" })
+		out := f.render(now, f.row("web1", f.fileHash(t, now, nil), nil), f.row("web2", held, nil))
+		want(t, out, "bundle v3 on 2/2 hosts\n", live(1, 2))
+	})
+	t.Run("pending_swap_not_live", func(t *testing.T) {
+		f := active(t)
+		sum := f.fileHash(t, now, nil)
+		out := f.render(now, f.row("web1", sum, nil), f.row("web2", sum, func(s *heartbeat.Status) {
+			s.Pending = &heartbeat.Pending{Step: heartbeat.StepIntermediate, From: 2, To: 4, Intermediate: 3}
+		}))
+		want(t, out, live(1, 2))
+	})
+	t.Run("stale_host_not_live", func(t *testing.T) {
+		f := active(t)
+		sum := f.fileHash(t, now, nil)
+		silent, stale, regressed := f.row("web2", sum, nil), f.row("web3", sum, nil), f.row("web4", sum, nil)
+		silent.Silent, stale.StatusStale, regressed.SeqRegressed = true, true, true
+		want(t, f.render(now, f.row("web1", sum, nil), silent, stale, regressed), live(1, 4))
+	})
+	for _, c := range []struct {
+		name, reason string
+		edit         func(s *heartbeat.Status)
+	}{
+		{"drifted_host_not_live", "its last check reported drift", func(s *heartbeat.Status) { s.LastCheck.Drift = true }},
+		{"check_failed_not_live", "its last check failed", func(s *heartbeat.Status) { s.LastCheck.Error = "sshd -T failed" }},
+		{"stuck_not_live", "it is stuck", func(s *heartbeat.Status) { s.Stuck = heartbeat.StuckPendingStateUnknown }},
+		{"no_check_yet_not_live", "it has not run a drift check yet", func(s *heartbeat.Status) { s.LastCheck = nil }},
+		{"check_older_than_apply_not_live", "its last check is older than its last apply", func(s *heartbeat.Status) { s.LastCheck.At = "2026-10-28T11:59:59Z" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// The host's own report vouches for its file only when its
+			// last check is clean and not older than its last apply.
+			f := active(t)
+			sum := f.fileHash(t, now, nil)
+			out := f.render(now, f.row("web1", sum, nil), f.row("web2", sum, c.edit))
+			want(t, out, live(1, 2), notConfirmed("web2", c.reason))
+			if strings.Contains(out, "web1: user CA keys") {
+				t.Errorf("a clean host got a note:\n%s", out)
+			}
+		})
+	}
+	t.Run("no_ca_file_not_live", func(t *testing.T) {
+		f := active(t)
+		out := f.render(now, f.row("web1", f.fileHash(t, now, nil), nil), f.row("web2", "", nil))
+		want(t, out, live(1, 2))
+		if strings.Contains(out, "web2: user CA keys") {
+			t.Errorf("a host without the file got a note:\n%s", out)
+		}
+	})
+	t.Run("truncated_files_not_confirmable", func(t *testing.T) {
+		f := active(t)
+		out := f.render(now, f.row("web1", f.fileHash(t, now, nil), nil), f.row("web2", "", func(s *heartbeat.Status) { s.FilesTruncated = true }))
+		want(t, out, live(1, 2), "web2: user CA keys not confirmable: its status lists only the first 256 files (files_truncated); run keyroster-agent check as root on the host\n")
+	})
+	t.Run("bundle_mismatch_not_counted", func(t *testing.T) {
+		f := active(t)
+		sum := f.fileHash(t, now, nil)
+		for _, edit := range []func(v *serverclient.HostVersions){
+			func(v *serverclient.HostVersions) { v.Bundle = 4 },
+			func(v *serverclient.HostVersions) { v.BundleSHA256 = strings.Repeat("cd", 32) },
+		} {
+			a := serverclient.HostsStatusAnswer{Current: f.cur, Hosts: []serverclient.HostStatusRow{f.row("web1", sum, nil)}}
+			edit(&a.Current)
+			out := renderHostsStatus(&a, f.b, now)
+			want(t, out, fmt.Sprintf("user CA keys not counted: the trust bundle this client verified (v3) is not the server's current one (v%d)\n", a.Current.Bundle))
+			if strings.Contains(out, "live on") {
+				t.Errorf("a count against a bundle that is not the server's current one:\n%s", out)
+			}
+		}
+	})
+	t.Run("live_count_at_the_clients_clock", func(t *testing.T) {
+		f := newLiveFix(t, liveUserCA(t, "draining", 1, now), liveUserCA(t, "active", 2, time.Time{}))
+		r := f.row("web1", f.fileHash(t, now, nil), nil)
+		want(t, f.render(now, r), live(1, 1))
+		want(t, f.render(now.Add(-time.Second), r), live(0, 1))
+	})
+	t.Run("draining_keys_listed_with_their_end", func(t *testing.T) {
+		f := newLiveFix(t, liveUserCA(t, "draining", 1, now), liveUserCA(t, "active", 2, time.Time{}))
+		fp, err := keyFP(f.b.CAs[0].Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		end := now.Format(trust.TimeFormat)
+		want(t, f.render(now.Add(-time.Second)), "user CA generation 1 "+fp+": draining, trusted until "+end+"\n")
+		want(t, f.render(now), "user CA generation 1 "+fp+": drained (ended "+end+")\n")
+	})
+	header := regexp.MustCompile(`(?m)^HOST +DIRECTORY ENTRY +LAST SEEN +STATUS +BUNDLE +DIRECTORY +KRL +GENERATION +AGENT +DRIFT +LAST APPLY +BEHIND +ALERTS$`)
+	t.Run("agent_version_column", func(t *testing.T) {
+		f := active(t)
+		out := f.render(now, f.row("web1", f.fileHash(t, now, nil), func(s *heartbeat.Status) { s.AgentVersion = "keyroster-agent v0.3.0" }),
+			statusRow("web2", serverclient.HostStateActive, nil))
+		if !header.MatchString(out) {
+			t.Errorf("host status has no AGENT and BEHIND columns:\n%s", out)
+		}
+		if !regexp.MustCompile(`(?m)^web1 .* 2 +keyroster-agent v0\.3\.0 +no +ok +- +- *$`).MatchString(out) {
+			t.Errorf("web1's AGENT cell is not its agent_version:\n%s", out)
+		}
+		if !regexp.MustCompile(`(?m)^web2 .* 0 +- +- +never applied +- +- *$`).MatchString(out) {
+			t.Errorf("a host without a heartbeat has no - in AGENT:\n%s", out)
+		}
+	})
+	t.Run("agent_version_escaped", func(t *testing.T) {
+		f := active(t)
+		out := f.render(now, f.row("web1", f.fileHash(t, now, nil), func(s *heartbeat.Status) { s.AgentVersion = "keyroster-agent\x1b[31m" }))
+		if strings.ContainsRune(out, 0x1b) || !strings.Contains(out, "keyroster-agent?[31m") {
+			t.Errorf("an escape byte in agent_version is not shown as ?:\n%q", out)
+		}
+	})
+	t.Run("bundle_behind_column", func(t *testing.T) {
+		f := active(t)
+		sum := f.fileHash(t, now, nil)
+		out := f.render(now,
+			f.row("web1", sum, func(s *heartbeat.Status) {
+				s.BundleBehind = &heartbeat.BundleBehind{ManifestBundleVersion: 5, AcceptedVersion: 3, Since: now.Add(-3 * time.Hour).Format(trust.TimeFormat), Reason: "not_delivered"}
+			}),
+			f.row("web2", sum, nil),
+			f.row("web3", sum, func(s *heartbeat.Status) {
+				s.BundleBehind = &heartbeat.BundleBehind{ManifestBundleVersion: 5, AcceptedVersion: 3, Since: "not a time", Reason: "unknown"}
+			}))
+		for _, re := range []string{`(?m)^web1 .* ok +v5 for 3h \(not_delivered\) +- *$`, `(?m)^web2 .* ok +- +- *$`, `(?m)^web3 .* ok +v5 \(unknown\) +- *$`} {
+			if !regexp.MustCompile(re).MatchString(out) {
+				t.Errorf("host status does not match %s:\n%s", re, out)
+			}
+		}
+	})
+	t.Run("live_count_end_to_end", func(t *testing.T) {
+		// The draining user g1 ends an hour after the wall clock and the
+		// client's clock is a second past that end, so only a host status
+		// that renders at trustClock() counts web1, whose file lacks g1, and
+		// labels g1 drained.
+		end := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		clock := end.Add(time.Second)
+		prev := trustClock
+		trustClock = func() time.Time { return clock }
+		t.Cleanup(func() { trustClock = prev })
+		e := popHostsEnv(t)
+		e.serveRotated(t, 3, func(b *trust.Bundle) {
+			rotatedUserCAs(t, "draining", end, "active")(b)
+			rotatedHostCAs(t, end, true)(b)
+		})
+		names := []string{"web1"}
+		cas := hostCAsOf(e.bundle)
+		sshDir := plantHostTrust(t, e, 2, cas, names)
+		before := hostTrustSnapshot(t, sshDir)
+		doc, err := e.bundle.Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		file, err := trust.UserCAKeysFile(e.bundle, clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := strings.Repeat("ab", 32)
+		st := hbStatus(5, 100)
+		st.Bundle = heartbeat.Doc{Version: 3, SHA256: trust.SHA256Hex(doc)}
+		st.Files = append(st.Files, heartbeat.File{Path: "user_ca_keys", SHA256: trust.SHA256Hex(file)})
+		b, err := json.Marshal(serverclient.HostsStatusAnswer{
+			Current: serverclient.HostVersions{Bundle: 3, BundleSHA256: trust.SHA256Hex(doc), Directory: 5, DirectorySHA256: h, KRL: 100, KRLSHA256: h},
+			Hosts:   []serverclient.HostStatusRow{statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: st})},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var called bool
+		e.recordCall(http.MethodGet, serverclient.AdminHostsStatusPath, &called, string(b), http.StatusOK)
+		var g1 trust.CAEntry
+		for _, ca := range e.bundle.CAs {
+			if ca.Role == trust.RoleUser && ca.Generation == 1 {
+				g1 = ca
+			}
+		}
+		fp, err := keyFP(g1.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, out, stderr := run(t, "host", "status")
+		if code != 0 {
+			t.Fatalf("host status: exit %d:\n%s%s", code, out, stderr)
+		}
+		want(t, out, live(1, 1), "user CA generation 1 "+fp+": drained (ended "+end.Format(trust.TimeFormat)+")\n")
+		requireNarrowed(t, sshDir, before, caLineFor(cas[0], names), stderr)
 	})
 }
 

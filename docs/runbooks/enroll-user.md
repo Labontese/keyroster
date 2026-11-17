@@ -594,6 +594,46 @@ this race). Run in CI (03-09b):
 `TestKnownHosts/concurrent_newer_krl_on_disk_stops_krl`; the window
 itself is UNVERIFIED (no test can time it).
 
+**Narrowing (03-12d).** Every keyroster command that verifies the trust
+bundle removes from `keyroster_known_hosts` the CA lines of host CAs the
+bundle no longer trusts at your computer's clock: a host CA whose drain
+has ended, a retired one, and an `@cert-authority` line whose key the
+bundle does not trust at all. It runs right after the bundle verifies,
+before and whatever the command's other steps do (a KRL that cannot be
+read, a refused directory, a login that fails later), prints
+`Host trust narrowed: removed N CA line(s) of host CAs the trust bundle no longer trusts from <path>.`
+on stderr, and never changes the command's exit status or its standard
+output. `keyroster login --no-known-hosts` still narrows, and so does
+`keyroster init` when it runs again against a saved installation,
+through the same installation check. Narrowing only removes lines: a CA line
+the file lacks is added by the next refresh, never by the narrowing. It
+writes only `keyroster_known_hosts`, never creates it, and moves no floor
+in `host-trust.json`. It declines, with
+one `Warning: host CA lines not narrowed in <path>: <reason>.` line,
+when the host trust state is missing, damaged or of another installation,
+when the server serves an older trust bundle than this client verified
+before (or the same version with another ops key), when the file is a
+symlink, a directory or very large, when it changed while it was read,
+or when `$HOME` is not your account's home (ssh reads the file from the
+account's home, so the file the narrowing could reach is not the one ssh
+trusts). A command that has nothing to narrow stays silent, whatever the
+state says.
+
+What stays, as the owner decided: a computer that never runs keyroster,
+runs no command that verifies the bundle, or cannot reach the server
+keeps a drained line; automation that only runs `ssh` never narrows; and
+your clock governs, so a clock behind keeps the line until it passes the
+end, while a clock ahead narrows early and the next refresh writes the
+line back. A CA line you added to the managed file yourself is removed
+with the rest (the file's header says it is managed). Run in CI
+(03-12d): `TestNarrowKnownHosts`, `TestNarrowHostTrust`,
+`TestKnownHosts/known_hosts_narrows_when_krl_fetch_fails`,
+`TestKnownHosts/login_no_known_hosts_still_narrows`,
+`TestKnownHosts/narrowing_skipped_for_older_served_bundle`,
+`TestKnownHosts/narrowing_never_adds`, `TestTrustCallersUseWrapper`,
+`TestHostCAKeyNarrows/tracer_narrows_the_drained_line`. UNVERIFIED: a
+real ssh client reading the narrowed file, and Windows OpenSSH.
+
 **3. What every signed-in user receives (T-03-100).** Every user who
 completes a passkey login receives the whole admin-signed directory with
 the login answer: users, roles, groups and memberships; hosts with their

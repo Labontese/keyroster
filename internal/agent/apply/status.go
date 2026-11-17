@@ -331,10 +331,20 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 			s.Stuck = u.Report.Stuck
 		}
 	}
+	// A clean check is last_check only for the generation this status
+	// reports (T-03-447): Check takes no apply lock, so a check of an older
+	// generation can end after an apply committed a newer one, and its
+	// result does not vouch for the newer files. The previous last_check
+	// is kept then, as when no check ran. A pending swap's status reports
+	// the generation the swap started from, so a clean check of its
+	// intermediate or target is not published either. A failed check and
+	// a check that found drift are published whatever they checked: they
+	// only say the host is not confirmed, and a swap left pending would
+	// otherwise hide every drift its checks find.
 	switch {
 	case u.Checked && u.CheckErr != nil:
 		s.LastCheck = &heartbeat.LastCheck{At: stamp(now), Error: heartbeat.Sanitize(u.CheckErr.Error(), heartbeat.MaxText)}
-	case u.Checked && u.Drift != nil:
+	case u.Checked && u.Drift != nil && (u.Drift.Drift() || u.Drift.Generation == s.Generation):
 		s.LastCheck = &heartbeat.LastCheck{At: stamp(now), Drift: u.Drift.Drift()}
 	}
 	// seq = max(previous + 1, now in microseconds), except that a previous

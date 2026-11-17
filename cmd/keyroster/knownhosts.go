@@ -125,7 +125,7 @@ func (w *homeLookupWarning) Error() string {
 func defaultSSHDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("no home directory: %w", err)
+		return "", fmt.Errorf("%w: %w", errNoHomeDir, err)
 	}
 	dir := filepath.Join(home, ".ssh")
 	if runtime.GOOS == "windows" {
@@ -170,27 +170,13 @@ func hostTrustName(s string) bool {
 	return true
 }
 
-// hostTrustCAs returns the host CAs of b that clients trust: state active
-// or next, sorted by generation and then key. Retired CAs are left out,
-// narrower than the agent's krl.RoleCAKeys by design. 03-12 swaps in
-// CAEntry.TrustedAt(now) here and nowhere else.
-func hostTrustCAs(b *trust.Bundle, _ time.Time) []trust.CAEntry {
-	var out []trust.CAEntry
-	for _, ca := range b.CAs {
-		if ca.Role == trust.RoleHost && (ca.State == "active" || ca.State == "next") {
-			out = append(out, ca)
-		}
-	}
-	slices.SortFunc(out, func(a, b trust.CAEntry) int {
-		if a.Generation != b.Generation {
-			if a.Generation < b.Generation {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(a.Key, b.Key)
-	})
-	return out
+// hostTrustCAs returns the host CAs of b that a client trusts at now, in
+// generation order (03-12d): the active and next entries always, a
+// draining one until its trusted_until, a retired one never. It is
+// trust.TrustedCAs, the same rule the agents apply. The old sort by key
+// is gone: a validated bundle has one entry per generation of a role.
+func hostTrustCAs(b *trust.Bundle, now time.Time) []trust.CAEntry {
+	return trust.TrustedCAs(b, trust.RoleHost, now)
 }
 
 // hostTrustNames returns the sorted unique principals of d's active host
@@ -318,22 +304,34 @@ func hostTrustStatePath() (string, error) {
 // readHostTrustState reads the state at path: nil and no error when
 // there is none.
 func readHostTrustState(path string) (*hostTrustState, error) {
+	_, st, err := readHostTrustStateBytes(path)
+	return st, err
+}
+
+// readHostTrustStateBytes is readHostTrustState that also returns the
+// bytes it parsed (nil when there is no state), which the narrowing
+// compares right before its rename (03-12d).
+func readHostTrustStateBytes(path string) ([]byte, *hostTrustState, error) {
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%w: it is a symlink", errStateCorrupt)
+		return nil, nil, fmt.Errorf("%w: it is a symlink", errStateCorrupt)
 	}
 	fh, err := os.Open(path) //nolint:gosec // G304: the CLI's own state file
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errStateCorrupt, err)
+		return nil, nil, fmt.Errorf("%w: %w", errStateCorrupt, err)
 	}
 	defer func() { _ = fh.Close() }()
 	data, err := io.ReadAll(io.LimitReader(fh, maxHostTrustState+1))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errStateCorrupt, err)
+		return nil, nil, fmt.Errorf("%w: %w", errStateCorrupt, err)
 	}
-	return parseHostTrustState(data)
+	st, err := parseHostTrustState(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, st, nil
 }
 
 // hostTrustInput is what the writer verifies and writes from: the
@@ -1030,7 +1028,7 @@ func refreshHostTrust(ctx context.Context, c *serverclient.Client, b *trust.Bund
 		_, _ = fmt.Fprintf(stdout, "Host trust not refreshed: the server's KRL could not be read: %v.\n", serverclient.PeerError(err))
 		return hostTrustNone
 	}
-	now := time.Now()
+	now := trustClock()
 	return writeHostTrust(hostTrustInput{Bundle: b, Policy: pol, CAs: hostTrustCAs(b, now), Dir: dir, DirSigs: sigs, KRL: doc, Now: now, DirMissing: missing}, stdout, stderr)
 }
 
@@ -1063,7 +1061,7 @@ func runKnownHosts(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return err
 	}
 	defer s.close()
-	bundle, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID)
+	bundle, pol, err := verifiedTrust(ctx, s.client, s.cfg, s.stderr)
 	if err != nil {
 		return err
 	}

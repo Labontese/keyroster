@@ -8,6 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,7 +37,7 @@ import (
 // temporary directory with useSSHDir.
 func TestMain(m *testing.M) {
 	userSSHDir = func() (string, error) {
-		return "", errors.New("no ~/.ssh in this test (useSSHDir installs one)")
+		return "", fmt.Errorf("%w: no ~/.ssh in this test (useSSHDir installs one)", errNoHomeDir)
 	}
 	os.Exit(m.Run())
 }
@@ -352,16 +356,57 @@ func TestHostTrustName(t *testing.T) {
 // TestHostTrustCAs (03-09b): the host CAs clients trust.
 func TestHostTrustCAs(t *testing.T) {
 	key := func() string { return trust.FormatKey(htSigner(t).PublicKey()) }
-	t.Run("active_and_next_sorted_by_generation_then_key", func(t *testing.T) {
+	t.Run("active_and_next_sorted_by_generation", func(t *testing.T) {
+		// 03-12d: three distinct generations given out of order; the old
+		// leaf's two next entries at one generation are a bundle Validate
+		// refuses since 03-12c, so the key tie-break is gone.
 		k1, k2, k3 := key(), key(), key()
-		hi, lo := max(k2, k3), min(k2, k3)
 		b := &trust.Bundle{CAs: []trust.CAEntry{
-			{Role: trust.RoleHost, Key: hi, State: "next", Generation: 2},
+			{Role: trust.RoleHost, Key: k3, State: "next", Generation: 3},
 			{Role: trust.RoleHost, Key: k1, State: "active", Generation: 1},
-			{Role: trust.RoleHost, Key: lo, State: "next", Generation: 2},
+			{Role: trust.RoleHost, Key: k2, State: "next", Generation: 2},
 		}}
 		got := hostTrustCAs(b, time.Now())
-		if len(got) != 3 || got[0].Key != k1 || got[1].Key != lo || got[2].Key != hi {
+		if len(got) != 3 || got[0].Key != k1 || got[1].Key != k2 || got[2].Key != k3 {
+			t.Fatalf("hostTrustCAs = %+v", got)
+		}
+	})
+	t.Run("next_and_draining_host_ca", func(t *testing.T) {
+		// 03-12d: a draining host CA is trusted until its end, on the
+		// clock given.
+		end := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+		k1, k2, k3, k4 := key(), key(), key(), key()
+		b := &trust.Bundle{CAs: []trust.CAEntry{
+			{Role: trust.RoleHost, Key: k1, State: "retired", Generation: 1},
+			{Role: trust.RoleHost, Key: k2, State: "draining", Generation: 2, TrustedUntil: end.Format(trust.TimeFormat)},
+			{Role: trust.RoleHost, Key: k3, State: "active", Generation: 3},
+			{Role: trust.RoleHost, Key: k4, State: "next", Generation: 4},
+		}}
+		keys := func(cas []trust.CAEntry) []string {
+			var out []string
+			for _, ca := range cas {
+				out = append(out, ca.Key)
+			}
+			return out
+		}
+		if got := keys(hostTrustCAs(b, end.Add(-time.Second))); !slices.Equal(got, []string{k2, k3, k4}) {
+			t.Fatalf("at the end minus 1s: hostTrustCAs keys = %q, want generations 2, 3 and 4", got)
+		}
+		for _, at := range []time.Time{end, end.Add(time.Hour)} {
+			if got := keys(hostTrustCAs(b, at)); !slices.Equal(got, []string{k3, k4}) {
+				t.Fatalf("at %s: hostTrustCAs keys = %q, want generations 3 and 4", at, got)
+			}
+		}
+	})
+	t.Run("drained_and_retired_excluded", func(t *testing.T) {
+		now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+		k := key()
+		b := &trust.Bundle{CAs: []trust.CAEntry{
+			{Role: trust.RoleHost, Key: key(), State: "retired", Generation: 1},
+			{Role: trust.RoleHost, Key: key(), State: "draining", Generation: 2, TrustedUntil: now.Add(-time.Hour).Format(trust.TimeFormat)},
+			{Role: trust.RoleHost, Key: k, State: "active", Generation: 3},
+		}}
+		if got := hostTrustCAs(b, now); len(got) != 1 || got[0].Key != k {
 			t.Fatalf("hostTrustCAs = %+v", got)
 		}
 	})
@@ -388,6 +433,7 @@ func TestHostTrustCAs(t *testing.T) {
 // TestKnownHosts (03-09b, D2, T-03-59 to T-03-61, T-03-241, T-03-347):
 // the writer on stub inputs.
 func TestKnownHosts(t *testing.T) {
+	narrowCommandCases(t)
 	t.Run("writes_three_files_and_state", func(t *testing.T) {
 		f := newHTFix(t, 1, 1)
 		doc := f.dirDoc(t, 1, "", htHost(t, "web1", directory.StatusActive, "web1", "web1.lab.example"))
@@ -412,6 +458,66 @@ func TestKnownHosts(t *testing.T) {
 		}
 		if got := f.file(t, hostTrustSSHConfig); got != htConfig("web1", "web1.lab.example") {
 			t.Fatalf("config\n%s", got)
+		}
+	})
+	t.Run("next_and_draining_host_ca", func(t *testing.T) {
+		// 03-12d (M149): the writer lists a draining host CA until its
+		// end on the clock hostTrustCAs is given, and not from its end.
+		end := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		draining := func(f *htFix) (string, string) {
+			active, next := htSigner(t), htSigner(t)
+			f.bundle.CAs = []trust.CAEntry{
+				f.bundle.CAs[0],
+				{Role: trust.RoleHost, Key: trust.FormatKey(f.hostCA.PublicKey()), State: "draining", Generation: 1, TrustedUntil: end.Format(trust.TimeFormat)},
+				{Role: trust.RoleHost, Key: trust.FormatKey(active.PublicKey()), State: "active", Generation: 2},
+				{Role: trust.RoleHost, Key: trust.FormatKey(next.PublicKey()), State: "next", Generation: 3},
+			}
+			return trust.FormatKey(active.PublicKey()), trust.FormatKey(next.PublicKey())
+		}
+		for _, c := range []struct {
+			at           time.Time
+			withDraining bool
+		}{{end.Add(-time.Second), true}, {end, false}} {
+			f := newHTFix(t, 1, 1)
+			active, next := draining(f)
+			in := f.in(t, f.dirDoc(t, 1, "", htHost(t, "web1", directory.StatusActive, "web1")), f.krlV(t, 1))
+			in.CAs = hostTrustCAs(f.bundle, c.at)
+			mustRun(t, in, hostTrustFull)
+			got := htCALines(t, f.file(t, hostTrustKnownHosts))
+			drainingKey := trust.FormatKey(f.hostCA.PublicKey())
+			if _, ok := got[active]; !ok {
+				t.Fatalf("at %s: the active host CA line is missing:\n%s", c.at, f.file(t, hostTrustKnownHosts))
+			}
+			if _, ok := got[next]; !ok {
+				t.Fatalf("at %s: the next host CA line is missing:\n%s", c.at, f.file(t, hostTrustKnownHosts))
+			}
+			if _, ok := got[drainingKey]; ok != c.withDraining || len(got) != map[bool]int{true: 3, false: 2}[c.withDraining] {
+				t.Fatalf("at %s (end %s): %d CA lines, draining line present %v; want it present %v:\n%s", c.at, end, len(got), ok, c.withDraining, f.file(t, hostTrustKnownHosts))
+			}
+		}
+	})
+	t.Run("narrowing_skipped_for_older_served_bundle", func(t *testing.T) {
+		// 03-12d (NP-11, M151, T-03-445): a bundle older than the state's
+		// floor does not name later keys, so it narrows nothing.
+		f := newNHFix(t)
+		before := f.files(t)
+		want := f.warn("the server serves trust bundle version 3, older than version 4, which this client verified before")
+		if got := htNarrow(t, f.at(3), f.now); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("narrowing_never_adds", func(t *testing.T) {
+		// 03-12d (M238, T-03-444): the bundle trusts g2 and g3, the file
+		// holds g1 and g2; the narrowing leaves g2 alone and adds no g3.
+		f := newNHFix(t)
+		before := f.files(t)
+		if got := htNarrow(t, f.bundle, f.now); got != f.narrowed(1) {
+			t.Fatalf("stderr %q, want %q", got, f.narrowed(1))
+		}
+		f.requireFiles(t, f.narrowedFiles(before))
+		if kh := f.file(t, hostTrustKnownHosts); strings.Contains(kh, f.g3) || strings.Count(kh, "@cert-authority ") != 1 {
+			t.Fatalf("known_hosts after the narrowing:\n%s\nwant the g2 line only", kh)
 		}
 	})
 	t.Run("ca_line_format_exact", func(t *testing.T) {
@@ -1724,5 +1830,1007 @@ func FuzzHostTrustState(f *testing.F) {
 		if err != nil || !bytes.Equal(enc, data) {
 			t.Fatalf("an accepted state re-encodes differently: %v", err)
 		}
+	})
+}
+
+// nkLines splits data after each newline, as narrowKnownHosts does
+// (03-12d): every line keeps its own bytes.
+func nkLines(data []byte) []string {
+	var out []string
+	for len(data) > 0 {
+		i := bytes.IndexByte(data, '\n')
+		if i < 0 {
+			out = append(out, string(data))
+			break
+		}
+		out = append(out, string(data[:i+1]))
+		data = data[i+1:]
+	}
+	return out
+}
+
+// nkSubsequence reports whether out is in's lines minus some of them:
+// every line of out is a line of in, in order, and nothing else.
+func nkSubsequence(in, out []byte) bool {
+	src, j := nkLines(in), 0
+	var kept []byte
+	for _, l := range nkLines(out) {
+		for j < len(src) && src[j] != l {
+			j++
+		}
+		if j == len(src) {
+			return false
+		}
+		kept = append(kept, src[j]...)
+		j++
+	}
+	return bytes.Equal(kept, out)
+}
+
+// nkSound returns an error for the first line of out that is a CA line
+// (its first space-or-tab field is @cert-authority, without regard to
+// case) without four fields and a key field pair in trusted (03-12d).
+func nkSound(out []byte, trusted []string) error {
+	for _, l := range nkLines(out) {
+		s := strings.TrimSuffix(strings.TrimSuffix(l, "\n"), "\r")
+		f := strings.FieldsFunc(s, func(r rune) bool { return r == ' ' || r == '\t' })
+		if len(f) == 0 || !strings.EqualFold(f[0], "@cert-authority") {
+			continue
+		}
+		if len(f) < 4 || !slices.Contains(trusted, f[2]+" "+f[3]) {
+			return fmt.Errorf("an untrusted or malformed CA line was kept: %q", l)
+		}
+	}
+	return nil
+}
+
+// TestNarrowKnownHosts (03-12d, NP-19, NP-25, T-03-444): the pure line
+// filter of the managed known_hosts file. It removes the CA lines whose
+// key is not trusted, and keeps every other line byte for byte.
+func TestNarrowKnownHosts(t *testing.T) {
+	key := func() string { return trust.FormatKey(htSigner(t).PublicKey()) }
+	kA, kN, kU := key(), key(), key()
+	trusted := []string{kA, kN}
+	ca := func(k string, g int) string {
+		return fmt.Sprintf("@cert-authority web1,web1.lab.example %s keyroster host CA generation %d\n", k, g)
+	}
+	tabbed := func(k string) string { return strings.Replace(k, " ", "\t", 1) }
+	head := htKnownHostsHead
+	info := "# directory version 1 (sha256 " + strings.Repeat("ab", 32) + "), trust bundle version 1, KRL version 1 (informational; never read back)\n"
+	check := func(t *testing.T, in string, set []string, want string, wantN int) {
+		t.Helper()
+		out, n := narrowKnownHosts([]byte(in), set)
+		if string(out) != want || n != wantN {
+			t.Fatalf("narrowKnownHosts(%q) = %q, %d; want %q, %d", in, out, n, want, wantN)
+		}
+	}
+	t.Run("drops_untrusted_ca_line", func(t *testing.T) {
+		check(t, head+ca(kA, 1)+ca(kU, 2), trusted, head+ca(kA, 1), 1)
+	})
+	t.Run("keeps_trusted_ca_lines", func(t *testing.T) {
+		in := head + info + ca(kA, 2) + ca(kN, 3)
+		check(t, in, trusted, in, 0)
+	})
+	t.Run("keeps_other_lines_byte_for_byte", func(t *testing.T) {
+		in := head + info + "\n" + "web1 " + kU + "\n" + "@revoked web1 " + kU + "\n" + "# a comment\n"
+		check(t, in, trusted, in, 0)
+	})
+	t.Run("drops_a_foreign_ca_line", func(t *testing.T) {
+		check(t, head+ca(key(), 7)+ca(kA, 1), trusted, head+ca(kA, 1), 1)
+	})
+	t.Run("drops_malformed_ca_lines", func(t *testing.T) {
+		typ, b64, _ := strings.Cut(kA, " ")
+		for _, m := range []string{
+			"@cert-authority\n",
+			"@cert-authority web1 " + typ + "\n",
+			"@cert-authority web1 " + strings.ToUpper(typ) + " " + b64 + "\n",
+		} {
+			check(t, head+ca(kA, 1)+m, trusted, head+ca(kA, 1), 1)
+		}
+	})
+	t.Run("leading_whitespace_ca_line_is_narrowed", func(t *testing.T) {
+		for _, p := range []string{"  ", "\t", " \t "} {
+			check(t, head+p+ca(kU, 1)+p+ca(kA, 2), trusted, head+p+ca(kA, 2), 1)
+		}
+	})
+	t.Run("tab_separated_ca_line_is_narrowed", func(t *testing.T) {
+		bad := "@cert-authority\tweb1\t" + tabbed(kU) + "\tkeyroster host CA generation 1\n"
+		good := "@cert-authority\tweb1\t" + tabbed(kA) + "\tkeyroster host CA generation 2\n"
+		check(t, head+bad+good, trusted, head+good, 1)
+	})
+	t.Run("marker_case_is_not_a_bypass", func(t *testing.T) {
+		in := head + "@CERT-AUTHORITY web1 " + kU + "\n" + ca(kA, 2) + "@Cert-Authority web1 " + kU + " c\n"
+		check(t, in, trusted, head+ca(kA, 2), 2)
+	})
+	t.Run("crlf_and_a_missing_final_newline_are_preserved", func(t *testing.T) {
+		in := "# header\r\n" + "@cert-authority web1 " + kA + "\r\n" + "@cert-authority web1 " + kU + " c\r\n" + "@cert-authority web1 " + kN + " c"
+		check(t, in, trusted, "# header\r\n"+"@cert-authority web1 "+kA+"\r\n"+"@cert-authority web1 "+kN+" c", 1)
+		check(t, ca(kA, 1)+"@cert-authority web1 "+kU, trusted, ca(kA, 1), 1)
+	})
+	t.Run("an_empty_trusted_set_drops_every_ca_line", func(t *testing.T) {
+		in := head + info + ca(kA, 1) + "web1 " + kU + "\n" + ca(kN, 2)
+		check(t, in, nil, head+info+"web1 "+kU+"\n", 2)
+	})
+	t.Run("reports_the_count_removed", func(t *testing.T) {
+		check(t, ca(key(), 1)+ca(kA, 2)+ca(key(), 3)+ca(kU, 4), trusted, ca(kA, 2), 3)
+	})
+	templates := []string{
+		head, info, "\n", "web1 " + kU + "\n", "@revoked web1 " + kU + "\n",
+		ca(kA, 1), "@cert-authority\tweb1\t" + tabbed(kN) + "\r\n", ca(kU, 3),
+		"@cert-authority\n", "@cert-authority web1 ssh-ed25519\n", "  \t" + ca(kU, 4), "@CERT-AUTHORITY web1 " + kU + "\n",
+	}
+	sets := [][]string{trusted, {kN}}
+	t.Run("output_lines_are_a_subset_of_input", func(t *testing.T) {
+		for _, set := range sets {
+			for _, a := range templates {
+				for _, b := range templates {
+					in := []byte(a + b)
+					out, n := narrowKnownHosts(in, set)
+					if !nkSubsequence(in, out) || len(out) > len(in) || n != len(nkLines(in))-len(nkLines(out)) {
+						t.Fatalf("narrowKnownHosts(%q) = %q, %d: not the input minus %d of its lines", in, out, n, n)
+					}
+				}
+			}
+		}
+	})
+	t.Run("idempotent", func(t *testing.T) {
+		for _, set := range sets {
+			for _, a := range templates {
+				for _, b := range templates {
+					out, _ := narrowKnownHosts([]byte(a+b), set)
+					again, n := narrowKnownHosts(out, set)
+					if !bytes.Equal(again, out) || n != 0 {
+						t.Fatalf("narrowing %q again gave %q, %d", out, again, n)
+					}
+				}
+			}
+		}
+	})
+	t.Run("empty_input_is_empty", func(t *testing.T) {
+		for _, in := range [][]byte{nil, {}} {
+			if out, n := narrowKnownHosts(in, trusted); len(out) != 0 || n != 0 {
+				t.Fatalf("narrowKnownHosts(%q) = %q, %d", in, out, n)
+			}
+		}
+	})
+}
+
+// nkSeedKey is a fixed Ed25519 key in canonical form, from a seed of b.
+func nkSeedKey(t testing.TB, b byte) string {
+	t.Helper()
+	priv := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{b}, ed25519.SeedSize))
+	pub, err := ssh.NewPublicKey(priv.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return trust.FormatKey(pub)
+}
+
+// FuzzNarrowKnownHosts (03-12d, T-03-444): over arbitrary bytes the
+// filter's output is its input minus whole lines, narrowing it again
+// changes nothing, and no untrusted or malformed CA line is kept (the
+// soundness property). Each seed holds an untrusted CA line.
+func FuzzNarrowKnownHosts(f *testing.F) {
+	trusted := []string{nkSeedKey(f, 1), nkSeedKey(f, 2)}
+	untrusted := nkSeedKey(f, 3)
+	f.Add([]byte("@cert-authority web1 " + untrusted + " keyroster host CA generation 1\n"))
+	f.Add([]byte("@cert-authority\tweb1\t" + strings.Replace(untrusted, " ", "\t", 1) + "\n"))
+	f.Add([]byte("@CERT-AUTHORITY web1 " + untrusted + "\n"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		out, n := narrowKnownHosts(data, trusted)
+		if !nkSubsequence(data, out) || n != len(nkLines(data))-len(nkLines(out)) {
+			t.Fatalf("narrowKnownHosts(%q) = %q, %d: not the input minus %d of its lines", data, out, n, n)
+		}
+		again, n2 := narrowKnownHosts(out, trusted)
+		if !bytes.Equal(again, out) || n2 != 0 {
+			t.Fatalf("narrowing %q again gave %q, %d", out, again, n2)
+		}
+		if err := nkSound(out, trusted); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// nhFix is the narrowing's fixture (03-12d): an htFix whose bundle is
+// version 5, with host g1 draining and ended at now, g2 active and g3
+// next, the fixture's installation and ops key; a planted state of bundle
+// version 4 of the same installation and ops key; a keyroster_known_hosts
+// holding the g1 and g2 lines of an earlier refresh; and sentinel bytes
+// for the KRL and the ssh config.
+type nhFix struct {
+	*htFix
+	now        time.Time
+	g1, g2, g3 string
+	kh         string // the planted keyroster_known_hosts
+	g1Line     string
+}
+
+func newNHFix(t *testing.T) *nhFix {
+	t.Helper()
+	f := &nhFix{htFix: newHTFix(t, 1, 1), now: time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)}
+	f.g1 = trust.FormatKey(f.hostCA.PublicKey())
+	f.g2, f.g3 = trust.FormatKey(htSigner(t).PublicKey()), trust.FormatKey(htSigner(t).PublicKey())
+	f.bundle.Version, f.bundle.Prev = 5, strings.Repeat("ab", 32)
+	f.bundle.CAs = []trust.CAEntry{
+		f.bundle.CAs[0],
+		{Role: trust.RoleHost, Key: f.g1, State: "draining", Generation: 1, TrustedUntil: f.now.Add(-time.Hour).Format(trust.TimeFormat)},
+		{Role: trust.RoleHost, Key: f.g2, State: "active", Generation: 2},
+		{Role: trust.RoleHost, Key: f.g3, State: "next", Generation: 3},
+	}
+	st := f.plantState(t, 4, f.install, trust.FormatKey(f.ops.PublicKey()))
+	if err := os.MkdirAll(f.sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.kh = string(knownHostsFile(f.bundle.CAs[1:3], []string{"web1"}, st))
+	f.g1Line = "@cert-authority web1 " + f.g1 + " keyroster host CA generation 1\n"
+	if strings.Count(f.kh, f.g1Line) != 1 {
+		t.Fatalf("the planted file does not hold the g1 line once:\n%s", f.kh)
+	}
+	writeTestFile(t, filepath.Join(f.sshDir, hostTrustKnownHosts), []byte(f.kh))
+	writeTestFile(t, filepath.Join(f.sshDir, hostTrustKRLFile), []byte("sentinel KRL bytes\n"))
+	writeTestFile(t, filepath.Join(f.sshDir, hostTrustSSHConfig), []byte("# sentinel ssh config\n"))
+	return f
+}
+
+// plantState writes a state of the given bundle version, installation
+// and ops key over the name web1, and returns it.
+func (f *nhFix) plantState(t *testing.T, version uint64, installation, ops string) *hostTrustState {
+	t.Helper()
+	st := &hostTrustState{Format: 1, InstallationID: installation, BundleVersion: version, OpsKey: ops, Names: []string{"web1"}}
+	data, err := st.encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStateFile(f.statePath, data); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// at returns a copy of f's bundle at version v.
+func (f *nhFix) at(v uint64) *trust.Bundle {
+	b := *f.bundle
+	b.Version = v
+	return &b
+}
+
+// khPath is the managed known_hosts file's path.
+func (f *nhFix) khPath() string { return filepath.Join(f.sshDir, hostTrustKnownHosts) }
+
+// warn is the narrowing's warning line for reason.
+func (f *nhFix) warn(reason string) string {
+	return fmt.Sprintf("Warning: host CA lines not narrowed in %s: %s.\n", f.khPath(), reason)
+}
+
+// narrowed is the narrowing's line for n removed lines.
+func (f *nhFix) narrowed(n int) string {
+	return fmt.Sprintf("Host trust narrowed: removed %d CA line(s) of host CAs the trust bundle no longer trusts from %s.\n", n, f.khPath())
+}
+
+// htNarrow runs narrowHostTrust for b at now and returns its stderr.
+func htNarrow(t *testing.T, b *trust.Bundle, now time.Time) string {
+	t.Helper()
+	var stderr strings.Builder
+	narrowHostTrust(b, now, &stderr)
+	return stderr.String()
+}
+
+// requireFiles fails unless the four files hold want's bytes.
+func (f *nhFix) requireFiles(t *testing.T, want map[string]string) {
+	t.Helper()
+	got := f.files(t)
+	for n, w := range want {
+		if got[n] != w {
+			t.Fatalf("%s:\n%s\nwant:\n%s", n, got[n], w)
+		}
+	}
+}
+
+// narrowedFiles is before with the g1 line gone from the known_hosts.
+func (f *nhFix) narrowedFiles(before map[string]string) map[string]string {
+	want := map[string]string{}
+	for n, v := range before {
+		want[n] = v
+	}
+	want[hostTrustKnownHosts] = strings.Replace(before[hostTrustKnownHosts], f.g1Line, "", 1)
+	return want
+}
+
+// TestNarrowHostTrust (03-12d, NP-11 to NP-22, NP-26, NP-27, T-03-444 to
+// T-03-446): every guard of the narrowing. A refusal narrows nothing and
+// prints one warning line with its reason; a command with nothing to
+// narrow stays silent.
+func TestNarrowHostTrust(t *testing.T) {
+	t.Run("narrows_with_a_newer_bundle_and_moves_no_floor", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		if got := htNarrow(t, f.bundle, f.now); got != f.narrowed(1) {
+			t.Fatalf("stderr %q, want %q", got, f.narrowed(1))
+		}
+		f.requireFiles(t, f.narrowedFiles(before))
+	})
+	t.Run("narrows_with_the_equal_version_and_the_same_ops_key", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		if got := htNarrow(t, f.at(4), f.now); got != f.narrowed(1) {
+			t.Fatalf("stderr %q, want %q", got, f.narrowed(1))
+		}
+		f.requireFiles(t, f.narrowedFiles(before))
+	})
+	t.Run("skipped_for_the_equal_version_with_another_ops_key", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		b := f.at(4)
+		b.OpsKey.Key = trust.FormatKey(htSigner(t).PublicKey())
+		want := f.warn("trust bundle version 4 names another ops key than the version this client verified before")
+		if got := htNarrow(t, b, f.now); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("skipped_for_another_installation", func(t *testing.T) {
+		f := newNHFix(t)
+		other := htInstall(t)
+		f.plantState(t, 4, other, trust.FormatKey(f.ops.PublicKey()))
+		before := f.files(t)
+		want := f.warn(fmt.Sprintf("the host trust state belongs to installation %s, not to %s", other, f.install))
+		if got := htNarrow(t, f.bundle, f.now); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("skipped_without_a_state", func(t *testing.T) {
+		f := newNHFix(t)
+		if err := os.Remove(f.statePath); err != nil {
+			t.Fatal(err)
+		}
+		before := f.files(t)
+		if got, want := htNarrow(t, f.bundle, f.now), f.warn("the host trust state is missing"); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("skipped_for_a_damaged_state", func(t *testing.T) {
+		f := newNHFix(t)
+		writeTestFile(t, f.statePath, []byte("not a state\n"))
+		before := f.files(t)
+		got := htNarrow(t, f.bundle, f.now)
+		prefix := strings.TrimSuffix(f.warn("the host trust state is damaged ("), ".\n")
+		if !strings.HasPrefix(got, prefix) || !strings.HasSuffix(got, ").\n") || strings.Count(got, "\n") != 1 {
+			t.Fatalf("stderr %q, want one line starting %q", got, prefix)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("skipped_for_a_directory_at_the_name", func(t *testing.T) {
+		f := newNHFix(t)
+		if err := os.Remove(f.khPath()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(f.khPath(), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := htNarrow(t, f.bundle, f.now), f.warn("it is not a regular file"); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		if fi, err := os.Lstat(f.khPath()); err != nil || !fi.IsDir() {
+			t.Fatalf("the directory at the name is gone: %v", err)
+		}
+	})
+	t.Run("skipped_for_an_oversize_file", func(t *testing.T) {
+		f := newNHFix(t)
+		prev := maxNarrowFile
+		maxNarrowFile = 1024
+		t.Cleanup(func() { maxNarrowFile = prev })
+		big := f.kh + "# " + strings.Repeat("x", 2048-len(f.kh)-3) + "\n"
+		if len(big) != 2048 {
+			t.Fatalf("the padded file has %d bytes", len(big))
+		}
+		writeTestFile(t, f.khPath(), []byte(big))
+		before := f.files(t)
+		if got, want := htNarrow(t, f.bundle, f.now), f.warn("it is larger than 1024 bytes"); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("stops_when_the_file_changed_meanwhile", func(t *testing.T) {
+		f := newNHFix(t)
+		fourth := "@cert-authority web1 " + trust.FormatKey(htSigner(t).PublicKey()) + " keyroster host CA generation 4\n"
+		prev := narrowHook
+		narrowHook = func() {
+			fh, err := os.OpenFile(f.khPath(), os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_, err = fh.WriteString(fourth)
+			if cerr := fh.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
+				t.Error(err)
+			}
+		}
+		t.Cleanup(func() { narrowHook = prev })
+		want := f.files(t)
+		want[hostTrustKnownHosts] = f.kh + fourth
+		if got, w := htNarrow(t, f.bundle, f.now), f.warn("the file changed while it was read"); got != w {
+			t.Fatalf("stderr %q, want %q", got, w)
+		}
+		f.requireFiles(t, want)
+	})
+	t.Run("stops_when_a_newer_state_appears_meanwhile", func(t *testing.T) {
+		f := newNHFix(t)
+		var st *hostTrustState
+		prev := narrowHook
+		narrowHook = func() { st = f.plantState(t, 9, f.install, trust.FormatKey(f.ops.PublicKey())) }
+		t.Cleanup(func() { narrowHook = prev })
+		if got, w := htNarrow(t, f.bundle, f.now), f.warn("another run recorded a newer host trust state meanwhile"); got != w {
+			t.Fatalf("stderr %q, want %q", got, w)
+		}
+		if st == nil || f.file(t, hostTrustKnownHosts) != f.kh {
+			t.Fatalf("the hook did not run, or the file changed:\n%s", f.file(t, hostTrustKnownHosts))
+		}
+	})
+	t.Run("stops_when_a_newer_directory_state_appears_meanwhile", func(t *testing.T) {
+		f := newNHFix(t)
+		ran := false
+		prev := narrowHook
+		narrowHook = func() {
+			st := &hostTrustState{Format: 1, InstallationID: f.install, BundleVersion: 4, OpsKey: trust.FormatKey(f.ops.PublicKey()),
+				DirectoryVersion: 7, DirectorySHA256: strings.Repeat("cd", 32), Names: []string{"web1"}}
+			data, err := st.encode()
+			if err == nil {
+				err = writeStateFile(f.statePath, data)
+			}
+			if err != nil {
+				t.Error(err)
+			}
+			ran = true
+		}
+		t.Cleanup(func() { narrowHook = prev })
+		if got, w := htNarrow(t, f.bundle, f.now), f.warn("another run recorded a newer host trust state meanwhile"); got != w {
+			t.Fatalf("stderr %q, want %q", got, w)
+		}
+		if !ran || f.file(t, hostTrustKnownHosts) != f.kh {
+			t.Fatalf("the hook did not run, or the file changed:\n%s", f.file(t, hostTrustKnownHosts))
+		}
+	})
+	t.Run("unparsable_trusted_key_narrows_nothing", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		typ, b64, _ := strings.Cut(f.g2, " ")
+		f.bundle.CAs[2].Key = strings.ToUpper(typ) + " " + b64
+		if got, w := htNarrow(t, f.bundle, f.now), f.warn("a trusted CA key of the bundle does not parse"); got != w {
+			t.Fatalf("stderr %q, want %q", got, w)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("never_creates_the_file", func(t *testing.T) {
+		f := newNHFix(t)
+		if err := os.Remove(f.khPath()); err != nil {
+			t.Fatal(err)
+		}
+		before := f.files(t)
+		if got := htNarrow(t, f.bundle, f.now); got != "" {
+			t.Fatalf("stderr %q, want none", got)
+		}
+		f.requireFiles(t, before)
+		if _, err := os.Lstat(f.khPath()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the file was created: %v", err)
+		}
+	})
+	t.Run("narrowing_writes_no_other_file", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		names := func() []string {
+			var out []string
+			for _, d := range []string{f.sshDir, filepath.Dir(f.statePath)} {
+				es, err := os.ReadDir(d)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, e := range es {
+					out = append(out, filepath.Join(d, e.Name()))
+				}
+			}
+			return out
+		}
+		listed := names()
+		if got := htNarrow(t, f.bundle, f.now); got != f.narrowed(1) {
+			t.Fatalf("stderr %q, want %q", got, f.narrowed(1))
+		}
+		f.requireFiles(t, f.narrowedFiles(before))
+		if after := names(); !slices.Equal(after, listed) {
+			t.Fatalf("the directories hold %q after the narrowing, %q before", after, listed)
+		}
+	})
+	t.Run("write_failure_warns_and_changes_nothing_else", func(t *testing.T) {
+		f := newNHFix(t)
+		prev := narrowReplace
+		narrowReplace = func(string, string, []byte, fs.FileMode, func() error) error {
+			return errors.New("injected write failure")
+		}
+		t.Cleanup(func() { narrowReplace = prev })
+		before := f.files(t)
+		if got, w := htNarrow(t, f.bundle, f.now), f.warn("writing it failed: injected write failure"); got != w {
+			t.Fatalf("stderr %q, want %q", got, w)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("no_ssh_dir_is_silent", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		prev := userSSHDir
+		userSSHDir = func() (string, error) { return "", fmt.Errorf("%w: no $HOME", errNoHomeDir) }
+		t.Cleanup(func() { userSSHDir = prev })
+		if got := htNarrow(t, f.bundle, f.now); got != "" {
+			t.Fatalf("stderr %q, want none", got)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("home_mismatch_warns", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		mismatch := errors.New("$HOME (/home/other) is not your account home (/home/user), which ssh reads")
+		prev := userSSHDir
+		userSSHDir = func() (string, error) { return "", mismatch }
+		t.Cleanup(func() { userSSHDir = prev })
+		want := "Warning: host CA lines not narrowed in ~/.ssh/keyroster_known_hosts: " + mismatch.Error() + ".\n"
+		if got := htNarrow(t, f.bundle, f.now); got != want {
+			t.Fatalf("stderr %q, want %q", got, want)
+		}
+		f.requireFiles(t, before)
+	})
+	t.Run("no_warning_when_nothing_to_narrow", func(t *testing.T) {
+		for _, c := range []struct {
+			name  string
+			state func(f *nhFix)
+		}{
+			{"older_state", func(f *nhFix) { f.plantState(t, 9, f.install, trust.FormatKey(f.ops.PublicKey())) }},
+			{"no_state", func(f *nhFix) {
+				if err := os.Remove(f.statePath); err != nil {
+					t.Fatal(err)
+				}
+			}},
+			{"another_installation", func(f *nhFix) { f.plantState(t, 4, htInstall(t), trust.FormatKey(f.ops.PublicKey())) }},
+		} {
+			f := newNHFix(t)
+			writeTestFile(t, f.khPath(), []byte(strings.Replace(f.kh, f.g1Line, "", 1)))
+			c.state(f)
+			before := f.files(t)
+			if got := htNarrow(t, f.bundle, f.now); got != "" {
+				t.Fatalf("%s: stderr %q, want none", c.name, got)
+			}
+			f.requireFiles(t, before)
+		}
+	})
+	t.Run("home_lookup_warning_uses_its_directory", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		prev := userSSHDir
+		userSSHDir = func() (string, error) {
+			return f.sshDir, &homeLookupWarning{dir: f.sshDir, err: errors.New("no such user")}
+		}
+		t.Cleanup(func() { userSSHDir = prev })
+		if got := htNarrow(t, f.bundle, f.now); got != f.narrowed(1) {
+			t.Fatalf("stderr %q, want only %q", got, f.narrowed(1))
+		}
+		f.requireFiles(t, f.narrowedFiles(before))
+	})
+}
+
+// trustRef is a reference found by TestTrustCallersUseWrapper: the name,
+// the enclosing function ("" outside one), and where it is.
+type trustRef struct {
+	name, fn, at string
+	pos          token.Pos
+}
+
+// scanTrustRefs parses every non-test .go file of this package directory,
+// whatever its build constraints, and returns every selector named Trust
+// or TrustUnpinned, called or not, and every reference to narrowHostTrust
+// other than its declaration (03-12d).
+func scanTrustRefs(t *testing.T) (sels, narrows []trustRef) {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	parsed := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		af, err := parser.ParseFile(fset, f, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed++
+		for _, d := range af.Decls {
+			fd, isFunc := d.(*ast.FuncDecl)
+			fn := ""
+			if isFunc {
+				fn = fd.Name.Name
+			}
+			ast.Inspect(d, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.SelectorExpr:
+					if x.Sel.Name == "Trust" || x.Sel.Name == "TrustUnpinned" {
+						sels = append(sels, trustRef{x.Sel.Name, fn, fset.Position(x.Pos()).String(), x.Pos()})
+					}
+				case *ast.Ident:
+					if x.Name == "narrowHostTrust" && (!isFunc || x != fd.Name) {
+						narrows = append(narrows, trustRef{x.Name, fn, fset.Position(x.Pos()).String(), x.Pos()})
+					}
+				}
+				return true
+			})
+		}
+	}
+	if parsed < 10 {
+		t.Fatalf("parsed %d non-test files of the package, want the whole package", parsed)
+	}
+	return sels, narrows
+}
+
+// TestTrustCallersUseWrapper (03-12d, NP-05, NP-06, NP-09, NP-10): every
+// Trust of the package goes through verifiedTrust, which narrows; the one
+// TrustUnpinned is runInit's, which narrows itself; nothing else calls the
+// narrowing. A later command cannot forget it.
+func TestTrustCallersUseWrapper(t *testing.T) {
+	sels, narrows := scanTrustRefs(t)
+	t.Run("every_trust_call_goes_through_the_wrapper", func(t *testing.T) {
+		wrapper := 0
+		for _, s := range sels {
+			switch {
+			case s.name == "Trust" && s.fn == "verifiedTrust":
+				wrapper++
+			case s.name == "TrustUnpinned" && s.fn == "runInit":
+			default:
+				t.Errorf("%s: %s outside the wrapper (in %q): call verifiedTrust, which narrows the managed known_hosts", s.at, s.name, s.fn)
+			}
+		}
+		if wrapper == 0 {
+			t.Errorf("found no Trust selector in verifiedTrust; the scan read nothing it should")
+		}
+	})
+	t.Run("init_narrows_after_its_unpinned_trust", func(t *testing.T) {
+		var unpinned token.Pos
+		for _, s := range sels {
+			if s.name == "TrustUnpinned" && s.fn == "runInit" {
+				unpinned = s.pos
+			}
+		}
+		if unpinned == token.NoPos {
+			t.Fatal("runInit has no TrustUnpinned")
+		}
+		for _, n := range narrows {
+			if n.fn == "runInit" && n.pos > unpinned {
+				return
+			}
+		}
+		t.Fatal("runInit does not call narrowHostTrust after its TrustUnpinned")
+	})
+	t.Run("narrow_callers_are_pinned", func(t *testing.T) {
+		var trustAt token.Pos
+		for _, s := range sels {
+			if s.name == "Trust" && s.fn == "verifiedTrust" {
+				trustAt = s.pos
+			}
+		}
+		after := false
+		for _, n := range narrows {
+			switch n.fn {
+			case "verifiedTrust":
+				after = after || (trustAt != token.NoPos && n.pos > trustAt)
+			case "runInit":
+			default:
+				t.Errorf("%s: narrowHostTrust referenced in %q; only verifiedTrust and runInit may call it", n.at, n.fn)
+			}
+		}
+		if !after {
+			t.Error("verifiedTrust does not call narrowHostTrust after its Trust call")
+		}
+	})
+}
+
+// rotatedHostCAs is an edit for serveRotated (03-12d): the host role gets
+// its original entry as draining generation 1 ending at end, a fresh
+// active generation 2 and, with next, a fresh next generation 3, keys of
+// the original's algorithm and custody; the other roles stay.
+func rotatedHostCAs(t *testing.T, end time.Time, next bool) func(b *trust.Bundle) {
+	t.Helper()
+	return func(b *trust.Bundle) {
+		var cas []trust.CAEntry
+		for _, ca := range b.CAs {
+			if ca.Role != trust.RoleHost {
+				cas = append(cas, ca)
+				continue
+			}
+			drained := ca
+			drained.State, drained.Generation, drained.TrustedUntil = "draining", 1, end.UTC().Truncate(time.Second).Format(trust.TimeFormat)
+			active := ca
+			active.Key, active.Generation = rotatedCAKey(t, ca.Alg), 2
+			cas = append(cas, drained, active)
+			if next {
+				n := ca
+				n.Key, n.State, n.Generation = rotatedCAKey(t, ca.Alg), "next", 3
+				cas = append(cas, n)
+			}
+		}
+		b.CAs = cas
+	}
+}
+
+// hostCAsOf returns b's host entries in bundle order.
+func hostCAsOf(b *trust.Bundle) []trust.CAEntry {
+	var out []trust.CAEntry
+	for _, ca := range b.CAs {
+		if ca.Role == trust.RoleHost {
+			out = append(out, ca)
+		}
+	}
+	return out
+}
+
+// caLineFor is the managed file's line for ca over names.
+func caLineFor(ca trust.CAEntry, names []string) string {
+	return fmt.Sprintf("@cert-authority %s %s keyroster host CA generation %d\n", strings.Join(names, ","), ca.Key, ca.Generation)
+}
+
+// plantHostTrustLogin is plantHostTrust for a loginServer (03-12d).
+func plantHostTrustLogin(t *testing.T, e *loginServer, version uint64, cas []trust.CAEntry, names []string) string {
+	t.Helper()
+	return plantHostTrustFiles(t, e.bundle, version, cas, names)
+}
+
+// requireNarrowed fails unless the managed known_hosts under sshDir is
+// before's minus drained, the state, KRL and ssh config are before's,
+// and stderr holds the narrowing line once (03-12d).
+func requireNarrowed(t *testing.T, sshDir string, before map[string]string, drained, stderr string) {
+	t.Helper()
+	after := hostTrustSnapshot(t, sshDir)
+	if strings.Count(before[hostTrustKnownHosts], drained) != 1 {
+		t.Fatalf("the planted known_hosts does not hold the drained line once:\n%s", before[hostTrustKnownHosts])
+	}
+	if want := strings.Replace(before[hostTrustKnownHosts], drained, "", 1); after[hostTrustKnownHosts] != want {
+		t.Fatalf("known_hosts:\n%s\nwant the planted file minus the drained line:\n%s\nstderr:\n%s", after[hostTrustKnownHosts], want, stderr)
+	}
+	for _, n := range []string{hostTrustStateFile, hostTrustKRLFile, hostTrustSSHConfig} {
+		if after[n] != before[n] {
+			t.Fatalf("%s changed:\n%s\nwas:\n%s", n, after[n], before[n])
+		}
+	}
+	want := fmt.Sprintf("Host trust narrowed: removed 1 CA line(s) of host CAs the trust bundle no longer trusts from %s.\n", filepath.Join(sshDir, hostTrustKnownHosts))
+	if strings.Count(stderr, want) != 1 {
+		t.Fatalf("stderr:\n%s\nwant the narrowing line once: %q", stderr, want)
+	}
+}
+
+// narrowCommandCases are TestKnownHosts' cases of the narrowing on the
+// commands that verify a bundle (03-12d, NP-01 to NP-08, NP-22 to NP-24):
+// each serves version 3 of the env's bundle with host g1 drained, plants
+// the managed files of version 2 with g1's line, runs the command and
+// checks what the command left.
+func narrowCommandCases(t *testing.T) {
+	names := []string{"web1"}
+	loginRotated := func(t *testing.T) (*loginServer, string, map[string]string, string) {
+		t.Helper()
+		e := newLoginServer(t)
+		e.serveRotated(t, 3, rotatedHostCAs(t, time.Now().Add(-time.Hour), true))
+		cas := hostCAsOf(e.bundle)
+		sshDir := plantHostTrustLogin(t, e, 2, cas, names)
+		return e, sshDir, hostTrustSnapshot(t, sshDir), caLineFor(cas[0], names)
+	}
+	dirRotated := func(t *testing.T, e *dirEnv, end time.Time) (string, map[string]string, string) {
+		t.Helper()
+		e.serveRotated(t, 3, rotatedHostCAs(t, end, true))
+		cas := hostCAsOf(e.bundle)
+		sshDir := plantHostTrust(t, e, 2, cas, names)
+		return sshDir, hostTrustSnapshot(t, sshDir), caLineFor(cas[0], names)
+	}
+	t.Run("known_hosts_narrows_when_krl_fetch_fails", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			set  func(t *testing.T, e *loginServer)
+		}{
+			{"server_error", func(t *testing.T, e *loginServer) {
+				doc, sigs := e.trustDir(t, 1)
+				e.setHostTrust(t, doc, sigs, nil)
+				e.mu.Lock()
+				e.krlStatus = http.StatusInternalServerError
+				e.mu.Unlock()
+			}},
+			{"no_krl_published", func(t *testing.T, e *loginServer) {
+				doc, sigs := e.trustDir(t, 1)
+				e.setHostTrust(t, doc, sigs, nil)
+			}},
+			{"krl_does_not_verify", func(t *testing.T, e *loginServer) {
+				doc, sigs := e.trustDir(t, 1)
+				e.setHostTrust(t, doc, sigs, htKRLDoc(t, 1, time.Now(), e.bundle.InstallationID, htSigner(t), krl.Set{}))
+			}},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				e, sshDir, before, drained := loginRotated(t)
+				c.set(t, e)
+				r := loginHostTrust(t, e)
+				if !strings.Contains(r.stdout, "Serial: ") || !strings.Contains(r.stdout, "Host trust not refreshed") {
+					t.Fatalf("stdout:\n%s\nwant the certificate and the refresh refused", r.stdout)
+				}
+				requireNarrowed(t, sshDir, before, drained, r.stderr)
+			})
+		}
+	})
+	t.Run("narrows_when_the_directory_is_missing", func(t *testing.T) {
+		e, sshDir, before, drained := loginRotated(t)
+		e.setHostTrust(t, nil, nil, e.trustKRL(t, 1))
+		r := loginHostTrust(t, e)
+		if !strings.Contains(r.stdout, "Host trust partly refreshed: revocations only") {
+			t.Fatalf("stdout:\n%s\nwant the writer's partial path", r.stdout)
+		}
+		after := hostTrustSnapshot(t, sshDir)
+		if want := strings.Replace(before[hostTrustKnownHosts], drained, "", 1); after[hostTrustKnownHosts] != want {
+			t.Fatalf("known_hosts:\n%s\nwant the planted file minus the drained line:\n%s\nstderr:\n%s", after[hostTrustKnownHosts], want, r.stderr)
+		}
+	})
+	t.Run("login_no_known_hosts_still_narrows", func(t *testing.T) {
+		e, sshDir, before, drained := loginRotated(t)
+		doc, sigs := e.trustDir(t, 1)
+		e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+		r := loginHostTrust(t, e, "--no-known-hosts")
+		requireNarrowed(t, sshDir, before, drained, r.stderr)
+	})
+	t.Run("login_refused_after_trust_still_narrows", func(t *testing.T) {
+		e, sshDir, before, drained := loginRotated(t)
+		useRecordingAgent(t)
+		e.setCert(func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
+			_, k, _ := ed25519.GenerateKey(rand.Reader)
+			p.ca, _ = ssh.NewSignerFromKey(k)
+			return nil
+		})
+		stderr, wait := e.start(t)
+		e.drive(t, stderr)
+		r := wait()
+		requireLoginRefused(t, r, "not signed by the user CA")
+		requireNarrowed(t, sshDir, before, drained, r.stderr)
+	})
+	t.Run("narrow_failure_keeps_exit_status", func(t *testing.T) {
+		e, sshDir, before, _ := loginRotated(t)
+		prev := narrowReplace
+		narrowReplace = func(string, string, []byte, fs.FileMode, func() error) error {
+			return errors.New("injected write failure")
+		}
+		t.Cleanup(func() { narrowReplace = prev })
+		r := loginHostTrust(t, e)
+		if !strings.Contains(r.stdout, "Serial: ") {
+			t.Fatalf("stdout:\n%s\nwant the certificate", r.stdout)
+		}
+		want := fmt.Sprintf("Warning: host CA lines not narrowed in %s: writing it failed: injected write failure.\n", filepath.Join(sshDir, hostTrustKnownHosts))
+		if !strings.Contains(r.stderr, want) {
+			t.Fatalf("stderr:\n%s\nwant %q", r.stderr, want)
+		}
+		if got := hostTrustSnapshot(t, sshDir)[hostTrustKnownHosts]; got != before[hostTrustKnownHosts] {
+			t.Fatalf("known_hosts changed:\n%s", got)
+		}
+	})
+	t.Run("narrows_on_any_command_with_verified_bundle", func(t *testing.T) {
+		drainedAt := time.Now().Add(-time.Hour)
+		t.Run("host_ca_key", func(t *testing.T) {
+			e := newDirEnv(t, 1, 1)
+			sshDir, before, drained := dirRotated(t, e, drainedAt)
+			_, _, errOut := run(t, "host", "ca-key")
+			requireNarrowed(t, sshDir, before, drained, errOut)
+		})
+		t.Run("host_status", func(t *testing.T) {
+			e := statusEnv(t, serverclient.HostsStatusAnswer{})
+			sshDir, before, drained := dirRotated(t, e, drainedAt)
+			_, _, errOut := run(t, "host", "status")
+			requireNarrowed(t, sshDir, before, drained, errOut)
+		})
+		t.Run("known_hosts_sync", func(t *testing.T) {
+			// dirEnv serves no KRL (404), so the writer cannot be what
+			// removes the line.
+			e := newDirEnv(t, 1, 1)
+			sshDir, before, drained := dirRotated(t, e, drainedAt)
+			_, _, errOut := run(t, "known-hosts", "sync")
+			requireNarrowed(t, sshDir, before, drained, errOut)
+		})
+		t.Run("directory_show", func(t *testing.T) {
+			e := newDirEnv(t, 1, 1)
+			sshDir, before, drained := dirRotated(t, e, drainedAt)
+			_, _, errOut := run(t, "directory", "show")
+			requireNarrowed(t, sshDir, before, drained, errOut)
+		})
+		t.Run("machine_renew", func(t *testing.T) {
+			e := newRenewEnv(t)
+			e.mu.Lock()
+			e.override["POST "+serverclient.MachineRenewPath] = func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) }
+			e.mu.Unlock()
+			sshDir, before, drained := dirRotated(t, e, drainedAt)
+			key, _ := machineKeyFile(t)
+			_, _, errOut := run(t, "machine", "renew", "ci", "--key", key, "--out", filepath.Join(t.TempDir(), "ci-cert.pub"))
+			requireNarrowed(t, sshDir, before, drained, errOut)
+		})
+	})
+	t.Run("no_narrowing_without_verified_bundle", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		sshDir, before, _ := dirRotated(t, e, time.Now().Add(-time.Hour))
+		e.cfg.TrustPins = []string{ssh.FingerprintSHA256(htSigner(t).PublicKey())}
+		if _, err := saveConfig(e.cfg, true); err != nil {
+			t.Fatal(err)
+		}
+		code, _, errOut := run(t, "host", "ca-key")
+		if code == 0 || strings.Contains(errOut, "Host trust narrowed") {
+			t.Fatalf("host ca-key with another root pin: exit %d, stderr:\n%s\nwant a refusal and no narrowing", code, errOut)
+		}
+		after := hostTrustSnapshot(t, sshDir)
+		for n, v := range before {
+			if after[n] != v {
+				t.Fatalf("%s changed:\n%s\nwas:\n%s", n, after[n], v)
+			}
+		}
+	})
+	t.Run("wrapper_uses_the_client_clock", func(t *testing.T) {
+		// g1 ends an hour after the wall clock and the client's clock is
+		// one second past that end: only a wrapper on trustClock drops it.
+		e := newDirEnv(t, 1, 1)
+		end := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		sshDir, before, drained := dirRotated(t, e, end)
+		prev := trustClock
+		trustClock = func() time.Time { return end.Add(time.Second) }
+		t.Cleanup(func() { trustClock = prev })
+		_, _, errOut := run(t, "host", "ca-key")
+		requireNarrowed(t, sshDir, before, drained, errOut)
+	})
+	t.Run("refresh_uses_the_client_clock", func(t *testing.T) {
+		end := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		prev := trustClock
+		t.Cleanup(func() { trustClock = prev })
+		for _, c := range []struct {
+			at        time.Time
+			withFirst bool
+		}{{end.Add(-time.Second), true}, {end, false}} {
+			sshDir := useSSHDir(t)
+			e := newLoginServer(t)
+			e.serveRotated(t, 3, rotatedHostCAs(t, end, false))
+			doc, sigs := e.trustDir(t, 1)
+			e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+			trustClock = func() time.Time { return c.at }
+			loginHostTrust(t, e)
+			cas := hostCAsOf(e.bundle)
+			kh := string(readTestFile(t, filepath.Join(sshDir, hostTrustKnownHosts)))
+			got := htCALines(t, kh)
+			_, first := got[cas[0].Key]
+			_, second := got[cas[1].Key]
+			if first != c.withFirst || !second || len(got) != map[bool]int{true: 2, false: 1}[c.withFirst] {
+				t.Fatalf("at %s (end %s): known_hosts\n%s\nwant generation 1's line %v and generation 2's", c.at, end, kh, c.withFirst)
+			}
+		}
+	})
+	t.Run("clock_ahead_narrows_early_and_a_refresh_restores", func(t *testing.T) {
+		f := newNHFix(t)
+		end := f.now.Add(-time.Hour) // g1's trusted_until
+		in := f.in(t, f.dirDoc(t, 1, "", htHost(t, "web1", directory.StatusActive, "web1")), f.krlV(t, 1))
+		in.CAs = hostTrustCAs(f.bundle, end.Add(-time.Hour))
+		mustRun(t, in, hostTrustFull)
+		if !strings.Contains(f.file(t, hostTrustKnownHosts), f.g1Line) {
+			t.Fatalf("the refresh before the end wrote no g1 line:\n%s", f.file(t, hostTrustKnownHosts))
+		}
+		if got := htNarrow(t, f.bundle, end.Add(time.Hour)); got != f.narrowed(1) || strings.Contains(f.file(t, hostTrustKnownHosts), f.g1Line) {
+			t.Fatalf("a clock ahead did not narrow: stderr %q\n%s", got, f.file(t, hostTrustKnownHosts))
+		}
+		mustRun(t, in, hostTrustFull)
+		if !strings.Contains(f.file(t, hostTrustKnownHosts), f.g1Line) {
+			t.Fatalf("the refresh at the right clock did not write the g1 line back:\n%s", f.file(t, hostTrustKnownHosts))
+		}
+	})
+	t.Run("clock_behind_keeps_the_drained_line", func(t *testing.T) {
+		f := newNHFix(t)
+		before := f.files(t)
+		if got := htNarrow(t, f.bundle, f.now.Add(-2*time.Hour)); got != "" {
+			t.Fatalf("stderr %q, want none", got)
+		}
+		f.requireFiles(t, before)
 	})
 }

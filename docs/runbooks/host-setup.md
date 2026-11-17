@@ -120,8 +120,15 @@ On the admin workstation:
 keyroster host ca-key > keyroster_user_ca.pub
 ```
 
-The line is the active user CA key of the root-verified trust bundle, with
-the comment `keyroster user CA (bundle vN)`. The bundle version is the
+The output holds one line for every user CA key the root-verified trust
+bundle trusts, each with the comment `keyroster user CA (bundle vN)`:
+normally the active key alone, and between the first ceremony of a CA
+rotation and the drop also the next key and a draining key until its end
+([ca-rotation.md](ca-rotation.md)). A host that keyroster-agent does not
+manage needs every line. When there is more than one, stderr lists each
+key's generation, fingerprint and state (`next`, or
+`draining, trusted until <t>`), and standard output still holds only the
+key lines. The bundle version is the
 server's word: a compromised server can serve an older root-signed bundle
 whose user CA key has since been replaced. Before the first host, and
 after every CA change, check that `keyroster audit verify` on the signer
@@ -137,6 +144,20 @@ where sshd reads it first
 ```
 TrustedUserCAKeys /etc/ssh/keyroster_user_ca.pub
 ```
+
+**A host that keyroster-agent does not manage.** Its
+`/etc/ssh/keyroster_user_ca.pub` must always equal the output of
+`keyroster host ca-key`: nothing removes a line from such a host for you.
+Run the command again and replace the file after an abort (a retired next
+key must leave at once, before the aborted key is destroyed), after the
+switch, and when a draining key ends (the stderr line
+`draining, trusted until <t>` shows when). Such hosts are not in the live
+count of `keyroster host status`, so check each one by hand before the
+second ceremony. The agent's adoption of a Phase 2 host accepts a
+`keyroster_user_ca.pub` of one line only: before you adopt a host whose
+file holds several lines, cut it to one line that holds a key the bundle
+trusts; the agent then writes every trusted key itself
+([Moving a Phase 2 host to the agent](#moving-a-phase-2-host-to-the-agent)).
 
 ## 2. Point sshd at the principals files
 
@@ -1367,12 +1388,58 @@ keyroster host status [--json]
 bundle v3 on 2/3 hosts
 directory v7 on 2/3 hosts
 KRL v1793196839 on 3/3 hosts
+user CA keys of bundle v3 live on 1/3 hosts
 
-HOST  DIRECTORY ENTRY               LAST SEEN  STATUS   BUNDLE  DIRECTORY  KRL           GENERATION  DRIFT  LAST APPLY  ALERTS
-web1  active                        12s ago    4m ago   v3      v7         v1793196839   12          no     ok          -
-web2  active                        40s ago    40s ago  v3      v7         v1793196839   9           no     ok          pending: intermediate
-web3  removed, served until forget  5m ago     12m ago  v2*     v6*        v1793196839   4           no     ok          silent
+HOST  DIRECTORY ENTRY               LAST SEEN  STATUS   BUNDLE  DIRECTORY  KRL          GENERATION  AGENT                   DRIFT  LAST APPLY  BEHIND                     ALERTS
+web1  active                        12s ago    4m ago   v3      v7         v1793196839  12          keyroster-agent v0.4.0  no     ok          -                          -
+web2  active                        40s ago    40s ago  v3      v7         v1793196839  9           keyroster-agent v0.4.0  no     ok          -                          pending: intermediate
+web3  removed, served until forget  5m ago     12m ago  v2*     v6*        v1793196839  4           keyroster-agent v0.3.0  no     ok          v3 for 5h (not_delivered)  silent
 ```
+
+**The live count and the new columns (03-12d).** `user CA keys of
+bundle vN live on X/M hosts` counts the hosts whose own status reports,
+for its `user_ca_keys` file, the SHA-256 of the file that the trust bundle
+this client verified gives at this client's clock (the active and next
+user and machine CA keys, and every draining one until its end), with no
+swap pending, not silent or stale (`status_stale`, `seq_regressed`), and
+a clean last drift check of its own: no drift, no error, not stuck, and
+not older than its last apply. A host that holds a next line back is not
+counted although its bundle version matches. The count is made only
+against the bundle the server serves as current; otherwise the line
+reads `user CA keys not counted: ...` and says why. A host whose last
+drift check found drift or failed, that has not run a check yet, or
+whose last check is older than its last apply is not counted until the
+agent's own next clean check reaches the server (the agent checks after
+every apply it runs itself and every 15 min, with a random 60 s either
+way; after `keyroster-agent apply --once` by hand the next periodic
+check counts), and a note names the reason. A clean check that ends
+after an apply committed a newer generation is not reported as the
+host's last check: the host waits for a check of the new generation
+(drift a check finds is always reported). Running
+`keyroster-agent check` as root on the host shows the host's own report,
+but it writes no status and so does not change the count. A stuck host
+is not counted until root has recovered it
+([Manual recovery](#manual-recovery)) and the agent's next clean check
+has run. A host with 255 or more principals files cannot be
+confirmed from its status, which lists only its first 256 files
+(`files_truncated`); check it by running `keyroster-agent check` as root
+on the host. M counts every row, so a removed host that is still served
+keeps M above X until `keyroster host forget`. Hosts that keyroster-agent
+does not manage are not in the count (step 1). The count is the server's
+word and each host's own report, not enforcement, and `--json` prints the
+server's answer unchanged, without a count. After the count, one line per
+draining CA entry of the bundle shows its end:
+`<role> CA generation <g> <fingerprint>: draining, trusted until <t>`,
+or `drained (ended <t>)` from the end on. `AGENT` is the version each
+agent reports, and `BEHIND` shows `v<N> for <age> (<reason>)` when the
+signed KRL manifest has named bundle vN for 2 hours or more and the host
+has not accepted it (`bundle_behind`, report only; see
+[CA rotation: what the agent does](#ca-rotation-what-the-agent-does)).
+Run in CI: `TestHostStatus/live_count_by_trust_file_hash`,
+`TestHostStatus/held_addition_not_live`,
+`TestHostStatus/live_count_end_to_end`, `TestUserCAKeysPath`.
+UNVERIFIED: the count against real agent heartbeats (the switch plan's
+end-to-end test).
 
 Each row is a host the directory approved once: when it was last seen (any
 request), how old its stored status is (`STATUS`: when the server last

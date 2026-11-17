@@ -120,7 +120,7 @@ func runUserAdd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	// pins verify, read before the account is created: the server chooses
 	// the invite URL, and a compromised one must not send the new user to
 	// an origin of its own under the admin's name.
-	_, policy, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
+	_, policy, err := verifiedTrust(ctx, client, cfg, stderr)
 	if err != nil {
 		return err
 	}
@@ -392,7 +392,7 @@ func runUserPending(ctx context.Context, args []string, stdout, stderr io.Writer
 			// Name the cause when the saved server URL is not a policy
 			// origin, from the root-verified policy only. A pin error is
 			// the cause itself and is named (03-14c, F06).
-			_, policy, terr := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
+			_, policy, terr := verifiedTrust(ctx, client, cfg, stderr)
 			if isInstallationPinError(terr) {
 				return terr
 			}
@@ -646,7 +646,7 @@ func runUserApprove(ctx context.Context, args []string, stdout, stderr io.Writer
 // returned instead, so the cause is named, not hidden (03-14c, F06).
 func (s *adminSession) diagnose(ctx context.Context, err error) error {
 	if errors.Is(err, serverclient.ErrAdminAuth) {
-		_, policy, terr := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID)
+		_, policy, terr := verifiedTrust(ctx, s.client, s.cfg, s.stderr)
 		if isInstallationPinError(terr) {
 			return terr
 		}

@@ -161,7 +161,7 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	fset.Var(&roles, "role", "log in with only this role (repeatable; default: all your roles)")
 	ttl := fset.Duration("ttl", 0, "certificate lifetime, at least 2m (default and maximum: the smallest cap of the selected roles)")
 	noBrowser := fset.Bool("no-browser", false, "print the approval URL instead of opening a browser")
-	noKnownHosts := fset.Bool("no-known-hosts", false, "do not refresh the host trust files in ~/.ssh (keyroster_known_hosts, keyroster_revoked_hosts.krl, keyroster_ssh_config)")
+	noKnownHosts := fset.Bool("no-known-hosts", false, "do not refresh the host trust files in ~/.ssh (keyroster_known_hosts, keyroster_revoked_hosts.krl, keyroster_ssh_config); CA lines the trust bundle no longer trusts are still removed from keyroster_known_hosts")
 	if err := fset.Parse(args); err != nil {
 		return errUsage
 	}
@@ -180,26 +180,47 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
-	bundle, policy, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
+	bundle, policy, err := verifiedTrust(ctx, client, cfg, stderr)
 	if err != nil {
 		return err
 	}
-	ca, err := activeUserCA(bundle)
+	cas, err := issuingUserCAs(bundle)
 	if err != nil {
 		return err
 	}
-	l := &loginRun{client: client, cfg: cfg, bundle: bundle, policy: policy, ca: ca, stdout: stdout, stderr: stderr, hostTrust: !*noKnownHosts}
+	l := &loginRun{client: client, cfg: cfg, bundle: bundle, policy: policy, cas: cas, stdout: stdout, stderr: stderr, hostTrust: !*noKnownHosts}
 	return l.run(ctx, roles, *ttl, *noBrowser)
 }
 
-// activeUserCA returns the active user CA key of the root-verified bundle.
-func activeUserCA(b *trust.Bundle) (ssh.PublicKey, error) {
-	for _, c := range b.CAs {
-		if c.Role == trust.RoleUser && c.State == "active" {
-			return trust.ParseKey(c.Key)
+// issuingUserCAs returns the user CA keys a login certificate may be
+// signed by, in generation order (03-12d, T-03-422): the root-verified
+// bundle's issuing set, its active and next user CA (trust.IssuingCAs).
+// The next key is there for a login whose bundle predates a switch, which
+// the signer answers with the new key; a draining or retired key is never
+// in it, since no fresh login is signed by one.
+func issuingUserCAs(b *trust.Bundle) ([]ssh.PublicKey, error) {
+	var keys []ssh.PublicKey
+	for _, ca := range trust.IssuingCAs(b, trust.RoleUser) {
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, pub)
+	}
+	if len(keys) == 0 {
+		return nil, errors.New("the root-signed trust bundle has no active user CA")
+	}
+	return keys, nil
+}
+
+// inKeySet reports whether k is one of keys.
+func inKeySet(k ssh.PublicKey, keys []ssh.PublicKey) bool {
+	for _, c := range keys {
+		if bytes.Equal(k.Marshal(), c.Marshal()) {
+			return true
 		}
 	}
-	return nil, errors.New("the root-signed trust bundle has no active user CA")
+	return false
 }
 
 // loginRun is one keyroster login.
@@ -211,9 +232,10 @@ type loginRun struct {
 	// hostTrust refreshes the host trust files after the login (03-09b;
 	// off with --no-known-hosts).
 	hostTrust bool
-	ca        ssh.PublicKey
-	stdout    io.Writer
-	stderr    io.Writer
+	// cas are the user CA keys a login certificate may be signed by.
+	cas    []ssh.PublicKey
+	stdout io.Writer
+	stderr io.Writer
 }
 
 // loginPlan is what the login asks for, from the checked options.
@@ -345,7 +367,7 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 	if err := l.client.PostJSON(ctx, loginRoutePrefix+begin.LoginID+"/redeem", loginRedeemBody{Code: code, CodeVerifier: verifier}, &redeemed); err != nil {
 		return redeemFailure(err)
 	}
-	c, err := checkLoginCert(redeemed.Certificate, l.ca, sshPub, req, plan, loginNow())
+	c, err := checkLoginCert(redeemed.Certificate, l.cas, sshPub, req, plan, loginNow())
 	if err != nil {
 		return certRefused(err)
 	}
@@ -544,7 +566,7 @@ func redeemFailure(err error) error {
 // and with at least minLoginRemaining seconds left (remainingOnServer). It
 // returns the certificate; addLoginToAgent computes the agent lifetime
 // again at the add.
-func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueRequest, plan *loginPlan, now time.Time) (*ssh.Certificate, error) {
+func checkLoginCert(raw []byte, cas []ssh.PublicKey, key ssh.PublicKey, req *wire.LoginIssueRequest, plan *loginPlan, now time.Time) (*ssh.Certificate, error) {
 	serverNow := now.Add(plan.skew + time.Second)
 	pk, err := ssh.ParsePublicKey(raw)
 	if err != nil {
@@ -554,7 +576,7 @@ func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueReque
 	if !ok || c.CertType != ssh.UserCert {
 		return nil, errors.New("it is not a user certificate")
 	}
-	if !bytes.Equal(c.SignatureKey.Marshal(), ca.Marshal()) {
+	if !inKeySet(c.SignatureKey, cas) {
 		return nil, errors.New("it is not signed by the user CA of your root-signed trust bundle")
 	}
 	// Checked here, before CertChecker refuses them with a vaguer text.
@@ -562,7 +584,7 @@ func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueReque
 		return nil, errors.New("it carries critical options, which a login never requests")
 	}
 	checker := ssh.CertChecker{
-		IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), ca.Marshal()) },
+		IsUserAuthority: func(auth ssh.PublicKey) bool { return inKeySet(auth, cas) },
 		Clock:           func() time.Time { return serverNow },
 	}
 	principal := ""

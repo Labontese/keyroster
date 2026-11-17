@@ -136,8 +136,15 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err != nil {
 		return err
 	}
+	// init verified a bundle against the root pins, so it narrows the
+	// managed known_hosts like every other command (03-12d, NP-09). It is
+	// not verifiedTrust because no installation is pinned yet; the
+	// narrowing's installation guard decides instead, so init --force
+	// against the saved installation narrows and an init against another
+	// installation declines.
+	narrowHostTrust(b, trustClock(), stderr)
 	cfg.InstallationID = b.InstallationID
-	if err := printTrustSummary(stdout, b, p); err != nil {
+	if err := printTrustSummary(stdout, b, p, trustClock()); err != nil {
 		return err
 	}
 	path, err := saveConfig(cfg, *force)
@@ -217,8 +224,10 @@ func observeRoots(ctx context.Context, hostPort, host, port string, pool *x509.C
 
 // printTrustSummary prints what init verified, from the root-signed
 // bundle: its version, the roots, each online key with its custody, and
-// the policy's relying party.
-func printTrustSummary(w io.Writer, b *trust.Bundle, p *trust.Policy) error {
+// the policy's relying party. Each CA entry ends with its state at now,
+// the client's clock: a draining one with its end, and drained from the
+// end on (caStateText, 03-12d).
+func printTrustSummary(w io.Writer, b *trust.Bundle, p *trust.Policy, now time.Time) error {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "trust bundle version %d, policy version %d (verified against your root pins)\n", b.Version, p.Version)
 	for _, r := range b.Root.Keys {
@@ -233,7 +242,7 @@ func printTrustSummary(w io.Writer, b *trust.Bundle, p *trust.Policy) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(&sb, "%s CA %s (custody %s, %s)\n", ca.Role, fp, ca.Custody, ca.State)
+		fmt.Fprintf(&sb, "%s CA %s (custody %s, %s)\n", ca.Role, fp, ca.Custody, caStateText(ca, now))
 	}
 	for _, k := range []struct{ name, key, custody string }{{"ops", b.OpsKey.Key, b.OpsKey.Custody}, {"log", b.Log.Key, b.Log.Custody}} {
 		fp, err := keyFP(k.key)

@@ -37,6 +37,11 @@ const recoveryCommand = "sudo keyroster-agent apply --once --recover-to-last-goo
 // identity rotation").
 const identityRotationShown = 7 * 24 * time.Hour
 
+// userCAKeysPath is the generation file of the agent's user CA keys,
+// apply.CAFile in internal/agent/apply, which is linux-only, so the CLI
+// keeps its own copy and a linux test pins the two (03-12d).
+const userCAKeysPath = "user_ca_keys"
+
 // errBadHostsStatus refuses a hosts/status answer that does not check out;
 // it never repeats the server's text.
 var errBadHostsStatus = errors.New("the server's host status does not check out; refusing to show it")
@@ -105,6 +110,10 @@ func safe(s string) string { return heartbeat.Sanitize(s, len(s)) }
 // on a version only when its committed version matches and no swap is
 // pending. A host removed or disabled in the directory that is still
 // served shows that, never as waiting for approval (03-08 carry-over a).
+// From 03-12d it also shows the live count of the user CA keys
+// (userCAKeysLive), each draining CA entry of the verified bundle, the
+// agent's version and bundle_behind, all at the client's clock
+// (trustClock).
 func runHostStatus(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("host status", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -118,7 +127,7 @@ func runHostStatus(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return err
 	}
 	defer s.close()
-	_, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID)
+	bundle, pol, err := verifiedTrust(ctx, s.client, s.cfg, s.stderr)
 	if err != nil {
 		return err
 	}
@@ -134,7 +143,7 @@ func runHostStatus(ctx context.Context, args []string, stdout, stderr io.Writer)
 		_, err = fmt.Fprintf(stdout, "%s\n", b)
 		return err
 	}
-	_, err = io.WriteString(stdout, renderHostsStatus(ans, time.Now()))
+	_, err = io.WriteString(stdout, renderHostsStatus(ans, bundle, trustClock()))
 	return err
 }
 
@@ -154,8 +163,107 @@ func fetchHostsStatus(ctx context.Context, s *adminSession, pol *trust.Policy) (
 	return &ans, nil
 }
 
-// renderHostsStatus is host status's text output at now.
-func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string {
+// userCAKeysLive is the live count of host status (03-12d, D-14, T-03-76,
+// T-03-416, T-03-447): the line `user CA keys of bundle v<N> live on
+// <X>/<M> hosts`, and a note for each host that cannot be counted for a
+// reason of its own report. It counts only against the bundle the client
+// verified, b, and only when that is the server's current one (its version
+// and the SHA-256 of its bytes), because a host's file is compared with
+// trust.UserCAKeysFile(b, now) and a count against another bundle would
+// vouch for keys the admin did not verify. A host counts when its status
+// lists userCAKeysPath with that file's SHA-256 (the hash the agent
+// recorded for the bytes it rendered, so a host that holds a next line
+// back is not counted although its bundle version matches), no swap is
+// pending, it is not silent, status_stale or seq_regressed, and its own
+// report vouches for the file: not stuck, a last drift check without
+// error or drift, and that check not older than its last apply (a check
+// is carried across an apply, so an older clean one says nothing about
+// the new generation). A host whose status lists only its first
+// heartbeat.MaxFiles files and lacks the entry cannot be confirmed from
+// it. M counts every row, as the three header lines above it do (OQ-E).
+// The count is the server's word and each host's own report, not
+// enforcement: the proof on a host is keyroster-agent check.
+func userCAKeysLive(a *serverclient.HostsStatusAnswer, b *trust.Bundle, now time.Time) (string, []string) {
+	doc, err := b.Canonical()
+	if err != nil || b.Version != a.Current.Bundle || trust.SHA256Hex(doc) != a.Current.BundleSHA256 {
+		return fmt.Sprintf("user CA keys not counted: the trust bundle this client verified (v%d) is not the server's current one (v%d)\n", b.Version, a.Current.Bundle), nil
+	}
+	file, err := trust.UserCAKeysFile(b, now)
+	if err != nil {
+		// Validate refuses a bundle whose CA key does not parse, so a
+		// verified bundle never reaches this; a count that cannot be made
+		// says why instead of printing a number.
+		return fmt.Sprintf("user CA keys not counted: %v\n", err), nil
+	}
+	want := trust.SHA256Hex(file)
+	var n int
+	var notes []string
+	for _, r := range a.Hosts {
+		h := r.Heartbeat
+		if h == nil {
+			continue
+		}
+		st := h.Status
+		sum, listed := "", false
+		for _, f := range st.Files {
+			if f.Path == userCAKeysPath {
+				sum, listed = f.SHA256, true
+				break
+			}
+		}
+		if !listed {
+			if st.FilesTruncated {
+				notes = append(notes, fmt.Sprintf("%s: user CA keys not confirmable: its status lists only the first %d files (files_truncated); run keyroster-agent check as root on the host", r.Name, heartbeat.MaxFiles))
+			}
+			continue
+		}
+		if sum != want || st.Pending != nil || r.Silent || r.StatusStale || r.SeqRegressed {
+			continue
+		}
+		if reason := liveReportReason(st); reason != "" {
+			// keyroster-agent check writes no status, so only the agent's
+			// own next check moves the count; a stuck host stays stuck, and
+			// applies nothing, until root runs the manual recovery.
+			remedy := "it is counted after the agent's next clean check; keyroster-agent check as root on the host shows its own report but does not change the count"
+			if st.Stuck != "" {
+				remedy = fmt.Sprintf("it is counted after root runs `%s` on the host (docs/runbooks/host-setup.md \"Manual recovery\") and the agent's next clean check", recoveryCommand)
+			}
+			notes = append(notes, fmt.Sprintf("%s: user CA keys not confirmed: %s; %s", r.Name, reason, remedy))
+			continue
+		}
+		n++
+	}
+	return fmt.Sprintf("user CA keys of bundle v%d live on %d/%d hosts\n", b.Version, n, len(a.Hosts)), notes
+}
+
+// liveReportReason is why a host's own report does not vouch for the
+// user CA keys file it lists ("" when it does), for userCAKeysLive.
+func liveReportReason(st heartbeat.Status) string {
+	c := st.LastCheck
+	switch {
+	case st.Stuck != "":
+		return "it is stuck"
+	case c == nil:
+		return "it has not run a drift check yet"
+	case c.Error != "":
+		return "its last check failed"
+	case c.Drift:
+		return "its last check reported drift"
+	}
+	if st.LastApply != nil {
+		checked, errC := time.Parse(trust.TimeFormat, c.At)
+		applied, errA := time.Parse(trust.TimeFormat, st.LastApply.At)
+		if errC == nil && errA == nil && checked.Before(applied) {
+			return "its last check is older than its last apply"
+		}
+	}
+	return ""
+}
+
+// renderHostsStatus is host status's text output at now, with the live
+// count and the draining CA entries of bundle, the bundle the client
+// verified (03-12d).
+func renderHostsStatus(a *serverclient.HostsStatusAnswer, bundle *trust.Bundle, now time.Time) string {
 	var b strings.Builder
 	m := len(a.Hosts)
 	var nb, nd, nk int
@@ -183,6 +291,21 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 	fmt.Fprintf(&b, "bundle v%d on %d/%d hosts\n", a.Current.Bundle, nb, m)
 	fmt.Fprintf(&b, "directory v%d on %d/%d hosts\n", a.Current.Directory, nd, m)
 	fmt.Fprintf(&b, "KRL v%d on %d/%d hosts\n", a.Current.KRL, nk, m)
+	live, notes := userCAKeysLive(a, bundle, now)
+	b.WriteString(live)
+	// Each draining CA entry of the verified bundle with its end, or
+	// drained from the end on, at the client's clock (03-12d).
+	for _, ca := range bundle.CAs {
+		if ca.State != "draining" {
+			continue
+		}
+		fp, err := keyFP(ca.Key)
+		if err != nil {
+			// Validate refuses a bundle whose CA key does not parse.
+			fp = "(a key that does not parse)"
+		}
+		fmt.Fprintf(&b, "%s CA generation %d %s: %s\n", ca.Role, ca.Generation, fp, caStateText(ca, now))
+	}
 	if m == 0 {
 		b.WriteString("No approved host has reported yet.\n")
 		b.WriteString(statusFooter)
@@ -190,8 +313,7 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 	}
 	b.WriteString("\n")
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "HOST\tDIRECTORY ENTRY\tLAST SEEN\tSTATUS\tBUNDLE\tDIRECTORY\tKRL\tGENERATION\tDRIFT\tLAST APPLY\tALERTS")
-	var notes []string
+	_, _ = fmt.Fprintln(tw, "HOST\tDIRECTORY ENTRY\tLAST SEEN\tSTATUS\tBUNDLE\tDIRECTORY\tKRL\tGENERATION\tAGENT\tDRIFT\tLAST APPLY\tBEHIND\tALERTS")
 	for _, r := range a.Hosts {
 		entry := "active"
 		switch {
@@ -219,10 +341,23 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 			alerts = append(alerts, "status_stale")
 			notes = append(notes, fmt.Sprintf("%s: status_stale: its status is %s old while the host is still seen: its applier writes none (on the host: systemctl status keyroster-agent)", r.Name, age(statusAge)))
 		}
-		bundle, dir, krl, gen, drift, last := "v0", "v0", "v0", "0", "-", "never applied"
+		bv, dir, krl, gen, drift, last := "v0", "v0", "v0", "0", "-", "never applied"
+		agent, behind := "-", "-"
 		if h := r.Heartbeat; h != nil {
 			st := h.Status
-			bundle, dir, krl = mark(st.Bundle, cb), mark(st.Directory, cd), mark(st.KRLDoc(), ck)
+			bv, dir, krl = mark(st.Bundle, cb), mark(st.Directory, cd), mark(st.KRLDoc(), ck)
+			// The agent's version and bundle_behind (03-12c), the host's
+			// own text, escaped below (T-03-448).
+			if st.AgentVersion != "" {
+				agent = st.AgentVersion
+			}
+			if bh := st.BundleBehind; bh != nil {
+				behind = fmt.Sprintf("v%d", bh.ManifestBundleVersion)
+				if t, err := time.Parse(trust.TimeFormat, bh.Since); err == nil {
+					behind += " for " + age(now.Sub(t))
+				}
+				behind += " (" + bh.Reason + ")"
+			}
 			if st.Diverged(cb, cd, ck) {
 				alerts = append(alerts, "diverged")
 				notes = append(notes, fmt.Sprintf("%s: diverged: it reports a bundle, directory or KRL the server does not hold as current (above the current version, or the current number with other bytes, for example after a signer restore lost versions it had applied)", r.Name))
@@ -328,7 +463,7 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 		if len(alerts) == 0 {
 			alerts = []string{"-"}
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safe(r.Name), entry, seen, status, bundle, dir, krl, gen, drift, safe(last), safe(strings.Join(alerts, ", ")))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safe(r.Name), entry, seen, status, bv, dir, krl, gen, safe(agent), drift, safe(last), safe(behind), safe(strings.Join(alerts, ", ")))
 	}
 	_ = tw.Flush()
 	for _, n := range notes {

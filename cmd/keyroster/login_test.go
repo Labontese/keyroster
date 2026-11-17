@@ -40,6 +40,7 @@ import (
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
 )
@@ -93,6 +94,8 @@ type loginServer struct {
 	krlDoc               []byte // nil: 404 no_krl
 	krlStatus            int    // non-zero: the KRL route answers this status
 	krlGets              int
+	// root is the genesis root's private key, for serveRotated (03-12d).
+	root ed25519.PrivateKey
 }
 
 const loginTestCustody = "user=agent, host=agent, machine=agent, ops=agent, log=agent"
@@ -150,6 +153,7 @@ func newLoginServer(t *testing.T) *loginServer {
 		t.Fatalf("root sign: exit %d: %s", code, stderr)
 	}
 	dialAgent = prevDial
+	e.root = g.rootKeys[0]
 	read := func(name string) []byte { return readTestFile(t, filepath.Join(g.out, name)) }
 	if e.bundle, err = trust.ParseBundle(read("bundle.json")); err != nil {
 		t.Fatal(err)
@@ -226,7 +230,10 @@ func (e *loginServer) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.URL.Path == serverclient.TrustPath:
-		_, _ = w.Write(e.trustDoc)
+		e.mu.Lock()
+		doc := e.trustDoc
+		e.mu.Unlock()
+		_, _ = w.Write(doc)
 	case r.URL.Path == serverclient.KRLPath:
 		e.mu.Lock()
 		e.krlGets++
@@ -1269,6 +1276,37 @@ func TestLoginFlowFakeServer(t *testing.T) {
 		}
 		e.requireCalls(t, 1, 1)
 	})
+	t.Run("login_by_a_next_user_ca", func(t *testing.T) {
+		// 03-12d (T-03-422, M253): a bundle with the user CA g1 active and
+		// g2 next; the signer answers with a certificate by g2, as it does
+		// after a switch that the login's bundle predates.
+		startLoginTestAgent(t)
+		e := newLoginServer(t)
+		var next ssh.Signer
+		e.serveRotated(t, 2, func(b *trust.Bundle) {
+			var cas []trust.CAEntry
+			for _, ca := range b.CAs {
+				cas = append(cas, ca)
+				if ca.Role == trust.RoleUser && ca.State == "active" {
+					next = newCASigner(t, ca.Alg)
+					n := ca
+					n.Key, n.State, n.Generation = trust.FormatKey(next.PublicKey()), "next", ca.Generation+1
+					cas = append(cas, n)
+				}
+			}
+			b.CAs = cas
+		})
+		e.setCert(func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
+			p.ca = next
+			return nil
+		})
+		stderr, wait := e.start(t)
+		e.drive(t, stderr)
+		r := wait()
+		if r.code != 0 || !strings.Contains(r.stdout, "Logged in as alice") {
+			t.Fatalf("a login whose certificate the next user CA signed: exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
+		}
+	})
 	t.Run("no_agent_no_begin", func(t *testing.T) {
 		// No usable agent (Unix: SSH_AUTH_SOCK unset, the default seam;
 		// Windows: Ensure's owner check fails): the login stops with the
@@ -1477,6 +1515,44 @@ func TestLoginPeerText(t *testing.T) {
 			t.Fatalf("exit %d; stderr lacks the software custody banner:\n%s", r.code, r.stderr)
 		}
 	})
+}
+
+// serveRotated serves e's bundle as version version (at least 2, with a
+// non-genesis prev), changed by edit, re-signed by the genesis root, and
+// reports that version in the trust answer (03-12d), as dirEnv's
+// serveRotated does. edit gets its own copy of the CA entries.
+func (e *loginServer) serveRotated(t *testing.T, version uint64, edit func(b *trust.Bundle)) {
+	t.Helper()
+	if version < 2 {
+		t.Fatalf("serveRotated: version %d, want at least 2", version)
+	}
+	b := *e.bundle
+	b.CAs = slices.Clone(b.CAs)
+	b.Version, b.Prev = version, strings.Repeat("ab", 32)
+	edit(&b)
+	doc, err := b.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := ssh.NewSignerFromKey(e.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, root, trust.NamespaceBundle, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var tr serverclient.TrustResponse
+	if err := json.Unmarshal(e.trustDoc, &tr); err != nil {
+		t.Fatal(err)
+	}
+	tr.Bundle, tr.BundleSigs, tr.BundleVersion = doc, sig, version
+	if e.trustDoc, err = json.Marshal(tr); err != nil {
+		t.Fatal(err)
+	}
+	e.bundle = &b
 }
 
 // setHostTrust makes redeem answer with doc and sigs, and the KRL route
@@ -1730,6 +1806,141 @@ func loginHostTrustCases(t *testing.T) {
 		r := loginHostTrust(t, e)
 		if !strings.Contains(r.stdout, "Host trust not refreshed: the host trust state") || len(sshFiles(t, sshDir)) != 1 {
 			t.Fatalf("files %v, stdout:\n%s", sshFiles(t, sshDir), r.stdout)
+		}
+	})
+}
+
+// newCASigner returns a fresh online CA signer of algorithm alg, for a
+// CA entry that a rotated bundle adds and a test signs with (03-12d).
+func newCASigner(t *testing.T, alg string) ssh.Signer {
+	t.Helper()
+	var key any
+	switch alg {
+	case ssh.KeyAlgoED25519:
+		_, k, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key = k
+	case ssh.KeyAlgoECDSA256:
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key = k
+	default:
+		t.Fatalf("newCASigner: algorithm %q", alg)
+	}
+	s, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// TestCheckLoginCertCAs (03-12d, T-03-422): a login accepts a certificate
+// signed by a key of the issuing set, the active or the next user CA, and
+// refuses one by a retired, a draining or an unknown key with the text it
+// has always had. The clocks are fixed and every draining entry ends after
+// them, so a refusal can only come from the issuing rule.
+func TestCheckLoginCertCAs(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	prevLogin, prevTrust := loginNow, trustClock
+	loginNow = func() time.Time { return now }
+	trustClock = func() time.Time { return now }
+	t.Cleanup(func() { loginNow, trustClock = prevLogin, prevTrust })
+	later := now.Add(time.Hour).Format(trust.TimeFormat)
+	_, subject, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subjectPub, err := ssh.NewPublicKey(subject.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &wire.LoginIssueRequest{Subject: "alice", Principals: []string{"u:alice"}, ValidForSeconds: 3600, RequestID: [16]byte{1, 2, 3}}
+	issue := func(t *testing.T, ca ssh.Signer) []byte {
+		t.Helper()
+		c, err := cert.Build(cert.Request{
+			Profile: cert.DefaultUserProfile(), Subject: subjectPub, Principals: req.Principals, Now: now, ValidFor: time.Hour,
+			KeyID:  cert.KeyID{CA: "user", Subject: "alice", Request: hex.EncodeToString(req.RequestID[:]), Policy: 1, Directory: 1, Roles: []string{"dev"}, Serial: 7},
+			Serial: 7, ExtraExtensions: map[string]string{},
+		}, ca, rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.Marshal()
+	}
+	plan := &loginPlan{granted: []string{"dev"}, certExtensions: []string{"permit-pty"}, ttl: time.Hour}
+	keys := make([]ssh.Signer, 4)
+	for i := range keys {
+		keys[i] = newCASigner(t, ssh.KeyAlgoECDSA256)
+	}
+	entry := func(i int, state string) trust.CAEntry {
+		e := trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(keys[i].PublicKey()), Alg: ssh.KeyAlgoECDSA256, Custody: "tpm", State: state, Generation: uint32(i + 1)} //nolint:gosec // G115: a small test index
+		if state == "draining" {
+			e.TrustedUntil = later
+		}
+		return e
+	}
+	check := func(t *testing.T, b *trust.Bundle, signer ssh.Signer) error {
+		t.Helper()
+		cas, err := issuingUserCAs(b)
+		if err != nil {
+			t.Fatalf("issuingUserCAs: %v", err)
+		}
+		_, err = checkLoginCert(issue(t, signer), cas, subjectPub, req, plan, now)
+		return err
+	}
+	const refusal = "not signed by the user CA"
+	t.Run("cert_by_active_user_ca_accepted", func(t *testing.T) {
+		b := &trust.Bundle{CAs: []trust.CAEntry{entry(0, "active"), entry(1, "next")}}
+		if err := check(t, b, keys[0]); err != nil {
+			t.Fatalf("a certificate by the active user CA: %v", err)
+		}
+	})
+	t.Run("cert_by_next_user_ca_accepted", func(t *testing.T) {
+		b := &trust.Bundle{CAs: []trust.CAEntry{entry(0, "active"), entry(1, "next")}}
+		if err := check(t, b, keys[1]); err != nil {
+			t.Fatalf("a certificate by the next user CA: %v", err)
+		}
+	})
+	t.Run("cert_by_retired_user_ca_refused", func(t *testing.T) {
+		b := &trust.Bundle{CAs: []trust.CAEntry{entry(0, "retired"), entry(1, "active")}}
+		if err := check(t, b, keys[0]); err == nil || !strings.Contains(err.Error(), refusal) {
+			t.Fatalf("a certificate by a retired user CA: %v; want %q", err, refusal)
+		}
+	})
+	t.Run("cert_by_draining_user_ca_refused", func(t *testing.T) {
+		b := &trust.Bundle{CAs: []trust.CAEntry{entry(0, "draining"), entry(1, "active")}}
+		if err := check(t, b, keys[0]); err == nil || !strings.Contains(err.Error(), refusal) {
+			t.Fatalf("a certificate by a draining user CA inside its window: %v; want %q", err, refusal)
+		}
+	})
+	t.Run("cert_by_unknown_ca_refused", func(t *testing.T) {
+		b := &trust.Bundle{CAs: []trust.CAEntry{entry(0, "active"), entry(1, "next")}}
+		if err := check(t, b, keys[3]); err == nil || !strings.Contains(err.Error(), refusal) {
+			t.Fatalf("a certificate by a key the bundle never named: %v; want %q", err, refusal)
+		}
+	})
+	t.Run("issuing_set_is_active_and_next_in_generation_order", func(t *testing.T) {
+		b := &trust.Bundle{CAs: []trust.CAEntry{entry(0, "retired"), entry(1, "draining"), entry(2, "active"), entry(3, "next")}}
+		cas, err := issuingUserCAs(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, k := range cas {
+			got = append(got, trust.FormatKey(k))
+		}
+		if want := []string{trust.FormatKey(keys[2].PublicKey()), trust.FormatKey(keys[3].PublicKey())}; !slices.Equal(got, want) {
+			t.Fatalf("issuingUserCAs = %q, want generations 3 and 4: %q", got, want)
+		}
+	})
+	t.Run("issuing_set_without_an_active_key_is_an_error", func(t *testing.T) {
+		b := &trust.Bundle{CAs: []trust.CAEntry{entry(0, "retired")}}
+		if cas, err := issuingUserCAs(b); err == nil || !strings.Contains(err.Error(), "has no active user CA") {
+			t.Fatalf("issuingUserCAs = %v, %v; want the error naming no active user CA", cas, err)
 		}
 	})
 }

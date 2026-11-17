@@ -109,7 +109,7 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 	if err != nil {
 		return err
 	}
-	bundle, pol, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
+	bundle, pol, err := verifiedTrust(ctx, client, cfg, stderr)
 	if err != nil {
 		return err
 	}
@@ -313,15 +313,27 @@ func machineRenewRequest(installation, name string, signer ssh.Signer) (*wire.Ma
 	return req, raw, nil
 }
 
-// machineCAKeys returns the machine CA keys of the verified bundle that
-// hosts trust, those in state active or next (b-C3); never a retired one,
-// so not krl.RoleCAKeys, which returns every state.
-func machineCAKeys(b *trust.Bundle) ([]ssh.PublicKey, error) {
+// machineIssuingKeys returns the machine CA keys that may sign a fresh
+// answer: the verified bundle's active and next entries (trust.IssuingCAs,
+// b-C3, 03-12d); never a draining or retired one, so not krl.RoleCAKeys,
+// which returns every state.
+func machineIssuingKeys(b *trust.Bundle) ([]ssh.PublicKey, error) {
+	return caKeys(trust.IssuingCAs(b, trust.RoleMachine))
+}
+
+// machineTrustedKeys returns the machine CA keys hosts trust at now
+// (trust.TrustedCAs, 03-12d): the issuing keys and a draining one until
+// its end. A cached certificate of a draining CA is kept until it is due,
+// the --if-due rule of the design; a fresh answer still needs an issuing
+// key.
+func machineTrustedKeys(b *trust.Bundle, now time.Time) ([]ssh.PublicKey, error) {
+	return caKeys(trust.TrustedCAs(b, trust.RoleMachine, now))
+}
+
+// caKeys parses the keys of cas.
+func caKeys(cas []trust.CAEntry) ([]ssh.PublicKey, error) {
 	var keys []ssh.PublicKey
-	for _, ca := range b.CAs {
-		if ca.Role != trust.RoleMachine || (ca.State != "active" && ca.State != "next") {
-			continue
-		}
+	for _, ca := range cas {
 		pub, err := trust.ParseKey(ca.Key)
 		if err != nil {
 			return nil, err
@@ -331,19 +343,9 @@ func machineCAKeys(b *trust.Bundle) ([]ssh.PublicKey, error) {
 	return keys, nil
 }
 
-// signedByMachineCA reports whether c's signature key is an active or next
-// machine CA key of b.
-func signedByMachineCA(c *ssh.Certificate, b *trust.Bundle) (bool, error) {
-	cas, err := machineCAKeys(b)
-	if err != nil {
-		return false, err
-	}
-	for _, ca := range cas {
-		if bytes.Equal(c.SignatureKey.Marshal(), ca.Marshal()) {
-			return true, nil
-		}
-	}
-	return false, nil
+// signedByMachineCA reports whether c's signature key is one of keys.
+func signedByMachineCA(c *ssh.Certificate, keys []ssh.PublicKey) bool {
+	return inKeySet(c.SignatureKey, keys)
 }
 
 // machineLifetime is L = ValidBefore - (ValidAfter + machineBackdate), or
@@ -376,11 +378,11 @@ func checkMachineCertificate(blob []byte, req *wire.MachineIssueRequest, b *trus
 	if !ok {
 		return nil, errors.New("it is not a certificate")
 	}
-	signedByCA, err := signedByMachineCA(c, b)
+	issuing, err := machineIssuingKeys(b)
 	if err != nil {
 		return nil, err
 	}
-	if !signedByCA {
+	if !signedByMachineCA(c, issuing) {
 		return nil, errors.New("it is not signed by an active or next machine CA key of your root-signed trust bundle")
 	}
 	if c.CertType != ssh.UserCert {
@@ -482,7 +484,7 @@ func machineCertCurrent(path string, pub ssh.PublicKey, name string, b *trust.Bu
 	if !ok || c.CertType != ssh.UserCert || !bytes.Equal(c.Key.Marshal(), pub.Marshal()) {
 		return 0, false
 	}
-	if signed, err := signedByMachineCA(c, b); err != nil || !signed {
+	if trusted, err := machineTrustedKeys(b, machineRenewTimeNow()); err != nil || !signedByMachineCA(c, trusted) {
 		return 0, false
 	}
 	if len(c.ValidPrincipals) == 0 || len(c.CriticalOptions) != 0 {

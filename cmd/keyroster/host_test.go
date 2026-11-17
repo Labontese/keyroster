@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -69,6 +71,60 @@ func (e *dirEnv) serveResigned(t *testing.T, edit func(b *trust.Bundle)) {
 		t.Fatal(err)
 	}
 	e.bundle = &b
+}
+
+// serveRotated serves e's bundle as version version (at least 2, with a
+// non-genesis prev), changed by edit, re-signed by the root, and reports
+// that version in the trust answer, as the server does for a rotated
+// bundle (03-12d). edit gets its own copy of the CA entries, so the
+// shared slice is never changed.
+func (e *dirEnv) serveRotated(t *testing.T, version uint64, edit func(b *trust.Bundle)) {
+	t.Helper()
+	if version < 2 {
+		t.Fatalf("serveRotated: version %d, want at least 2", version)
+	}
+	e.serveResigned(t, func(b *trust.Bundle) {
+		b.CAs = slices.Clone(b.CAs)
+		b.Version, b.Prev = version, strings.Repeat("ab", 32)
+		edit(b)
+	})
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var tr serverclient.TrustResponse
+	if err := json.Unmarshal(e.trustDoc, &tr); err != nil {
+		t.Fatal(err)
+	}
+	tr.BundleVersion = version
+	var err error
+	if e.trustDoc, err = json.Marshal(tr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// rotatedCAKey returns a fresh online CA key of algorithm alg in canonical
+// form, for a CA entry that serveRotated adds (03-12d).
+func rotatedCAKey(t *testing.T, alg string) string {
+	t.Helper()
+	var pub ssh.PublicKey
+	var err error
+	switch alg {
+	case ssh.KeyAlgoED25519:
+		var k ed25519.PublicKey
+		if k, _, err = ed25519.GenerateKey(rand.Reader); err == nil {
+			pub, err = ssh.NewPublicKey(k)
+		}
+	case ssh.KeyAlgoECDSA256:
+		var k *ecdsa.PrivateKey
+		if k, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err == nil {
+			pub, err = ssh.NewPublicKey(&k.PublicKey)
+		}
+	default:
+		t.Fatalf("rotatedCAKey: algorithm %q", alg)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return trust.FormatKey(pub)
 }
 
 // writeEntryKey writes a fresh Ed25519 public key file (with a comment,
