@@ -125,7 +125,7 @@ func (w *homeLookupWarning) Error() string {
 func defaultSSHDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("no home directory: %w", err)
+		return "", fmt.Errorf("%w: %w", errNoHomeDir, err)
 	}
 	dir := filepath.Join(home, ".ssh")
 	if runtime.GOOS == "windows" {
@@ -304,22 +304,34 @@ func hostTrustStatePath() (string, error) {
 // readHostTrustState reads the state at path: nil and no error when
 // there is none.
 func readHostTrustState(path string) (*hostTrustState, error) {
+	_, st, err := readHostTrustStateBytes(path)
+	return st, err
+}
+
+// readHostTrustStateBytes is readHostTrustState that also returns the
+// bytes it parsed (nil when there is no state), which the narrowing
+// compares right before its rename (03-12d).
+func readHostTrustStateBytes(path string) ([]byte, *hostTrustState, error) {
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%w: it is a symlink", errStateCorrupt)
+		return nil, nil, fmt.Errorf("%w: it is a symlink", errStateCorrupt)
 	}
 	fh, err := os.Open(path) //nolint:gosec // G304: the CLI's own state file
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errStateCorrupt, err)
+		return nil, nil, fmt.Errorf("%w: %w", errStateCorrupt, err)
 	}
 	defer func() { _ = fh.Close() }()
 	data, err := io.ReadAll(io.LimitReader(fh, maxHostTrustState+1))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errStateCorrupt, err)
+		return nil, nil, fmt.Errorf("%w: %w", errStateCorrupt, err)
 	}
-	return parseHostTrustState(data)
+	st, err := parseHostTrustState(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, st, nil
 }
 
 // hostTrustInput is what the writer verifies and writes from: the

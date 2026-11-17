@@ -66,44 +66,158 @@ func verifiedTrust(ctx context.Context, c *serverclient.Client, cfg *Config, std
 	return b, pol, err
 }
 
+// The refusals of the check right before the narrowing's rename (03-12d,
+// NP-20).
+var (
+	errNarrowFileChanged  = errors.New("the file changed while it was read")
+	errNarrowStateChanged = errors.New("another run recorded a newer host trust state meanwhile")
+)
+
 // narrowHostTrust removes from the managed keyroster_known_hosts the CA
-// lines of host CAs that b no longer trusts at now (03-12d). It never
-// creates the file (NP-16), reads and writes nothing else, and reports
-// only on stderr: one line when it narrowed, one warning when a write
-// failed (NP-22). A ~/.ssh that cannot be resolved is silent, and a
-// failed account lookup uses the directory it carries. The guards of the
-// floor, the installation, the state and the file are not here yet.
+// lines of host CAs that b no longer trusts at now (03-12d). It reads the
+// file and the state and writes only the file, never the state, the KRL
+// or the ssh config, and never creates the file (NP-16). Doubt narrows
+// nothing and prints one warning line on stderr; it never fails the
+// command. The order matters:
+//   - ~/.ssh: no home directory is silent; a $HOME that is not the
+//     account's home warns (NP-26), because ssh reads the file from the
+//     account's home and the narrowing cannot reach it; a failed account
+//     lookup uses the directory it carries;
+//   - the file: absent is silent; anything but a regular file (a symlink
+//     is never read through, NP-17) or a file over maxNarrowFile (NP-18)
+//     warns;
+//   - the bundle's trusted host CA keys must all parse, since a skipped
+//     key would narrow more than the bundle says (NP-21);
+//   - the filter; when it would remove nothing the command stays silent,
+//     whatever the state says (NP-27);
+//   - only then the state, read and never written: it must exist and be
+//     whole (NP-15), belong to the bundle's installation (NP-14), and the
+//     bundle must not be older than its bundle_version (NP-11) nor, at an
+//     equal version, name another ops key (NP-12). These mirror the
+//     writer's own refusals (writeHostTrust's trust bundle floor): any
+//     bundle at or above the floor names every key the file holds, so it
+//     removes a line only when it says the key is no longer trusted. The
+//     writer warns about an older bundle at refresh, so a command with
+//     nothing to narrow does not repeat it;
+//   - the write is atomic, and its check, right before the rename,
+//     refuses when the file no longer holds the bytes that were read or
+//     the state is not the state that was read (NP-20), so a concurrent
+//     refresh is never undone. A rename right after the check can still
+//     land behind a concurrent run, as the writer's D-R1 says; the next
+//     refresh rewrites every file.
 func narrowHostTrust(b *trust.Bundle, now time.Time, stderr io.Writer) {
 	sshDir, err := userSSHDir()
 	var lw *homeLookupWarning
 	if errors.As(err, &lw) {
 		sshDir, err = lw.dir, nil
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, errNoHomeDir):
+		return
+	case err != nil:
+		narrowWarn(stderr, "~/.ssh/"+hostTrustKnownHosts, err.Error())
 		return
 	}
 	p := filepath.Join(sshDir, hostTrustKnownHosts)
-	var trusted []string
-	for _, ca := range trust.TrustedCAs(b, trust.RoleHost, now) {
-		trusted = append(trusted, ca.Key)
-	}
-	data, err := os.ReadFile(p) //nolint:gosec // G304: the managed file
-	if errors.Is(err, fs.ErrNotExist) {
+	fi, err := os.Lstat(p)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		return
-	}
-	if err != nil {
+	case err != nil:
 		narrowWarn(stderr, p, fmt.Sprintf("it cannot be read: %v", err))
 		return
+	case !fi.Mode().IsRegular():
+		narrowWarn(stderr, p, "it is not a regular file")
+		return
+	}
+	data, err := readNarrowFile(p, fi)
+	switch {
+	case errors.Is(err, errNarrowFileChanged):
+		narrowWarn(stderr, p, err.Error())
+		return
+	case err != nil:
+		narrowWarn(stderr, p, fmt.Sprintf("it cannot be read: %v", err))
+		return
+	case int64(len(data)) > maxNarrowFile:
+		narrowWarn(stderr, p, fmt.Sprintf("it is larger than %d bytes", maxNarrowFile))
+		return
+	}
+	var trusted []string
+	for _, ca := range trust.TrustedCAs(b, trust.RoleHost, now) {
+		if _, err := trust.ParseKey(ca.Key); err != nil {
+			narrowWarn(stderr, p, "a trusted CA key of the bundle does not parse")
+			return
+		}
+		trusted = append(trusted, ca.Key)
 	}
 	out, removed := narrowKnownHosts(data, trusted)
 	if removed == 0 {
 		return
 	}
-	if err := replaceManagedFile(sshDir, hostTrustKnownHosts, out, 0o644, nil); err != nil {
-		narrowWarn(stderr, p, fmt.Sprintf("writing it failed: %v", err))
+	statePath, err := hostTrustStatePath()
+	if err != nil {
+		narrowWarn(stderr, p, fmt.Sprintf("the host trust state is damaged (%v)", err))
 		return
 	}
-	_, _ = fmt.Fprintf(stderr, "Host trust narrowed: removed %d CA line(s) of host CAs the trust bundle no longer trusts from %s.\n", removed, p)
+	stateBytes, st, err := readHostTrustStateBytes(statePath)
+	switch {
+	case err != nil:
+		narrowWarn(stderr, p, fmt.Sprintf("the host trust state is damaged (%s)", strings.TrimPrefix(err.Error(), errStateCorrupt.Error()+": ")))
+		return
+	case st == nil:
+		narrowWarn(stderr, p, "the host trust state is missing")
+		return
+	case st.InstallationID != b.InstallationID:
+		narrowWarn(stderr, p, fmt.Sprintf("the host trust state belongs to installation %s, not to %s", st.InstallationID, b.InstallationID))
+		return
+	case b.Version < st.BundleVersion:
+		narrowWarn(stderr, p, fmt.Sprintf("the server serves trust bundle version %d, older than version %d, which this client verified before", b.Version, st.BundleVersion))
+		return
+	case b.Version == st.BundleVersion && b.OpsKey.Key != st.OpsKey:
+		narrowWarn(stderr, p, fmt.Sprintf("trust bundle version %d names another ops key than the version this client verified before", b.Version))
+		return
+	}
+	if narrowHook != nil {
+		narrowHook()
+	}
+	check := func() error {
+		cur, err := os.Lstat(p)
+		if err != nil || !cur.Mode().IsRegular() {
+			return errNarrowFileChanged
+		}
+		if got, err := readNarrowFile(p, cur); err != nil || !bytes.Equal(got, data) {
+			return errNarrowFileChanged
+		}
+		if got, _, err := readHostTrustStateBytes(statePath); err != nil || !bytes.Equal(got, stateBytes) {
+			return errNarrowStateChanged
+		}
+		return nil
+	}
+	err = narrowReplace(sshDir, hostTrustKnownHosts, out, 0o644, check)
+	switch {
+	case errors.Is(err, errNarrowFileChanged), errors.Is(err, errNarrowStateChanged):
+		narrowWarn(stderr, p, err.Error())
+	case err != nil:
+		narrowWarn(stderr, p, fmt.Sprintf("writing it failed: %v", err))
+	default:
+		_, _ = fmt.Fprintf(stderr, "Host trust narrowed: removed %d CA line(s) of host CAs the trust bundle no longer trusts from %s.\n", removed, p)
+	}
+}
+
+// readNarrowFile reads at most maxNarrowFile plus one byte of the regular
+// file p that Lstat described as fi (03-12d). A file that is no longer the
+// one fi describes (a link or another file swapped in) is
+// errNarrowFileChanged.
+func readNarrowFile(p string, fi fs.FileInfo) ([]byte, error) {
+	fh, err := os.Open(p) //nolint:gosec // G304: the managed file
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = fh.Close() }()
+	if cur, err := fh.Stat(); err != nil || !os.SameFile(cur, fi) {
+		return nil, errNarrowFileChanged
+	}
+	return io.ReadAll(io.LimitReader(fh, maxNarrowFile+1))
 }
 
 // narrowWarn prints the one warning line of a narrowing that did not
