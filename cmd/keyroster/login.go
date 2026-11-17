@@ -188,7 +188,7 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
-	l := &loginRun{client: client, cfg: cfg, bundle: bundle, policy: policy, ca: ca, stdout: stdout, stderr: stderr, hostTrust: !*noKnownHosts}
+	l := &loginRun{client: client, cfg: cfg, bundle: bundle, policy: policy, cas: []ssh.PublicKey{ca}, stdout: stdout, stderr: stderr, hostTrust: !*noKnownHosts}
 	return l.run(ctx, roles, *ttl, *noBrowser)
 }
 
@@ -211,9 +211,10 @@ type loginRun struct {
 	// hostTrust refreshes the host trust files after the login (03-09b;
 	// off with --no-known-hosts).
 	hostTrust bool
-	ca        ssh.PublicKey
-	stdout    io.Writer
-	stderr    io.Writer
+	// cas are the user CA keys a login certificate may be signed by.
+	cas    []ssh.PublicKey
+	stdout io.Writer
+	stderr io.Writer
 }
 
 // loginPlan is what the login asks for, from the checked options.
@@ -345,7 +346,7 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 	if err := l.client.PostJSON(ctx, loginRoutePrefix+begin.LoginID+"/redeem", loginRedeemBody{Code: code, CodeVerifier: verifier}, &redeemed); err != nil {
 		return redeemFailure(err)
 	}
-	c, err := checkLoginCert(redeemed.Certificate, l.ca, sshPub, req, plan, loginNow())
+	c, err := checkLoginCert(redeemed.Certificate, l.cas, sshPub, req, plan, loginNow())
 	if err != nil {
 		return certRefused(err)
 	}
@@ -544,7 +545,7 @@ func redeemFailure(err error) error {
 // and with at least minLoginRemaining seconds left (remainingOnServer). It
 // returns the certificate; addLoginToAgent computes the agent lifetime
 // again at the add.
-func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueRequest, plan *loginPlan, now time.Time) (*ssh.Certificate, error) {
+func checkLoginCert(raw []byte, cas []ssh.PublicKey, key ssh.PublicKey, req *wire.LoginIssueRequest, plan *loginPlan, now time.Time) (*ssh.Certificate, error) {
 	serverNow := now.Add(plan.skew + time.Second)
 	pk, err := ssh.ParsePublicKey(raw)
 	if err != nil {
@@ -554,7 +555,7 @@ func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueReque
 	if !ok || c.CertType != ssh.UserCert {
 		return nil, errors.New("it is not a user certificate")
 	}
-	if !bytes.Equal(c.SignatureKey.Marshal(), ca.Marshal()) {
+	if !bytes.Equal(c.SignatureKey.Marshal(), cas[0].Marshal()) {
 		return nil, errors.New("it is not signed by the user CA of your root-signed trust bundle")
 	}
 	// Checked here, before CertChecker refuses them with a vaguer text.
@@ -562,7 +563,7 @@ func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueReque
 		return nil, errors.New("it carries critical options, which a login never requests")
 	}
 	checker := ssh.CertChecker{
-		IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), ca.Marshal()) },
+		IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), cas[0].Marshal()) },
 		Clock:           func() time.Time { return serverNow },
 	}
 	principal := ""
