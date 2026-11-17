@@ -49,6 +49,9 @@ type adminSession struct {
 	signer  ssh.Signer
 	adminFP string
 	close   func()
+	// stderr is the command's stderr, where verifiedTrust reports the
+	// narrowing of the managed known_hosts (03-12d).
+	stderr io.Writer
 }
 
 // openAdminSession loads and checks the saved config, finds the admin key
@@ -81,7 +84,7 @@ func openAdminSession(adminKey string, stderr io.Writer) (*adminSession, error) 
 		closeAgent()
 		return nil, err
 	}
-	return &adminSession{cfg: cfg, client: client, signer: signer, adminFP: fp, close: closeAgent}, nil
+	return &adminSession{cfg: cfg, client: client, signer: signer, adminFP: fp, close: closeAgent, stderr: stderr}, nil
 }
 
 // verifiedDirectory is the installed directory after the CLI verified it.
@@ -126,7 +129,7 @@ var errBadDirectoryAnswer = errors.New("the server's directory answer does not c
 // accepted, as the signer accepts it until keyroster directory rebind
 // binds it. Each caller decides what version 0 means for it.
 func fetchVerifiedDirectory(ctx context.Context, s *adminSession) (*verifiedDirectory, error) {
-	bundle, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID)
+	bundle, pol, err := verifiedTrust(ctx, s.client, s.cfg, s.stderr)
 	if err != nil {
 		return nil, err
 	}

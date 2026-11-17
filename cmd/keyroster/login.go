@@ -161,7 +161,7 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	fset.Var(&roles, "role", "log in with only this role (repeatable; default: all your roles)")
 	ttl := fset.Duration("ttl", 0, "certificate lifetime, at least 2m (default and maximum: the smallest cap of the selected roles)")
 	noBrowser := fset.Bool("no-browser", false, "print the approval URL instead of opening a browser")
-	noKnownHosts := fset.Bool("no-known-hosts", false, "do not refresh the host trust files in ~/.ssh (keyroster_known_hosts, keyroster_revoked_hosts.krl, keyroster_ssh_config)")
+	noKnownHosts := fset.Bool("no-known-hosts", false, "do not refresh the host trust files in ~/.ssh (keyroster_known_hosts, keyroster_revoked_hosts.krl, keyroster_ssh_config); CA lines the trust bundle no longer trusts are still removed from keyroster_known_hosts")
 	if err := fset.Parse(args); err != nil {
 		return errUsage
 	}
@@ -180,7 +180,7 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
-	bundle, policy, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold, cfg.InstallationID)
+	bundle, policy, err := verifiedTrust(ctx, client, cfg, stderr)
 	if err != nil {
 		return err
 	}

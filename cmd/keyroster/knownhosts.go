@@ -1061,7 +1061,7 @@ func runKnownHosts(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return err
 	}
 	defer s.close()
-	bundle, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID)
+	bundle, pol, err := verifiedTrust(ctx, s.client, s.cfg, s.stderr)
 	if err != nil {
 		return err
 	}

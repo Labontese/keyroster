@@ -118,7 +118,7 @@ func runHostStatus(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return err
 	}
 	defer s.close()
-	_, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold, s.cfg.InstallationID)
+	_, pol, err := verifiedTrust(ctx, s.client, s.cfg, s.stderr)
 	if err != nil {
 		return err
 	}

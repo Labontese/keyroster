@@ -136,6 +136,13 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err != nil {
 		return err
 	}
+	// init verified a bundle against the root pins, so it narrows the
+	// managed known_hosts like every other command (03-12d, NP-09). It is
+	// not verifiedTrust because no installation is pinned yet; the
+	// narrowing's installation guard decides instead, so init --force
+	// against the saved installation narrows and an init against another
+	// installation declines.
+	narrowHostTrust(b, trustClock(), stderr)
 	cfg.InstallationID = b.InstallationID
 	if err := printTrustSummary(stdout, b, p); err != nil {
 		return err
