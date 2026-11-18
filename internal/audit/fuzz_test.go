@@ -4,8 +4,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Labontese/keyroster/internal/tlog"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 // FuzzVerifyExport: Verify never panics on arbitrary input (Forget seeds
@@ -76,6 +78,27 @@ func FuzzVerifyExport(f *testing.F) {
 	bf.add(tlog.KindCAGeneration, caGenBody(f, "user", 2, newSigner(f, "ed25519").PublicKey()))
 	bf.addBundle(bf.signDocs(bf.genesis(), bf.policy(), bf.root))
 	f.Add([]byte(join(bf.lines())))
+	// A switch (03-12e): a log under the same root that adds generation 2
+	// of the user CA as next and switches to it, and a log with a recovery
+	// that carries a revoked certificate; both verify under the same pins.
+	t0 := time.Now().UTC().Truncate(time.Second)
+	sf, sv2, sc := switchLogWith(f, t0, fx.root, "")
+	sf.addBundle(sf.switchBundle(sv2, sc.ValidBefore+300))
+	sw := sf.lines()
+	if _, err := Verify(strings.NewReader(join(sw)), Options{Pins: pins, Threshold: 1}); err != nil {
+		f.Fatalf("the switch seed does not verify under the pins: %v", err)
+	}
+	f.Add([]byte(join(sw)))
+	cf, _, _ := switchLogWith(f, t0, fx.root, auditInstallationID)
+	rf := &revokeFixture{fixture: cf}
+	lost := rf.lostCert(rf.serial + 1000)
+	rf.recover(nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: true}}, nil)
+	rf.publish(func(o *publishOpts) { o.bundle = 2 })
+	carried := rf.lines()
+	if _, err := Verify(strings.NewReader(join(carried)), Options{Pins: pins, Threshold: 1}); err != nil {
+		f.Fatalf("the carried-certificate seed does not verify under the pins: %v", err)
+	}
+	f.Add([]byte(join(carried)))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		rep, err := Verify(strings.NewReader(string(data)), Options{Pins: pins, Threshold: 1})
 		if err != nil {
