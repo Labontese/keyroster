@@ -94,10 +94,14 @@ var scryptWorkFactor = 0
 
 func init() { keystore.Register("software", open) }
 
-// The software backend keeps one key file per CA key generation (03-12).
+// The software backend keeps one key file per CA key generation (03-12),
+// says whether a generation's file is still present and removes it
+// (03-12e).
 var (
 	_ keystore.GenerationBackend     = (*backend)(nil)
 	_ keystore.GenerationProvisioner = (*backend)(nil)
+	_ keystore.GenerationHolder      = (*backend)(nil)
+	_ keystore.GenerationRemover     = (*backend)(nil)
 )
 
 type backend struct {
@@ -475,6 +479,38 @@ func (b *backend) KeyAt(role keystore.Role, generation uint32, fingerprint, _ st
 	b.privs = append(b.privs, priv)
 	b.mu.Unlock()
 	return &caKey{Signer: signer}, nil
+}
+
+// GenerationHeld reports whether the software key file of generation of
+// role is present in stateDir's key directory (03-12e): any directory
+// entry at its name counts, a regular file, a damaged file, a link
+// (dangling or not) or a directory, and only its absence is not held. It
+// needs no passphrase, so doctor can ask it. An error other than absence
+// is reported as held, with the error.
+func GenerationHeld(_ string, _ keystore.Role, _ uint32) (bool, error) {
+	return false, nil
+}
+
+// Holds reports whether the key file of generation of role is still
+// present (GenerationHeld); it ignores the fingerprint and the location
+// (03-12e).
+func (b *backend) Holds(_ keystore.Role, _ uint32, _, _ string) (bool, error) {
+	return false, nil
+}
+
+// RemoveGeneration removes the key file of generation (at least 1) of
+// role and fsyncs the key directory (03-12e). The directory must be
+// private. A missing file is done. A link at the name is unlinked without
+// being followed or decrypted, since it is no key. A regular file is
+// removed only after it decrypts with the passphrase to the key whose
+// SHA-256 fingerprint is fingerprint: another key refuses with
+// ErrGenerationFileMismatch, a file that cannot be read or decrypted with
+// ErrGenerationFileUndecryptable, and neither removes anything, because
+// the generation number alone never decides which key is destroyed.
+// Anything else at the name (a directory) is removed with os.Remove,
+// which fails on a non-empty directory. It ignores location.
+func (b *backend) RemoveGeneration(_ keystore.Role, _ uint32, _, _ string) error {
+	return nil
 }
 
 // decryptKey decrypts an armored age file with one scrypt recipient and

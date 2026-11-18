@@ -319,3 +319,105 @@ func fingerprintOfWire(pub []byte) string {
 	}
 	return ssh.FingerprintSHA256(k)
 }
+
+// Refusals of ca-rotate retire-key (03-12e). Each message starts with the
+// name the runbook and the operator search for.
+var (
+	// ErrNoDrainingEntry refuses a role whose installed bundle has no
+	// draining entry: retire-key handles draining keys only.
+	ErrNoDrainingEntry = errors.New("no_draining_entry")
+	// ErrActiveKeyUnusable refuses, before anything is removed, when the
+	// role's active key cannot be opened or does not sign.
+	ErrActiveKeyUnusable = errors.New("active_key_unusable")
+	// ErrDrainingGenerationUnknown refuses a draining entry that no stored
+	// generation row of its role, number and key matches.
+	ErrDrainingGenerationUnknown = errors.New("draining_generation_unknown")
+	// ErrDrainingNamesActive refuses a draining entry whose generation
+	// number is the role's active entry's.
+	ErrDrainingNamesActive = errors.New("draining_names_the_active_generation")
+	// ErrRetireIncomplete reports that a draining key of the role is
+	// still held after retire-key ran.
+	ErrRetireIncomplete = errors.New("retire_key_incomplete")
+)
+
+// The outcomes of one draining generation in a RetireResult (03-12e).
+const (
+	// RetireRemoved: the backend removed the key and no longer holds it.
+	RetireRemoved = "removed"
+	// RetireNotHeld: the backend did not hold the key.
+	RetireNotHeld = "not held"
+	// RetireNotRemoved: the backend's removal refused or failed (Detail
+	// says why); the key counts as still held.
+	RetireNotRemoved = "not removed"
+	// RetireStillHeld: the backend cannot remove the key itself (the
+	// agent), still holds it after the removal, or cannot say (Detail);
+	// KeyLine and CertLines name what to remove.
+	RetireStillHeld = "still held"
+)
+
+// RetireResult is what RetireKeys did for each draining generation of one
+// role (03-12e). Socket is the stored agent backend's socket option ("" for
+// another backend): the agent through which an operator removes a key the
+// agent still holds.
+type RetireResult struct {
+	Role        string
+	Socket      string
+	Generations []RetiredGeneration
+}
+
+// RetiredGeneration is the outcome for one draining generation (03-12e):
+// its number and fingerprint, the outcome, a reason for RetireNotRemoved
+// or for an unknown answer, and, while it is RetireStillHeld, the draining
+// entry's public key line and the public line of each certificate
+// identity of that key that the backend lists.
+type RetiredGeneration struct {
+	Generation  uint32
+	Fingerprint string
+	Outcome     string
+	Detail      string
+	KeyLine     string
+	CertLines   []string
+}
+
+// Held reports whether the key of g still counts as held.
+func (g RetiredGeneration) Held() bool {
+	return g.Outcome != RetireRemoved && g.Outcome != RetireNotHeld
+}
+
+// retireTarget is a draining CA entry of the installed bundle and the
+// stored generation row it names (03-12e).
+type retireTarget struct {
+	Entry trust.CAEntry
+	Gen   signerdb.CAGeneration
+}
+
+// retireTargets pairs each draining entry of role in b with its generation
+// row in gens (03-12e): the row of the same role and number whose key is
+// the entry's. It refuses an entry whose number is the role's active
+// entry's (ErrDrainingNamesActive) and one that no row matches
+// (ErrDrainingGenerationUnknown), because the removal acts on a generation
+// number, which must name a stored key of that role and never the active
+// one. It returns none when role has no draining entry.
+func retireTargets(_ *trust.Bundle, _ []signerdb.CAGeneration, _ string) ([]retireTarget, error) {
+	return nil, nil
+}
+
+// RetireKeys removes the key of every draining generation of role (user,
+// host or machine) that be still holds, after a switch install (03-12e).
+// It first proves what it acts on: the stored bundle must pass
+// checkStoredTrust and be the one the verified log's last bundle_install
+// entry records (checkBundleLogged, as InstallBundle and New require); its
+// draining entries of role must name stored generation rows other than the
+// active one (retireTargets), and there must be at least one
+// (ErrNoDrainingEntry); and the role's active generation must open and
+// sign a test message (ErrActiveKeyUnusable). Only then, per draining
+// generation, it asks keystore.Holds, removes the key through
+// keystore.GenerationRemover when the backend has one, and asks again. A
+// backend without a remover (the agent) keeps the key, and the result
+// names the key and its certificate identities, with the stored socket,
+// for the operator to remove. It returns the result, and with it
+// ErrRetireIncomplete while any generation is still held. It writes no log
+// leaf and no row.
+func RetireKeys(_ context.Context, _ *signerdb.DB, _ keystore.Backend, _ keystore.Role) (*RetireResult, error) {
+	return nil, errors.New("signer: RetireKeys is declared, not implemented")
+}

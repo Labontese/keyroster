@@ -230,6 +230,7 @@ func TestSwitchTracer(t *testing.T) {
 			t.Fatalf("drain notes %+v, want one for user generation 1 naming serial %d", notes, c.Serial)
 		}
 		installed = true
+		dropDrained(t, e.be, notes)
 		s2, err := New(Config{Backend: e.be, DB: e.db, Clock: fixedClock(t0.Add(30 * time.Second)), AllowUIDs: []uint32{1000}})
 		if err != nil {
 			t.Fatalf("restart after the switch: %v", err)
@@ -298,7 +299,18 @@ type swKit struct {
 }
 
 func newSwKit(e *revokeEnv) *swKit {
-	return &swKit{e: e.logEnv, clk: e.clock, gb: &genBackend{memBackend: e.backend}}
+	return &swKit{e: e.logEnv, clk: e.clock, gb: &genBackend{memBackend: e.backend, fx: e.fx}}
+}
+
+// dropDrained removes from gb the key of every entry a successful switch
+// install newly drains (03-12e): the stand-in for the runbook's removal
+// step (ca-rotate retire-key), so that the signer started after the
+// install serves, as it does once the old key is gone.
+func dropDrained(t testing.TB, gb *genBackend, notes []DrainNote) {
+	t.Helper()
+	for _, n := range notes {
+		gb.drop(t, keystore.Role(n.Role), n.Generation)
+	}
 }
 
 func (k *swKit) now() time.Time { return k.clk.Now() }
@@ -438,6 +450,9 @@ func (k *swKit) install(t *testing.T, d [4][]byte, withPrevious bool) ([]DrainNo
 			}
 		}
 		_, notes, err = InstallBundleWithPrevious(context.Background(), db, k.gb, nil, 0, d[0], d[1], d[2], d[3], k.clk.Now, cp)
+		if err == nil {
+			dropDrained(t, k.gb, notes)
+		}
 	})
 	return notes, err
 }
@@ -1742,6 +1757,9 @@ func (k *swKit) installPrev(t *testing.T, d [4][]byte, previous []byte) ([]Drain
 	)
 	k.stopped(t, func(db *signerdb.DB) {
 		_, notes, err = InstallBundleWithPrevious(context.Background(), db, k.gb, nil, 0, d[0], d[1], d[2], d[3], k.clk.Now, previous)
+		if err == nil {
+			dropDrained(t, k.gb, notes)
+		}
 	})
 	return notes, err
 }

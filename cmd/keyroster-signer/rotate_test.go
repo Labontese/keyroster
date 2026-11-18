@@ -42,6 +42,7 @@ type rotateState struct {
 	db      string
 	sock    string
 	keyring agent.Agent
+	privs   map[string]ed25519.PrivateKey // each key addKey added, by fingerprint (03-12e)
 }
 
 // startTestAgent serves an in-process ssh-agent on a Unix socket in a short
@@ -115,7 +116,12 @@ func (st *rotateState) addKey(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ssh.FingerprintSHA256(s.PublicKey())
+	fp := ssh.FingerprintSHA256(s.PublicKey())
+	if st.privs == nil {
+		st.privs = map[string]ed25519.PrivateKey{}
+	}
+	st.privs[fp] = priv
+	return fp
 }
 
 // caPubKeys reads the ca-pubkeys.json that ca-init wrote.
@@ -735,44 +741,52 @@ func writeSoftwareKeys(t *testing.T, stateDir, passphrase string) map[string]str
 	}
 	fps := map[string]string{}
 	for _, role := range []string{"user", "host", "machine", "ops", "log"} {
-		_, priv, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		block, err := ssh.MarshalPrivateKey(priv, "keyroster test key")
-		if err != nil {
-			t.Fatal(err)
-		}
-		recipient, err := age.NewScryptRecipient(passphrase)
-		if err != nil {
-			t.Fatal(err)
-		}
-		recipient.SetWorkFactor(10)
-		var out bytes.Buffer
-		aw := armor.NewWriter(&out)
-		w, err := age.Encrypt(aw, recipient)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := w.Write(pem.EncodeToMemory(block)); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := aw.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, role+".age"), out.Bytes(), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		s, err := ssh.NewSignerFromKey(priv)
-		if err != nil {
-			t.Fatal(err)
-		}
-		fps[role] = ssh.FingerprintSHA256(s.PublicKey())
+		fps[role] = writeSoftwareKey(t, filepath.Join(dir, role+".age"), passphrase)
 	}
 	return fps
+}
+
+// writeSoftwareKey writes one key file of the software backend at path, as
+// writeSoftwareKeys does, and returns the key's fingerprint (03-12e: also
+// a later generation's file, placed for a --key prepare).
+func writeSoftwareKey(t *testing.T, path, passphrase string) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "keyroster test key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient, err := age.NewScryptRecipient(passphrase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient.SetWorkFactor(10)
+	var out bytes.Buffer
+	aw := armor.NewWriter(&out)
+	w, err := age.Encrypt(aw, recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(pem.EncodeToMemory(block)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := aw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ssh.FingerprintSHA256(s.PublicKey())
 }
 
 // switchFlagState is a state with ceremony 1 of the user CA installed
@@ -787,13 +801,20 @@ func switchFlagState(t *testing.T) (*rotateState, genesisDocs, chainDocs, string
 	install(t, st, g)
 	_, pf := prepareNext(t, st, "user")
 	v2 := installNext(t, st, g, genesisChain(t, g), pf)
-	issued, err := time.Parse(trust.TimeFormat, v2.b.IssuedAt)
+	return st, g, userSwitch(t, v2), exportLog(t, st)
+}
+
+// userSwitch is the switch successor of c for the user CA (allowance 0,
+// issued a second after c), built by trust.BuildSuccessor (03-12e).
+func userSwitch(t *testing.T, c chainDocs) chainDocs {
+	t.Helper()
+	issued, err := time.Parse(trust.TimeFormat, c.b.IssuedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := trust.BuildSuccessor(v2.b, v2.canon, v2.polDoc, trust.SuccessorOptions{
-		Roots: v2.b.Root.Keys, Threshold: 1, Policy: v2.polDoc,
-		IssuedAt: issued.Add(time.Second).Format(trust.TimeFormat), InstallationID: v2.b.InstallationID,
+	b, err := trust.BuildSuccessor(c.b, c.canon, c.polDoc, trust.SuccessorOptions{
+		Roots: c.b.Root.Keys, Threshold: 1, Policy: c.polDoc,
+		IssuedAt: issued.Add(time.Second).Format(trust.TimeFormat), InstallationID: c.b.InstallationID,
 		CASwitch: []string{trust.RoleUser},
 	})
 	if err != nil {
@@ -803,11 +824,17 @@ func switchFlagState(t *testing.T) (*rotateState, genesisDocs, chainDocs, string
 	if err != nil {
 		t.Fatal(err)
 	}
+	return chainDocs{b: b, canon: canon, p: c.p, polDoc: c.polDoc}
+}
+
+// exportLog runs export-log on st and returns the export file (03-12e).
+func exportLog(t *testing.T, st *rotateState) string {
+	t.Helper()
 	export := filepath.Join(t.TempDir(), "export.jsonl")
 	if code, msg := runSigner(t, "export-log", "--state-dir", st.dir, "--out", export); code != 0 {
 		t.Fatalf("export-log exited %d:\n%s", code, msg)
 	}
-	return st, g, chainDocs{b: b, canon: canon, p: v2.p, polDoc: v2.polDoc}, export
+	return export
 }
 
 // installSwitch runs install-bundle on the switch c, signed by g's root,
@@ -893,5 +920,265 @@ func TestInstallBundlePreviousFlag(t *testing.T) {
 		st, g, c, _ := switchFlagState(t)
 		code, out := installSwitch(t, st, g, c)
 		refused(t, code, out, "install_previous_required")
+	})
+}
+
+// softwareSwitchState is a state directory initialised by ca-init with the
+// software backend, with the user CA switched (03-12e): genesis, a
+// generation-2 user key file placed at a low work factor and selected by
+// ca-rotate prepare --key, ceremony 1, and the switch installed through
+// install-bundle --previous. Every key file is at a low scrypt work
+// factor, so no production-factor decrypt runs. It returns the state and
+// the fingerprints of user generations 1 and 2.
+func softwareSwitchState(t *testing.T) (*rotateState, string, string) {
+	t.Helper()
+	if os.Getuid() == 0 {
+		t.Skip("doctor refuses to run as root; run the tests as a normal user")
+	}
+	t.Setenv("CREDENTIALS_DIRECTORY", "")
+	const passphrase = "abcdefghijklmnopqrstuvwx"
+	pass := filepath.Join(t.TempDir(), "passphrase")
+	if err := os.WriteFile(pass, []byte(passphrase), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := &rotateState{dir: filepath.Join(t.TempDir(), "state")}
+	if err := os.Mkdir(st.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st.db = filepath.Join(st.dir, "signer.db")
+	fps := writeSoftwareKeys(t, st.dir, passphrase)
+	args := []string{"ca-init", "--backend", "software", "--backend-opt", "passphrase-file=" + pass, "--state-dir", st.dir}
+	for role, fp := range fps {
+		args = append(args, "--key", role+"="+fp)
+	}
+	if code, out := runSigner(t, args...); code != 0 {
+		t.Fatalf("ca-init exited %d:\n%s", code, out)
+	}
+	g := genesisFiles(t, st)
+	install(t, st, g)
+	fp2 := writeSoftwareKey(t, filepath.Join(st.dir, "software", "user-g2.age"), passphrase)
+	outFile := filepath.Join(t.TempDir(), "user-g2.json")
+	if code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--key", fp2, "--out", outFile); code != 0 {
+		t.Fatalf("ca-rotate prepare exited %d:\n%s", code, out)
+	}
+	data, err := os.ReadFile(outFile) //nolint:gosec // G304: the test's own prepare file
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pf prepareFile
+	if err := trust.DecodeStrict(data, &pf); err != nil {
+		t.Fatal(err)
+	}
+	v2 := installNext(t, st, g, genesisChain(t, g), pf)
+	if code, out := installSwitch(t, st, g, userSwitch(t, v2), "--previous", exportLog(t, st)); code != 0 {
+		t.Fatalf("install-bundle of the switch exited %d:\n%s", code, out)
+	}
+	return st, fps["user"], fp2
+}
+
+// agentSwitchState is switchFlagState with the switch installed through
+// install-bundle --previous (03-12e). It returns the state and the
+// fingerprint of user generation 1, whose key the agent still holds.
+func agentSwitchState(t *testing.T) (*rotateState, string) {
+	t.Helper()
+	st, g, c, export := switchFlagState(t)
+	if code, out := installSwitch(t, st, g, c, "--previous", export); code != 0 {
+		t.Fatalf("install-bundle of the switch exited %d:\n%s", code, out)
+	}
+	user, _ := st.caPubKeys(t).Key(trust.RoleUser)
+	pub, err := trust.ParseKey(user.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, ssh.FingerprintSHA256(pub)
+}
+
+// retireKey runs ca-rotate retire-key for role on st.
+func retireKey(t *testing.T, st *rotateState, role string) (int, string) {
+	t.Helper()
+	return runSigner(t, "ca-rotate", "retire-key", "--state-dir", st.dir, "--role", role)
+}
+
+// startErr opens the state database and the stored backend as serve does
+// and returns signer.New's error, closing what it opened (03-12e).
+func startErr(t *testing.T, st *rotateState) error {
+	t.Helper()
+	ctx := context.Background()
+	db, err := signerdb.Open(st.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	_, be, err := openStoredBackend(ctx, db, nil, st.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = be.Close() }()
+	_, err = signer.New(signer.Config{Backend: be, DB: db, AllowUIDs: []uint32{uint32(os.Getuid())}}) //nolint:gosec // G115: a uid
+	return err
+}
+
+// TestRetireKey (03-12e, RK-01 to RK-09, the command): ca-rotate
+// retire-key removes the software backend's draining key file and nothing
+// else, prints for the agent the ssh-add commands through the signer's own
+// agent socket and checks again, and refuses under the restore marker,
+// without a draining entry, when the active key does not sign, and on a
+// backend that cannot hold a generation.
+func TestRetireKey(t *testing.T) {
+	refused := func(t *testing.T, code int, out, want string) {
+		t.Helper()
+		if code == 0 || !strings.Contains(out, want) {
+			t.Fatalf("retire-key exited %d, want a refusal holding %q:\n%s", code, want, out)
+		}
+	}
+	keyFiles := func(t *testing.T, st *rotateState) []string {
+		t.Helper()
+		m, err := filepath.Glob(filepath.Join(st.dir, "software", "*.age"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range m {
+			m[i] = filepath.Base(m[i])
+		}
+		slices.Sort(m)
+		return m
+	}
+	t.Run("software_removes_draining_files_only", func(t *testing.T) {
+		st, fp1, _ := softwareSwitchState(t)
+		if err := startErr(t, st); err == nil || !strings.Contains(err.Error(), "draining_key_still_usable: the backend still holds generation 1 of the user CA ("+fp1+")") {
+			t.Fatalf("serve before retire-key: %v, want draining_key_still_usable naming generation 1", err)
+		}
+		code, out := retireKey(t, st, "user")
+		if code != 0 || !strings.Contains(out, "role user generation 1 "+fp1+": removed\n") || !strings.Contains(out, "retire-key: no draining key of role user is held\n") {
+			t.Fatalf("retire-key exited %d:\n%s", code, out)
+		}
+		if got, want := strings.Join(keyFiles(t, st), " "), "host.age log.age machine.age ops.age user-g2.age"; got != want {
+			t.Fatalf("key files after retire-key: %s, want %s", got, want)
+		}
+		if err := startErr(t, st); err != nil {
+			t.Fatalf("serve after retire-key: %v", err)
+		}
+	})
+	t.Run("agent_prints_command_and_rechecks", func(t *testing.T) {
+		st, fp1 := agentSwitchState(t)
+		// A certificate identity of the draining key, beside the plain key.
+		priv1 := st.privs[fp1]
+		pub1, err := ssh.NewPublicKey(priv1.Public())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := &ssh.Certificate{Key: pub1, CertType: ssh.UserCert, KeyId: "identity", ValidPrincipals: []string{"alice"}, ValidBefore: ssh.CertTimeInfinity}
+		if err := c.SignCert(rand.Reader, newTestSigner(t)); err != nil { //nolint:forbidigo // a certificate identity of a CA key in the test agent, which cert.Build cannot make
+			t.Fatal(err)
+		}
+		if err := st.keyring.Add(agent.AddedKey{PrivateKey: priv1, Certificate: c}); err != nil {
+			t.Fatal(err)
+		}
+		keyLine := strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(pub1)), "\n")
+		certLine := strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(c)), "\n")
+		head := "role user generation 1 " + fp1 + ": "
+		code, out := retireKey(t, st, "user")
+		want := head + "still held by the agent; write this public key line into retire-user-g1 and run: SSH_AUTH_SOCK=" + st.sock + " ssh-add -d retire-user-g1\n" +
+			keyLine + "\n" +
+			head + "write this certificate line into retire-user-g1-cert.pub and run: SSH_AUTH_SOCK=" + st.sock + " ssh-add -d retire-user-g1-cert.pub\n" +
+			certLine + "\n" +
+			"run retire-key again\n"
+		if code != 1 || !strings.Contains(out, want) || !strings.Contains(out, "retire_key_incomplete: 1 draining generation(s) of role user are still held") {
+			t.Fatalf("retire-key while the agent holds the key exited %d, want 1 with\n%s\ngot:\n%s", code, want, out)
+		}
+		// Remove exactly the printed identities through the printed socket.
+		lines := strings.Split(out, "\n")
+		var sock string
+		var printed []string
+		for i, l := range lines {
+			if !strings.HasPrefix(l, head) || i+1 >= len(lines) {
+				continue
+			}
+			_, after, ok := strings.Cut(l, "SSH_AUTH_SOCK=")
+			if !ok {
+				continue
+			}
+			sock, _, _ = strings.Cut(after, " ")
+			printed = append(printed, lines[i+1])
+		}
+		if sock != st.sock || len(printed) != 2 {
+			t.Fatalf("parsed socket %q and lines %q from the output", sock, printed)
+		}
+		conn, err := net.Dial("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		client := agent.NewClient(conn)
+		for i, l := range printed {
+			k, _, _, _, err := ssh.ParseAuthorizedKey([]byte(l))
+			if err != nil {
+				t.Fatalf("printed line %q: %v", l, err)
+			}
+			if err := client.Remove(k); err != nil {
+				t.Fatalf("remove %q through %s: %v", l, sock, err)
+			}
+			code, out := retireKey(t, st, "user")
+			if i == 0 && (code != 1 || !strings.Contains(out, head+"write this certificate line")) {
+				t.Fatalf("retire-key with only the certificate identity left exited %d:\n%s", code, out)
+			}
+			if i == 1 && (code != 0 || !strings.Contains(out, head+"not held\n") || !strings.Contains(out, "retire-key: no draining key of role user is held\n")) {
+				t.Fatalf("retire-key after both identities were removed exited %d:\n%s", code, out)
+			}
+		}
+	})
+	t.Run("refused_under_restore_marker", func(t *testing.T) {
+		st, _ := agentSwitchState(t)
+		if err := os.WriteFile(filepath.Join(st.dir, "restore-recovery-pending"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, out := retireKey(t, st, "user")
+		refused(t, code, out, "restore_recovery_pending")
+	})
+	t.Run("no_draining_entry_refused", func(t *testing.T) {
+		st, _, _, _ := switchFlagState(t)
+		code, out := retireKey(t, st, "user")
+		refused(t, code, out, "no_draining_entry")
+	})
+	t.Run("active_unusable_refused_nothing_removed", func(t *testing.T) {
+		st, _, _ := softwareSwitchState(t)
+		if err := os.Remove(filepath.Join(st.dir, "software", "user-g2.age")); err != nil {
+			t.Fatal(err)
+		}
+		code, out := retireKey(t, st, "user")
+		refused(t, code, out, "active_key_unusable")
+		if got, want := strings.Join(keyFiles(t, st), " "), "host.age log.age machine.age ops.age user.age"; got != want {
+			t.Fatalf("key files after the refusal: %s, want %s", got, want)
+		}
+	})
+	t.Run("second_run_is_a_no_op", func(t *testing.T) {
+		st, fp1, _ := softwareSwitchState(t)
+		if code, out := retireKey(t, st, "user"); code != 0 {
+			t.Fatalf("the first retire-key exited %d:\n%s", code, out)
+		}
+		before := keyFiles(t, st)
+		code, out := retireKey(t, st, "user")
+		if code != 0 || !strings.Contains(out, "role user generation 1 "+fp1+": not held\n") || !strings.Contains(out, "retire-key: no draining key of role user is held\n") {
+			t.Fatalf("the second retire-key exited %d:\n%s", code, out)
+		}
+		if after := keyFiles(t, st); !slices.Equal(before, after) {
+			t.Fatalf("the second retire-key changed the key files: %v, then %v", before, after)
+		}
+	})
+	t.Run("unsupported_backend_refused", func(t *testing.T) {
+		st, _ := agentSwitchState(t)
+		for _, name := range []string{"tpm", "piv"} {
+			db, err := sql.Open("sqlite", st.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = db.Exec(`UPDATE backend_config SET name = ? WHERE id = 1`, name)
+			_ = db.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			code, out := retireKey(t, st, "user")
+			refused(t, code, out, "rotation_not_supported_on_backend")
+		}
 	})
 }

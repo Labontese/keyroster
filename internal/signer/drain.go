@@ -27,6 +27,12 @@ var (
 	ErrDrainScanMissing           = fmt.Errorf("%w: drain_scan_missing", ErrBundleInstall)
 )
 
+// ErrDrainingKeyUsable refuses a signer start while the backend still
+// holds, or cannot say whether it holds, the key of a CA entry the
+// installed bundle drains (03-12e): after a switch, ca-rotate retire-key
+// removes that key before serve may start.
+var ErrDrainingKeyUsable = errors.New("draining_key_still_usable")
+
 // DrainNote is what a switch install bound for one newly draining CA
 // entry (03-12e): its role, generation and trusted_until, and the logged
 // certificate of its key with the largest ValidBefore (Recorded false when

@@ -175,6 +175,31 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 	return nil, fmt.Errorf("%w (role %s)", ErrKeyNotPresent, role)
 }
 
+// The agent backend says whether it still holds a CA key generation and
+// lists the certificate identities of a key (03-12e).
+var (
+	_ keystore.GenerationHolder  = (*backend)(nil)
+	_ keystore.CertificateLister = (*backend)(nil)
+)
+
+// Holds reports whether the agent lists the key with fingerprint, as a
+// plain key or as the key behind a certificate identity (03-12e): the
+// agent signs with the private key behind a certificate identity when it
+// is asked for that identity, so such an entry holds the key too. Key,
+// which signs, still skips certificate entries (CA-07). An agent that
+// cannot be listed, or a certificate entry that does not parse, is
+// reported as held, with the error. It ignores role, generation and
+// location.
+func (b *backend) Holds(_ keystore.Role, _ uint32, _, _ string) (bool, error) {
+	return false, nil
+}
+
+// Certificates returns every certificate identity the agent holds whose
+// underlying key has fingerprint (03-12e).
+func (b *backend) Certificates(_ string) ([]*ssh.Certificate, error) {
+	return nil, nil
+}
+
 // isCertificate reports whether an agent entry is a certificate. The agent
 // client returns every entry as an *agent.Key, never as *ssh.Certificate,
 // so the wire key type is what identifies a certificate entry.

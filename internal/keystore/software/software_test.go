@@ -750,3 +750,247 @@ func TestProvisionGeneration(t *testing.T) {
 		}
 	})
 }
+
+// holder is be as a keystore.GenerationHolder.
+func holder(t *testing.T, be keystore.Backend) keystore.GenerationHolder {
+	t.Helper()
+	h, ok := be.(keystore.GenerationHolder)
+	if !ok {
+		t.Fatal("the software backend is not a GenerationHolder")
+	}
+	return h
+}
+
+// remover is be as a keystore.GenerationRemover.
+func remover(t *testing.T, be keystore.Backend) keystore.GenerationRemover {
+	t.Helper()
+	r, ok := be.(keystore.GenerationRemover)
+	if !ok {
+		t.Fatal("the software backend is not a GenerationRemover")
+	}
+	return r
+}
+
+// TestHoldsSoftware (03-12e, SR-01): a generation is held while any
+// directory entry sits at its file name (a regular file, a dangling link,
+// a directory), as the backend's Holds and GenerationHeld, which doctor
+// asks without the passphrase, both report; only absence is not held.
+func TestHoldsSoftware(t *testing.T) {
+	// both asks the backend and GenerationHeld and requires them to agree.
+	both := func(t *testing.T, dir string, be keystore.Backend, role keystore.Role, gen uint32) bool {
+		t.Helper()
+		h1, err1 := holder(t, be).Holds(role, gen, "SHA256:ignored", "ignored")
+		h2, err2 := GenerationHeld(dir, role, gen)
+		if err1 != nil || err2 != nil || h1 != h2 {
+			t.Fatalf("Holds = %v, %v; GenerationHeld = %v, %v; want the same answer without an error", h1, err1, h2, err2)
+		}
+		return h1
+	}
+	setup := func(t *testing.T) (string, string, keystore.Backend) {
+		t.Helper()
+		dir := newStateDir(t)
+		if err := os.Mkdir(filepath.Join(dir, "software"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return dir, filepath.Join(dir, "software"), mustOpen(t, dir, writePassFile(t, testPassphrase, 0o600))
+	}
+	t.Run("regular_file_is_held", func(t *testing.T) {
+		dir, kd, be := setup(t)
+		if err := os.WriteFile(filepath.Join(kd, "user-g2.age"), []byte("not even a key"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !both(t, dir, be, keystore.RoleUser, 2) {
+			t.Fatal("a file at user-g2.age is not held")
+		}
+	})
+	t.Run("dangling_symlink_is_held", func(t *testing.T) {
+		dir, kd, be := setup(t)
+		if err := os.Symlink(filepath.Join(kd, "nowhere.age"), filepath.Join(kd, "host-g3.age")); err != nil {
+			t.Fatal(err)
+		}
+		if !both(t, dir, be, keystore.RoleHost, 3) {
+			t.Fatal("a dangling link at host-g3.age is not held")
+		}
+	})
+	t.Run("directory_at_the_name_is_held", func(t *testing.T) {
+		dir, kd, be := setup(t)
+		if err := os.Mkdir(filepath.Join(kd, "machine-g2.age"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !both(t, dir, be, keystore.RoleMachine, 2) {
+			t.Fatal("a directory at machine-g2.age is not held")
+		}
+	})
+	t.Run("generation_1_name_is_the_role_file", func(t *testing.T) {
+		dir, kd, be := setup(t)
+		if err := os.WriteFile(filepath.Join(kd, "user-g1.age"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if both(t, dir, be, keystore.RoleUser, 1) {
+			t.Fatal("generation 1 is held by a user-g1.age file; its file is user.age")
+		}
+		if err := os.WriteFile(filepath.Join(kd, "user.age"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !both(t, dir, be, keystore.RoleUser, 1) {
+			t.Fatal("a file at user.age does not hold generation 1")
+		}
+	})
+	t.Run("missing_is_not_held", func(t *testing.T) {
+		dir, _, be := setup(t)
+		if both(t, dir, be, keystore.RoleUser, 2) {
+			t.Fatal("a generation with no file is held")
+		}
+	})
+}
+
+// TestRemoveGeneration (03-12e, RK-04, RK-05 and RK-11): RemoveGeneration
+// unlinks exactly the file of one generation, after it decrypts to the
+// generation's key, and fsyncs the directory; a link goes without its
+// target, a non-empty directory stays and fails, another key or a file it
+// cannot decrypt is refused with nothing removed, and a missing file is
+// done.
+func TestRemoveGeneration(t *testing.T) {
+	fastScrypt(t)
+	setup := func(t *testing.T) (string, keystore.Backend, map[keystore.Role]ssh.PublicKey, ssh.PublicKey) {
+		t.Helper()
+		dir := newStateDir(t)
+		be := mustOpen(t, dir, writePassFile(t, testPassphrase, 0o600))
+		pubs := provision(t, be)
+		pub2, _, err := be.(keystore.GenerationProvisioner).ProvisionGeneration(keystore.RoleUser, 2, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(dir, "software"), be, pubs, pub2
+	}
+	exists := func(t *testing.T, path string) bool {
+		t.Helper()
+		_, err := os.Lstat(path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		return err == nil
+	}
+	t.Run("removes_only_that_generation", func(t *testing.T) {
+		kd, be, _, pub2 := setup(t)
+		if err := remover(t, be).RemoveGeneration(keystore.RoleUser, 2, ssh.FingerprintSHA256(pub2), ""); err != nil {
+			t.Fatalf("RemoveGeneration: %v", err)
+		}
+		if exists(t, filepath.Join(kd, "user-g2.age")) {
+			t.Fatal("user-g2.age is still there")
+		}
+		for _, role := range allRoles {
+			if !exists(t, filepath.Join(kd, string(role)+".age")) {
+				t.Fatalf("%s.age was removed", role)
+			}
+		}
+	})
+	t.Run("symlink_removed_not_followed", func(t *testing.T) {
+		kd, be, _, _ := setup(t)
+		target := filepath.Join(t.TempDir(), "target.age")
+		if err := os.WriteFile(target, []byte("the target of the link"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(kd, "host-g2.age")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if err := remover(t, be).RemoveGeneration(keystore.RoleHost, 2, "SHA256:any", ""); err != nil {
+			t.Fatalf("RemoveGeneration of a link: %v", err)
+		}
+		if exists(t, link) {
+			t.Fatal("the link is still there")
+		}
+		if !exists(t, target) {
+			t.Fatal("the target of the link was removed")
+		}
+	})
+	t.Run("directory_stays_held", func(t *testing.T) {
+		kd, be, _, _ := setup(t)
+		d := filepath.Join(kd, "host-g2.age")
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "inside"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := remover(t, be).RemoveGeneration(keystore.RoleHost, 2, "SHA256:any", ""); err == nil {
+			t.Fatal("RemoveGeneration of a non-empty directory succeeded")
+		}
+		if held, err := holder(t, be).Holds(keystore.RoleHost, 2, "", ""); err != nil || !held {
+			t.Fatalf("the directory after the failed removal: held %v, %v; want held", held, err)
+		}
+	})
+	t.Run("refuses_generation_0", func(t *testing.T) {
+		_, be, _, _ := setup(t)
+		if err := remover(t, be).RemoveGeneration(keystore.RoleUser, 0, "SHA256:any", ""); err == nil {
+			t.Fatal("RemoveGeneration accepted generation 0")
+		}
+	})
+	t.Run("fsyncs_the_directory", func(t *testing.T) {
+		kd, be, _, pub2 := setup(t)
+		var synced []string
+		orig := syncDir
+		syncDir = func(d string) error { synced = append(synced, d); return orig(d) }
+		t.Cleanup(func() { syncDir = orig })
+		if err := remover(t, be).RemoveGeneration(keystore.RoleUser, 2, ssh.FingerprintSHA256(pub2), ""); err != nil {
+			t.Fatal(err)
+		}
+		if len(synced) != 1 || synced[0] != kd {
+			t.Fatalf("synced %v, want exactly %s", synced, kd)
+		}
+	})
+	t.Run("missing_file_is_ok", func(t *testing.T) {
+		_, be, _, _ := setup(t)
+		if err := remover(t, be).RemoveGeneration(keystore.RoleMachine, 5, "SHA256:any", ""); err != nil {
+			t.Fatalf("RemoveGeneration of a generation with no file: %v", err)
+		}
+	})
+	t.Run("private_dir_required", func(t *testing.T) {
+		kd, be, _, pub2 := setup(t)
+		if err := os.Chmod(kd, 0o750); err != nil { //nolint:gosec // G302: the test widens the mode on purpose
+			t.Fatal(err)
+		}
+		if err := remover(t, be).RemoveGeneration(keystore.RoleUser, 2, ssh.FingerprintSHA256(pub2), ""); err == nil {
+			t.Fatal("RemoveGeneration removed from a directory with group permissions")
+		}
+		if !exists(t, filepath.Join(kd, "user-g2.age")) {
+			t.Fatal("user-g2.age was removed")
+		}
+	})
+	t.Run("fingerprint_mismatch_refused_nothing_removed", func(t *testing.T) {
+		kd, be, pubs, pub2 := setup(t)
+		fp1 := ssh.FingerprintSHA256(pubs[keystore.RoleUser])
+		err := remover(t, be).RemoveGeneration(keystore.RoleUser, 2, fp1, "")
+		if !errors.Is(err, keystore.ErrGenerationFileMismatch) || !strings.Contains(err.Error(), "the file holds another key ("+ssh.FingerprintSHA256(pub2)+")") {
+			t.Fatalf("RemoveGeneration with the fingerprint of generation 1 = %v, want ErrGenerationFileMismatch naming the key of the file", err)
+		}
+		if !exists(t, filepath.Join(kd, "user-g2.age")) {
+			t.Fatal("user-g2.age was removed")
+		}
+	})
+	t.Run("undecryptable_file_refused_nothing_removed", func(t *testing.T) {
+		kd, be, _, pub2 := setup(t)
+		fp2 := ssh.FingerprintSHA256(pub2)
+		// A wrong passphrase: another backend over the same directory.
+		other := mustOpen(t, filepath.Dir(kd), writePassFile(t, "another passphrase of 33 characters", 0o600))
+		err := remover(t, other).RemoveGeneration(keystore.RoleUser, 2, fp2, "")
+		if !errors.Is(err, keystore.ErrGenerationFileUndecryptable) || !strings.Contains(err.Error(), "the file cannot be decrypted: ") {
+			t.Fatalf("RemoveGeneration under a wrong passphrase = %v, want ErrGenerationFileUndecryptable", err)
+		}
+		if !exists(t, filepath.Join(kd, "user-g2.age")) {
+			t.Fatal("user-g2.age was removed under a wrong passphrase")
+		}
+		// A damaged file.
+		damaged := filepath.Join(kd, "host-g2.age")
+		if err := os.WriteFile(damaged, []byte("-----BEGIN AGE ENCRYPTED FILE-----\ngarbage\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := remover(t, be).RemoveGeneration(keystore.RoleHost, 2, fp2, ""); !errors.Is(err, keystore.ErrGenerationFileUndecryptable) {
+			t.Fatalf("RemoveGeneration of a damaged file = %v, want ErrGenerationFileUndecryptable", err)
+		}
+		if !exists(t, damaged) {
+			t.Fatal("the damaged file was removed")
+		}
+	})
+}

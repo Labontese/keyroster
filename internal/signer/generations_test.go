@@ -30,15 +30,28 @@ import (
 // provisioner path and the location's round trip without the software
 // backend (03-12). It counts its provisioning calls and records the used
 // argument of each one and the location every KeyAt call receives.
+//
+// It also says whether it holds a generation and removes one
+// (keystore.GenerationHolder and GenerationRemover, 03-12e). What it holds
+// is, by definition, what its KeyAt can open, and drop and
+// RemoveGeneration remove a key from that same map, so the double can
+// never report a key as not held while it still signs with it. holdsErr
+// and removeErr, when set, make Holds and RemoveGeneration fail.
 type genBackend struct {
 	*memBackend
+	fx         *Fixture // generation 1 of each role is fx's role key
 	mu         sync.Mutex
 	provisions int
 	used       [][]string
 	locations  []string
+	created    map[string]string // "role/N" of each generation it created, to its fingerprint
+	holdsErr   error
+	removeErr  error
 }
 
-func newGenBackend(fx *Fixture) *genBackend { return &genBackend{memBackend: newMemBackend(fx)} }
+func newGenBackend(fx *Fixture) *genBackend {
+	return &genBackend{memBackend: newMemBackend(fx), fx: fx}
+}
 
 // ProvisionGeneration generates an Ed25519 key, holds it, and returns it
 // with the location loc-<role>-g<N>.
@@ -56,7 +69,63 @@ func (b *genBackend) ProvisionGeneration(role keystore.Role, generation uint32, 
 	b.provisions++
 	b.used = append(b.used, slices.Clone(used))
 	b.keys[ssh.FingerprintSHA256(s.PublicKey())] = s
+	if b.created == nil {
+		b.created = map[string]string{}
+	}
+	b.created[fmt.Sprintf("%s/%d", role, generation)] = ssh.FingerprintSHA256(s.PublicKey())
 	return s.PublicKey(), fmt.Sprintf("loc-%s-g%d", role, generation), nil
+}
+
+// Holds reports whether the key with fp is in the map KeyAt opens from,
+// or fails with holdsErr (03-12e).
+func (b *genBackend) Holds(_ keystore.Role, _ uint32, fp, _ string) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.holdsErr != nil {
+		return true, b.holdsErr
+	}
+	_, ok := b.keys[fp]
+	return ok, nil
+}
+
+// RemoveGeneration removes the key with fp, or fails with removeErr
+// (03-12e).
+func (b *genBackend) RemoveGeneration(_ keystore.Role, _ uint32, fp, _ string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.removeErr != nil {
+		return b.removeErr
+	}
+	delete(b.keys, fp)
+	return nil
+}
+
+// drop removes the key of generation of role, as the runbook's removal
+// step does after a switch install (03-12e): generation 1 is the
+// fixture's role key, a later one a key this double created. A generation
+// it cannot map fails the test, so a missed stand-in names itself.
+func (b *genBackend) drop(t testing.TB, role keystore.Role, generation uint32) {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	fp, ok := b.created[fmt.Sprintf("%s/%d", role, generation)]
+	if generation == 1 && b.fx != nil {
+		if s, has := b.fx.Roles[role]; has {
+			fp, ok = ssh.FingerprintSHA256(s.PublicKey()), true
+		}
+	}
+	if !ok {
+		t.Fatalf("drop: the double cannot map generation %d of %s to a key", generation, role)
+	}
+	delete(b.keys, fp)
+}
+
+// held reports, for a test, whether the double holds the key with fp.
+func (b *genBackend) held(fp string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.keys[fp]
+	return ok
 }
 
 // KeyAt records location and selects by fingerprint, as memBackend does.
