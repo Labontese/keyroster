@@ -878,7 +878,7 @@ func TestSignerInstallSwitchPreviousCopy(t *testing.T) {
 	if rm < 0 || cp < 0 || inst < 0 {
 		t.Fatalf("the block lacks the rm as the signer's user (%d), the copy (%d) or the install (%d):\n%s", rm, cp, inst, strings.Join(lines, "\n"))
 	}
-	if !(rm < cp && cp < inst) {
+	if rm >= cp || cp >= inst {
 		t.Errorf("order is rm %d, copy %d, install %d; want rm, then copy, then install", rm, cp, inst)
 	}
 	for name, i := range map[string]int{"rm": rm, "copy": cp} {
