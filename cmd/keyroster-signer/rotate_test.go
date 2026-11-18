@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/Labontese/keyroster/internal/audit"
+	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/keystore"
 	"github.com/Labontese/keyroster/internal/signer"
 	"github.com/Labontese/keyroster/internal/signerdb"
@@ -1262,4 +1264,127 @@ func TestRetireKey(t *testing.T) {
 			refused(t, code, out, "rotation_not_supported_on_backend")
 		}
 	})
+}
+
+// TestRecoverRevocationsNamesBeyondDrain (03-12e, RC-04, the command):
+// recover-revocations, run on a state whose user CA was switched, applies
+// a recovery that carries revoked certificates of the draining generation
+// 1 and prints, after its "recovered:" line, one warning line per carried
+// certificate whose ValidBefore is above the drain's trusted_until minus
+// 300 s, in the request's order; a certificate at trusted_until minus
+// 300 s is not named.
+func TestRecoverRevocationsNamesBeyondDrain(t *testing.T) {
+	st, g, c, export := switchFlagState(t)
+	if code, out := installSwitch(t, st, g, c, "--previous", export); code != 0 {
+		t.Fatalf("install-bundle of the switch exited %d:\n%s", code, out)
+	}
+	var tus string
+	for _, ca := range c.b.CAs {
+		if ca.Role == trust.RoleUser && ca.State == "draining" {
+			tus = ca.TrustedUntil
+		}
+	}
+	tuTime, err := time.Parse(trust.TimeFormat, tus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tu := uint64(tuTime.Unix()) //nolint:gosec // G115: after 1970
+	user, _ := st.caPubKeys(t).Key(trust.RoleUser)
+	pub1, err := trust.ParseKey(user.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca1, err := ssh.NewSignerFromKey(st.privs[ssh.FingerprintSHA256(pub1)])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The log as it is now, and the serial high-water mark.
+	ctx := context.Background()
+	db, err := signerdb.Open(st.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, _, err := db.LatestCheckpoint(ctx)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	last, err := db.LastSerial(ctx)
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _, _ := strings.Cut(string(signed), "\n\n")
+	cp, err := tlog.ParseCheckpointText(text + "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Three lost user certificates of generation 1, each revoked: a day
+	// past the drain, one second past its margin, and at its margin.
+	lost := func(serial, validBefore uint64) *ssh.Certificate {
+		t.Helper()
+		lc := &ssh.Certificate{Key: newTestSigner(t).PublicKey(), Serial: serial, CertType: ssh.UserCert, ValidPrincipals: []string{"alice"},
+			KeyId:      cert.KeyID{CA: trust.RoleUser, Subject: "u:lost", Request: strings.Repeat("cd", 16), Policy: 1, Serial: serial}.String(),
+			ValidAfter: validBefore - 3600, ValidBefore: validBefore}
+		if err := lc.SignCert(rand.Reader, ca1); err != nil { //nolint:forbidigo // a lost certificate of the draining CA key, which cert.Build cannot make
+			t.Fatal(err)
+		}
+		return lc
+	}
+	certs := []*ssh.Certificate{lost(last+1000, tu+86400), lost(last+1001, tu-299), lost(last+1002, tu-300)}
+	req := &wire.RecoveryRequest{InstallationID: c.b.InstallationID, CreatedAt: uint64(time.Now().Unix()), //nolint:gosec // G115: after 1970
+		RestoredSize: cp.Size}
+	copy(req.RestoredRoot[:], cp.Root)
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		t.Fatal(err)
+	}
+	for _, lc := range certs {
+		req.Certificates = append(req.Certificates, wire.RecoveredCertificate{Cert: lc.Marshal(), Revoke: true})
+	}
+	sb, err := req.SigningBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, g.admin, wire.RecoverySSHSIGNamespace, sb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+	data, err := req.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The command reads the request from standard input.
+	in := filepath.Join(t.TempDir(), "recovery")
+	if err := os.WriteFile(in, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(in) //nolint:gosec // G304: the test's own request file
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() { os.Stdin = old; _ = f.Close() })
+	code, out := runSigner(t, "recover-revocations", "--state-dir", st.dir)
+	if code != 0 {
+		t.Fatalf("recover-revocations exited %d:\n%s", code, out)
+	}
+	warning := func(lc *ssh.Certificate) string {
+		return "warning: carried certificate serial " + strconv.FormatUint(lc.Serial, 10) + " (key ID " + lc.KeyId + ", revoked) of the draining user CA generation 1 is valid until " +
+			time.Unix(int64(lc.ValidBefore), 0).UTC().Format(trust.TimeFormat) + ", after " + tus + " minus 300 s; a kept one stops working at " + tus //nolint:gosec // G115: a ValidBefore of this test
+	}
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		if strings.HasPrefix(l, "recovered: ") || strings.HasPrefix(l, "warning: ") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "recovered: ") || !strings.Contains(lines[0], "3 lost certificates revoked, 0 kept") ||
+		lines[1] != warning(certs[0]) || lines[2] != warning(certs[1]) {
+		t.Fatalf("recover-revocations printed\n%s\nwant the recovered line, then exactly\n%s\n%s", out, warning(certs[0]), warning(certs[1]))
+	}
 }
