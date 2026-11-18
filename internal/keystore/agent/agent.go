@@ -190,14 +190,82 @@ var (
 // cannot be listed, or a certificate entry that does not parse, is
 // reported as held, with the error. It ignores role, generation and
 // location.
-func (b *backend) Holds(_ keystore.Role, _ uint32, _, _ string) (bool, error) {
+func (b *backend) Holds(_ keystore.Role, _ uint32, fingerprint, _ string) (bool, error) {
+	keys, err := b.list()
+	if err != nil {
+		return true, err
+	}
+	for _, k := range keys {
+		pub, err := entryKey(k)
+		if err != nil {
+			return true, err
+		}
+		if ssh.FingerprintSHA256(pub) == fingerprint {
+			return true, nil
+		}
+	}
 	return false, nil
 }
 
 // Certificates returns every certificate identity the agent holds whose
 // underlying key has fingerprint (03-12e).
-func (b *backend) Certificates(_ string) ([]*ssh.Certificate, error) {
-	return nil, nil
+func (b *backend) Certificates(fingerprint string) ([]*ssh.Certificate, error) {
+	keys, err := b.list()
+	if err != nil {
+		return nil, err
+	}
+	var out []*ssh.Certificate
+	for _, k := range keys {
+		if !isCertificate(k) {
+			continue
+		}
+		c, err := parseCertificate(k)
+		if err != nil {
+			return nil, err
+		}
+		if ssh.FingerprintSHA256(c.Key) == fingerprint {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// list returns the agent's entries.
+func (b *backend) list() ([]*sshagent.Key, error) {
+	var keys []*sshagent.Key
+	if err := b.request(func(c sshagent.ExtendedAgent) (err error) {
+		keys, err = c.List()
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("keystore agent: list keys: %w", err)
+	}
+	return keys, nil
+}
+
+// entryKey is the key an agent entry carries: the entry itself for a plain
+// key, the underlying key for a certificate identity (03-12e).
+func entryKey(k *sshagent.Key) (ssh.PublicKey, error) {
+	if !isCertificate(k) {
+		return k, nil
+	}
+	c, err := parseCertificate(k)
+	if err != nil {
+		return nil, err
+	}
+	return c.Key, nil
+}
+
+// parseCertificate parses a certificate entry of the agent.
+func parseCertificate(k *sshagent.Key) (*ssh.Certificate, error) {
+	pub, err := ssh.ParsePublicKey(k.Blob)
+	if err != nil {
+		return nil, fmt.Errorf("keystore agent: a certificate entry does not parse: %w", err)
+	}
+	c, ok := pub.(*ssh.Certificate)
+	if !ok {
+		return nil, fmt.Errorf("keystore agent: a %s entry is not a certificate", k.Format)
+	}
+	return c, nil
 }
 
 // isCertificate reports whether an agent entry is a certificate. The agent

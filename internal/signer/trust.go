@@ -512,8 +512,11 @@ type trustState struct {
 // loadTrust reads the ca-init keys and the latest installed bundle,
 // checks them (checkStoredTrust) and opens every bundle key in the
 // backend. It refuses when ca-init or install-bundle has not run, when the
-// stored bundle no longer matches the stored keys or its policy, and when
-// any bundle key (CA, ops or log) is missing from the backend (KEY-01).
+// stored bundle no longer matches the stored keys or its policy, when
+// any bundle key (CA, ops or log) is missing from the backend (KEY-01),
+// and, before it opens any key, when the backend still holds, or cannot
+// say whether it holds, the key of a draining CA entry of the bundle
+// (draining_key_still_usable, 03-12e).
 func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trustState, error) {
 	caKeys, err := db.CAKeys(ctx)
 	if errors.Is(err, signerdb.ErrNotInitialised) {
@@ -535,6 +538,9 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	}
 	ts, err := checkStoredTrust(caKeys, gens, stored)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkDrainingNotHeld(be, ts.bundle, gens); err != nil {
 		return nil, err
 	}
 	// Each CA role's signing key is the generation the bundle names as
@@ -573,6 +579,41 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 		return nil, fmt.Errorf("%w: log origin %q is not the log key's", ErrBundleKeys, ts.bundle.Log.Origin)
 	}
 	return ts, nil
+}
+
+// checkDrainingNotHeld refuses ErrDrainingKeyUsable when be still holds
+// the key of any draining CA entry of b, in any role (03-12e): the old key
+// must be gone (ca-rotate retire-key) before the signer serves. It asks
+// keystore.Holds with the location of the entry's generation row (empty
+// when no row matches; checkBundleKeys has already required one), and
+// keystore.Holds fails closed: a backend that cannot say, or whose answer
+// is an error, counts as holding the key. It opens no key.
+func checkDrainingNotHeld(be keystore.Backend, b *trust.Bundle, gens []signerdb.CAGeneration) error {
+	for _, ca := range b.CAs {
+		if ca.State != "draining" {
+			continue
+		}
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			return fmt.Errorf("%w: CA %s generation %d: %w", ErrBundleKeys, ca.Role, ca.Generation, err)
+		}
+		fp, location := ssh.FingerprintSHA256(pub), ""
+		for _, g := range gens {
+			if g.Role == ca.Role && g.Generation == ca.Generation && bytes.Equal(g.PublicKey, pub.Marshal()) {
+				location = g.Location
+			}
+		}
+		held, err := keystore.Holds(be, keystore.Role(ca.Role), ca.Generation, fp, location)
+		switch {
+		case err != nil:
+			return fmt.Errorf("%w: generation %d of the %s CA (%s), which the installed bundle drains: cannot tell whether the backend holds it: %w; run keyroster-signer ca-rotate retire-key",
+				ErrDrainingKeyUsable, ca.Generation, ca.Role, fp, err)
+		case held:
+			return fmt.Errorf("%w: the backend still holds generation %d of the %s CA (%s), which the installed bundle drains; run keyroster-signer ca-rotate retire-key",
+				ErrDrainingKeyUsable, ca.Generation, ca.Role, fp)
+		}
+	}
+	return nil
 }
 
 // checkStoredTrust is the part of loadTrust that needs no backend, shared

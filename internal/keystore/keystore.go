@@ -163,6 +163,14 @@ type CertificateLister interface {
 // not implement GenerationHolder returns true and ErrHoldsUnsupported, and
 // a backend whose Holds fails returns true and that error, so a caller
 // that refuses on a held key also refuses when the answer is unknown.
-func Holds(_ Backend, _ Role, _ uint32, _, _ string) (bool, error) {
-	return false, nil
+func Holds(b Backend, role Role, generation uint32, fingerprint, location string) (bool, error) {
+	h, ok := b.(GenerationHolder)
+	if !ok {
+		return true, ErrHoldsUnsupported
+	}
+	held, err := h.Holds(role, generation, fingerprint, location)
+	if err != nil {
+		return true, err
+	}
+	return held, nil
 }
