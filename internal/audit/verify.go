@@ -333,8 +333,24 @@ func (r *generationRegistry) checkLoggedGenerations(b *trust.Bundle) error {
 // bundle as an admin. In Phase 1 every bundle must name the same log key.
 // The first accepted bundle whose root set and threshold are exactly opts'
 // pins becomes the anchor (trust.MatchPins); Verify fails at the end of the
-// log if there is none.
+// log if there is none. It is installAt with the leaf time 0 (03-12e): the
+// smallest leaf time, under which both checks that read it are at their
+// strictest, so a caller that has no leaf time can never pass a bundle
+// those checks would refuse at its real one: every bundle with a CA entry
+// that is not active, a switch included, issued after 1970-01-01T00:05:00Z
+// is refused issued_at_after_install_leaf. A leaf time of 2^64 - 1 would
+// pass every issued_at and must never stand in for an unknown one.
 func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
+	return a.installAt(body, opts, 0)
+}
+
+// installAt is install for the bundle_install entry whose leaf time is
+// leafMicros (03-12e). Before the bundle replaces the one in force, a
+// switch's newly draining entries are bound to the verified leaves before
+// it and to the upper bound the signer applies with the leaf time as its
+// clock, and a bundle that carries a CA entry that is not active may not be
+// issued after the leaf time plus 300 s.
+func (a *anchor) installAt(body *tlog.BundleInstallBody, opts Options, leafMicros uint64) error {
 	var (
 		b   *trust.Bundle
 		p   *trust.Policy
@@ -364,9 +380,12 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 	if err := a.gens.checkLoggedGenerations(b); err != nil {
 		return err
 	}
-	// The switch's binding, re-derived from the leaves before this one
-	// (03-12e).
-	if err := a.checkDrainBinding(b); err != nil {
+	// The switch's binding and upper bound, re-derived from the leaves
+	// before this one, and the install-time rule (03-12e).
+	if err := a.checkDrainBinding(b, p, leafMicros); err != nil {
+		return err
+	}
+	if err := checkIssuedBeforeInstall(b, leafMicros); err != nil {
 		return err
 	}
 	logKey, err := trust.ParseKey(b.Log.Key)
@@ -432,8 +451,16 @@ func feedDrain(acc *krl.DrainMax, idx uint64, l tlog.Leaf) error {
 // that the verified leaves before it record for its key must leave no
 // certificate live at its trusted_until (krl.DrainBindingHolds), the one
 // rule the signer applies too. An entry that was already draining is not
-// bound again, because its end never changes.
-func (a *anchor) checkDrainBinding(b *trust.Bundle) error {
+// bound again, because its end never changes. Its trusted_until may then
+// be no later than the signer's upper bound, computed with the leaf time
+// leafMicros, in whole seconds, as the signer's clock, the role's larger
+// max_ttl_seconds of the policy in force and of p, the new policy, and the
+// same largest ValidBefore (refused drain_window_too_long). Like the
+// issued_at rule this is detective (T-03-413): leaf times are clamped
+// forward, so the install's leaf time is at or after the clock reading the
+// signer computed its bound with, audit is never stricter than the signer
+// was, and a signer that skipped the bound is caught after the fact.
+func (a *anchor) checkDrainBinding(b *trust.Bundle, p *trust.Policy, leafMicros uint64) error {
 	for _, ca := range b.CAs {
 		if ca.State != "draining" || a.wasDraining(ca) {
 			continue
@@ -454,8 +481,77 @@ func (a *anchor) checkDrainBinding(b *trust.Bundle) error {
 			return fmt.Errorf("drain_window_too_short: the switch of CA %s ends trust at %s, but the log records a certificate of generation %d valid until %s (serial %d, key ID %s, leaf %d); the earliest acceptable trusted_until is %s",
 				ca.Role, ca.TrustedUntil, ca.Generation, drainTime(m.ValidBefore), m.Serial, m.KeyID, m.Leaf, earliestTrustedUntil(m.ValidBefore))
 		}
+		ttlPrev, okPrev := trust.RoleMaxTTL(a.policy, ca.Role)
+		ttlNext, okNext := trust.RoleMaxTTL(p, ca.Role)
+		if !okPrev || !okNext {
+			return fmt.Errorf("drain_window_too_long: the switch of CA %s: the upper bound cannot be computed: a policy has no profile of the role", ca.Role)
+		}
+		bound, err := drainUpperBound(leafMicros/1_000_000, ttlPrev, ttlNext, m.ValidBefore)
+		if err != nil {
+			return fmt.Errorf("drain_window_too_long: the switch of CA %s: %w", ca.Role, err)
+		}
+		if uint64(end.Unix()) > bound { //nolint:gosec // G115: not before 1970, checked above
+			return fmt.Errorf("drain_window_too_long: the switch of CA %s ends trust at %s, above the latest acceptable %s",
+				ca.Role, ca.TrustedUntil, drainTime(bound))
+		}
 	}
 	return nil
+}
+
+// drainUpperBound is the signer's upper bound of a switch's trusted_until
+// (03-12e): max(signerNow + the larger TTL, maxVB) + 300 +
+// MaxDrainAllowance + 300, an overflow being an error.
+func drainUpperBound(signerNow, ttlPrev, ttlNext, maxVB uint64) (uint64, error) {
+	ttl := max(ttlPrev, ttlNext)
+	if signerNow > math.MaxUint64-ttl {
+		return 0, errors.New("the install entry's time plus the larger max TTL overflows")
+	}
+	base := max(signerNow+ttl, maxVB)
+	add := uint64(trust.DrainMargin) + uint64(trust.MaxDrainAllowance/time.Second) + krl.PruneMargin
+	if base > math.MaxUint64-add {
+		return 0, errors.New("the upper bound overflows")
+	}
+	return base + add, nil
+}
+
+// checkIssuedBeforeInstall refuses issued_at_after_install_leaf (03-12e): a
+// bundle that carries a CA entry whose state is not active may be issued
+// no later than its install entry's leaf time leafMicros plus 300 s, the
+// margin the signer's bundle_issued_in_future check allows. It is
+// detective (T-03-413): that check compares with the signer's clock
+// reading, the leaf time is clamped forward to at or after it, so audit
+// refuses only what that check would have refused and catches a signer
+// that skipped it after the fact. It is never retroactive: no log written
+// before 03-12 holds a bundle with an entry that is not active, so a
+// bundle of active entries only, issued by a ceremony clock that ran
+// ahead, still verifies.
+func checkIssuedBeforeInstall(b *trust.Bundle, leafMicros uint64) error {
+	if !slices.ContainsFunc(b.CAs, func(ca trust.CAEntry) bool { return ca.State != "active" }) {
+		return nil
+	}
+	issued, err := time.Parse(trust.TimeFormat, b.IssuedAt)
+	if err != nil {
+		return fmt.Errorf("trust bundle v%d: issued_at %q: %w", b.Version, b.IssuedAt, err)
+	}
+	if issued.Unix() < 0 {
+		return nil // before 1970: never after a leaf time
+	}
+	issuedMicros := uint64(issued.Unix()) * 1_000_000 //nolint:gosec // G115: not before 1970, checked above; at most 9999-12-31, so no overflow
+	const margin = krl.PruneMargin * 1_000_000
+	if leafMicros > math.MaxUint64-margin || issuedMicros <= leafMicros+margin {
+		return nil
+	}
+	return fmt.Errorf("issued_at_after_install_leaf: trust bundle v%d is issued at %s, after its install entry's time %s plus 300 s",
+		b.Version, b.IssuedAt, leafTime(leafMicros))
+}
+
+// leafTime renders a leaf time in microseconds as RFC 3339 UTC with its
+// fraction (03-12e).
+func leafTime(us uint64) string {
+	if us > math.MaxInt64 {
+		return fmt.Sprintf("%d microseconds after 1970", us)
+	}
+	return time.UnixMicro(int64(us)).UTC().Format(time.RFC3339Nano)
 }
 
 // wasDraining reports whether the bundle in force has ca's role and
@@ -1129,7 +1225,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
-			if err := trustState.install(body, opts); err != nil {
+			if err := trustState.installAt(body, opts, leaf.TimeMicros); err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
 			// The policy in force may have changed: re-check the directory
