@@ -5,8 +5,11 @@ import (
 	"crypto/rand"
 	"fmt"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // zeroNonce is a reader of zero bytes: the certificates of the drain tests
@@ -71,4 +74,16 @@ func TestDrainMax(t *testing.T) {
 			t.Fatalf("For(a key with no certificate) = %+v, want not found", got)
 		}
 	})
+}
+
+// TestDrainMarginIsPruneMargin (03-12e): the switch floor's margin in
+// internal/trust is the KRL prune margin, which trust cannot import, and
+// the allowance's cap is seven days.
+func TestDrainMarginIsPruneMargin(t *testing.T) {
+	if trust.DrainMargin != PruneMargin {
+		t.Fatalf("trust.DrainMargin = %d, krl.PruneMargin = %d; want them equal", trust.DrainMargin, PruneMargin)
+	}
+	if trust.MaxDrainAllowance != 168*time.Hour {
+		t.Fatalf("trust.MaxDrainAllowance = %s, want 168h", trust.MaxDrainAllowance)
+	}
 }

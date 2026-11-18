@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -307,6 +308,123 @@ func TestBuildSuccessorCAChanges(t *testing.T) {
 		b, err = r.buildCA([]CAEntry{caAt(t, RoleUser, seedCANext, "next", 3)}, nil)
 		if b != nil || !errors.Is(err, ErrCARole) || !strings.Contains(err.Error(), "entries must be ordered") {
 			t.Fatalf("BuildSuccessor = %+v, %v; want ErrCARole, entries must be ordered", b, err)
+		}
+	})
+}
+
+// buildSwitch builds r's successor under the previous roots and policy
+// that switches roles with allowance, adding next as next entries
+// (03-12e).
+func (r *rotation) buildSwitch(roles []string, allowance time.Duration, next []CAEntry) (*Bundle, error) {
+	return BuildSuccessor(r.prev, r.prevBytes, r.policy, SuccessorOptions{
+		Roots: r.prev.Root.Keys, Threshold: 1, Policy: r.policy, IssuedAt: rotationIssued,
+		CANext: next, CASwitch: roles, DrainAllowance: allowance,
+	})
+}
+
+// TestBuildSuccessorSwitch (03-12e): BuildSuccessor's CASwitch makes a
+// role's next entry active and its active entry draining until the switch
+// floor (issued_at plus the larger max_ttl_seconds plus 300 s) plus the
+// allowance, which must be a whole number of seconds from 0 to
+// MaxDrainAllowance; its output verifies as a successor.
+func TestBuildSuccessorSwitch(t *testing.T) {
+	u1, n2 := goldenCA(t, RoleUser), caAt(t, RoleUser, seedCANext, "next", 2)
+	issued, err := time.Parse(TimeFormat, rotationIssued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// floor is the switch floor of role under the golden policy, both
+	// policies being the same.
+	floor := func(t *testing.T, role string) time.Time {
+		t.Helper()
+		ttl, ok := RoleMaxTTL(goldenPolicy(t), role)
+		if !ok {
+			t.Fatalf("the golden policy has no %s profile", role)
+		}
+		return issued.Add(time.Duration(ttl+300) * time.Second) //nolint:gosec // G115: a policy TTL
+	}
+	// switched requires role's generation 1 draining until end and its
+	// generation 2 active, with key, algorithm and custody unchanged.
+	switched := func(t *testing.T, b *Bundle, role string, end time.Time, prev []CAEntry) {
+		t.Helper()
+		for _, old := range prev {
+			if old.Role != role {
+				continue
+			}
+			want := old
+			switch old.State {
+			case "active":
+				want.State, want.TrustedUntil = "draining", end.UTC().Format(TimeFormat)
+			case "next":
+				want.State = "active"
+			}
+			i := slices.IndexFunc(b.CAs, func(c CAEntry) bool { return c.Role == role && c.Generation == old.Generation })
+			if i < 0 || b.CAs[i] != want {
+				t.Fatalf("CA %s generation %d after the switch: %+v, want %+v", role, old.Generation, b.CAs, want)
+			}
+		}
+	}
+	t.Run("allowance_is_added", func(t *testing.T) {
+		r := caRotation(t, u1, n2)
+		b, err := r.buildSwitch([]string{RoleUser}, 90*time.Second, nil)
+		if err != nil {
+			t.Fatalf("BuildSuccessor: %v", err)
+		}
+		switched(t, b, RoleUser, floor(t, RoleUser).Add(90*time.Second), r.prev.CAs)
+	})
+	t.Run("no_next_entry_refused", func(t *testing.T) {
+		r := caRotation(t, u1)
+		b, err := r.buildSwitch([]string{RoleUser}, 0, nil)
+		if b != nil || !errors.Is(err, ErrVersionChain) || !strings.Contains(err.Error(), "CA user: no next entry to switch to") {
+			t.Fatalf("BuildSuccessor = %+v, %v; want ErrVersionChain, no next entry to switch to", b, err)
+		}
+	})
+	for _, tc := range []struct {
+		name      string
+		allowance time.Duration
+	}{
+		{"allowance_above_cap_refused", MaxDrainAllowance + time.Second},
+		{"negative_allowance_refused", -time.Second},
+		{"sub_second_allowance_refused", 1500 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := caRotation(t, u1, n2)
+			b, err := r.buildSwitch([]string{RoleUser}, tc.allowance, nil)
+			if b != nil || !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), MaxDrainAllowance.String()) {
+				t.Fatalf("BuildSuccessor with allowance %s = %+v, %v; want ErrInvalid naming the cap %s", tc.allowance, b, err, MaxDrainAllowance)
+			}
+		})
+	}
+	t.Run("two_roles_in_one_successor", func(t *testing.T) {
+		r := caRotation(t, u1, n2)
+		r.prev.CAs = slices.Insert(r.prev.CAs, 3, caAt(t, RoleHost, seedCAOther, "next", 2))
+		if err := r.prev.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		r.prevBytes = mustCanonical(t, r.prev)
+		b, err := r.buildSwitch([]string{RoleUser, RoleHost}, 0, nil)
+		if err != nil {
+			t.Fatalf("BuildSuccessor: %v", err)
+		}
+		switched(t, b, RoleUser, floor(t, RoleUser), r.prev.CAs)
+		switched(t, b, RoleHost, floor(t, RoleHost), r.prev.CAs)
+	})
+	t.Run("switch_and_next_in_one_role_refused", func(t *testing.T) {
+		r := caRotation(t, u1, n2)
+		b, err := r.buildSwitch([]string{RoleUser}, 0, []CAEntry{caAt(t, RoleUser, seedCANext2, "next", 3)})
+		if b != nil || (!errors.Is(err, ErrInvalid) && !errors.Is(err, ErrVersionChain)) {
+			t.Fatalf("BuildSuccessor = %+v, %v; want a refusal", b, err)
+		}
+	})
+	t.Run("output_verifies_as_a_successor", func(t *testing.T) {
+		r := caRotation(t, u1, n2)
+		b, err := r.buildSwitch([]string{RoleUser}, 0, nil)
+		if err != nil {
+			t.Fatalf("BuildSuccessor: %v", err)
+		}
+		switched(t, b, RoleUser, floor(t, RoleUser), r.prev.CAs)
+		if err := r.verify(t, r.prevBytes, r.policy, mustCanonical(t, b), r.policy, r.a); err != nil {
+			t.Fatalf("VerifySuccessor of the switch at its floor: %v", err)
 		}
 	})
 }
