@@ -534,12 +534,17 @@ an export-log file of this log kept off the box: the newest export you
 saved, taken right after the last install. The signer reads only the
 file's last line, the `{"checkpoint":...}` line that `export-log`
 writes, from at most its last 1 MiB, and requires that this log extends
-that checkpoint. Copy the export in as the signer's user, then install:
+that checkpoint. Copy the export in as the signer's user, then install.
+The export of an earlier switch stays in `incoming`, and the copy refuses
+to overwrite it, so it is removed first, as that user. The three commands
+are chained, so that the install never runs against a stale export after
+a failed copy:
 
 ```
 S=/var/lib/keyroster-signer
 systemctl stop keyroster-signer.service
-runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/incoming/previous.jsonl" <"/media/transfer/export.jsonl"
+runuser -u keyroster-signer -- rm -f "$S/incoming/previous.jsonl" &&
+runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/incoming/previous.jsonl" <"/media/transfer/export.jsonl" &&
 runuser -u keyroster-signer -g keyroster-signer -G tss -- keyroster-signer install-bundle --state-dir /var/lib/keyroster-signer \
   --bundle /var/lib/keyroster-signer/incoming/bundle.json \
   --policy /var/lib/keyroster-signer/incoming/policy.json \

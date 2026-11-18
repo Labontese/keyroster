@@ -841,6 +841,56 @@ func TestSignerInstallSwitchFences(t *testing.T) {
 	}
 }
 
+// TestSignerInstallSwitchPreviousCopy (03-12e pre-merge review): the switch
+// install block of signer-install.md removes an older incoming/previous.jsonl
+// as the signer's user before it copies the newest export in (set -C refuses
+// to overwrite, and a second switch is the normal case), and chains the rm,
+// the copy and install-bundle with && so the install never runs against a
+// stale export after a failed copy.
+func TestSignerInstallSwitchPreviousCopy(t *testing.T) {
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
+	win, err := sectionWindow(data, &signingSection{id: "switch", file: "signer-install.md", section: switchSections[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, b := range fencedBlocks(win) {
+		if slices.ContainsFunc(b, func(l string) bool {
+			return strings.Contains(l, "incoming/previous.jsonl") && strings.Contains(l, "set -C")
+		}) {
+			lines = b
+		}
+	}
+	if lines == nil {
+		t.Fatal("the switch section has no block that copies incoming/previous.jsonl in")
+	}
+	rm, cp, inst := -1, -1, -1
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "runuser -u keyroster-signer -- rm -f ") && strings.Contains(l, `"$S/incoming/previous.jsonl"`):
+			rm = i
+		case strings.HasPrefix(l, "runuser -u keyroster-signer -- sh -c ") && strings.Contains(l, "set -C") && strings.Contains(l, `"$S/incoming/previous.jsonl"`):
+			cp = i
+		case strings.HasPrefix(l, switchRunuser+"keyroster-signer install-bundle"):
+			inst = i
+		}
+	}
+	if rm < 0 || cp < 0 || inst < 0 {
+		t.Fatalf("the block lacks the rm as the signer's user (%d), the copy (%d) or the install (%d):\n%s", rm, cp, inst, strings.Join(lines, "\n"))
+	}
+	if !(rm < cp && cp < inst) {
+		t.Errorf("order is rm %d, copy %d, install %d; want rm, then copy, then install", rm, cp, inst)
+	}
+	for name, i := range map[string]int{"rm": rm, "copy": cp} {
+		if !strings.HasSuffix(strings.TrimSpace(lines[i]), "&&") {
+			t.Errorf("the %s line does not end in && and so does not gate the next command: %q", name, lines[i])
+		}
+	}
+	if cp != rm+1 || inst != cp+1 {
+		t.Errorf("the rm, the copy and the install are not consecutive lines (%d, %d, %d)", rm, cp, inst)
+	}
+}
+
 // TestSwitchRunbookLinkSafety (03-12e): the switch sections of
 // signer-install.md, which neither TestCARotationRunbookLinkSafety nor
 // TestSignerInstallGenesisLinkSafety reads, run nothing as root below the
