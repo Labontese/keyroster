@@ -155,7 +155,7 @@ func InstallBundleWithPrevious(ctx context.Context, db *signerdb.DB, be keystore
 		return nil, nil, fmt.Errorf("%w: log origin %q is not the log key's %q", ErrBundleKeys, b.Log.Origin, tlog.Origin(logKey.PublicKey()))
 	}
 	// The switch's fences, before anything is written (03-12e).
-	notes, err := checkSwitchInstall(lw, installed, b, previous != nil)
+	notes, err := checkSwitchInstall(lw, installed, nil, b, p, now, previous != nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -211,8 +211,10 @@ func openPrevious(logKey keystore.CAKey, previous []byte) (tlog.Checkpoint, erro
 // for each newly draining entry the largest ValidBefore that the scan
 // recorded for its key must leave no certificate live at its
 // trusted_until (krl.DrainBindingHolds), else drain_window_too_short. It
-// returns one DrainNote per newly draining entry.
-func checkSwitchInstall(lw *Signer, installed, b *trust.Bundle, havePrevious bool) ([]DrainNote, error) {
+// returns one DrainNote per newly draining entry. The installed bundle's
+// policy, b's policy and the install's clock reading are what the upper
+// bound reads.
+func checkSwitchInstall(lw *Signer, installed *trust.Bundle, _ *trust.Policy, b *trust.Bundle, _ *trust.Policy, _ time.Time, havePrevious bool) ([]DrainNote, error) {
 	if lw == nil || lw.loaded.drain == nil {
 		return nil, fmt.Errorf("%w: the install was handed no scan of the log", ErrDrainScanMissing)
 	}
