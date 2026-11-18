@@ -282,8 +282,16 @@ func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error 
 // largest ValidBefore that the log records, carried certificates included.
 // keyroster-signer doctor shows from it the earliest trusted_until a
 // switch of each role could carry. It only reads db.
-func LogDrain(_ context.Context, _ *signerdb.DB, _ ssh.PublicKey) (*krl.DrainMax, error) {
-	return nil, errors.New("signer: LogDrain is declared, not implemented")
+func LogDrain(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) (*krl.DrainMax, error) {
+	v, err := tlog.NewNoteVerifier(tlog.Origin(logKey), logKey)
+	if err != nil {
+		return nil, fmt.Errorf("signer: log key: %w", err)
+	}
+	_, _, installs, err := rebuildLogFromWith(ctx, db, v, rebuildOptions{drain: true})
+	if err != nil {
+		return nil, err
+	}
+	return installs.drain, nil
 }
 
 // CheckTrust runs the start-up trust checks of serve that need no
