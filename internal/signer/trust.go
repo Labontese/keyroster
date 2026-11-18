@@ -516,8 +516,12 @@ type trustState struct {
 // any bundle key (CA, ops or log) is missing from the backend (KEY-01),
 // and, before it opens any key, when the backend still holds, or cannot
 // say whether it holds, the key of a draining CA entry of the bundle
-// (draining_key_still_usable, 03-12e).
-func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trustState, error) {
+// (draining_key_still_usable, 03-12e). In the recovery configuration
+// (recovery true, 03-12e) it keeps every check that needs no CA key, opens
+// only the ops and log keys, leaves the CA key map empty, so every
+// issuance path refuses ca_not_configured, and skips the draining-key
+// refusal.
+func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend, recovery bool) (*trustState, error) {
 	caKeys, err := db.CAKeys(ctx)
 	if errors.Is(err, signerdb.ErrNotInitialised) {
 		return nil, ErrNotInitialised
@@ -540,8 +544,10 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	if err != nil {
 		return nil, err
 	}
-	if err := checkDrainingNotHeld(be, ts.bundle, gens); err != nil {
-		return nil, err
+	if !recovery {
+		if err := checkDrainingNotHeld(be, ts.bundle, gens); err != nil {
+			return nil, err
+		}
 	}
 	// Each CA role's signing key is the generation the bundle names as
 	// active, opened by generation through keystore.KeyFor with the
@@ -559,10 +565,14 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 			if err != nil {
 				return nil, err
 			}
+			row = signerdb.CAKey{Role: g.Role, PublicKey: g.PublicKey, Alg: g.Alg, Custody: g.Custody}
+			if recovery {
+				rows = append(rows, row)
+				continue
+			}
 			if key, err = openGenerationKey(be, g); err != nil {
 				return nil, err
 			}
-			row = signerdb.CAKey{Role: g.Role, PublicKey: g.PublicKey, Alg: g.Alg, Custody: g.Custody}
 		} else if key, err = openRoleKey(be, caKeys, k.Role); err != nil {
 			return nil, err
 		}
@@ -570,7 +580,9 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 		rows = append(rows, row)
 	}
 	for role, kr := range caRoles {
-		ts.ca[role] = keys[string(kr)]
+		if key, ok := keys[string(kr)]; ok {
+			ts.ca[role] = key
+		}
 	}
 	ts.logKey = keys["log"]
 	ts.opsKey = keys["ops"]

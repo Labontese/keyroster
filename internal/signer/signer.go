@@ -78,6 +78,7 @@ type Config struct {
 // Signer issues certificates.
 type Signer struct {
 	backend   keystore.Backend
+	recovery  bool                           // the recovery configuration (03-12e): no CA key, no Serve
 	ca        map[wire.CARole]keystore.CAKey // one key per CA role, from the bundle
 	profiles  map[wire.CARole]cert.Profile   // one profile per CA role, from the policy
 	policy    *trust.Policy
@@ -212,12 +213,13 @@ func New(cfg Config) (*Signer, error) {
 	if burst == 0 {
 		burst = DefaultRefusalLogBurst
 	}
-	ts, err := loadTrust(context.Background(), cfg.DB, cfg.Backend)
+	ts, err := loadTrust(context.Background(), cfg.DB, cfg.Backend, cfg.Recovery)
 	if err != nil {
 		return nil, err
 	}
 	s := &Signer{
 		backend:   cfg.Backend,
+		recovery:  cfg.Recovery,
 		ca:        ts.ca,
 		profiles:  ts.profiles,
 		policy:    ts.policy,
