@@ -14,7 +14,7 @@ requirements-completed: []
 actuals:
   tokens: 245000   # chars/4 over the realized diff against 1aa0b7d, this SUMMARY included
   tasks: 9         # Tasks 1 to 9; Task 10 is the owner's merge
-  commits: 24      # git rev-list --count 1aa0b7d..HEAD, the tracking commit included
+  commits: 26      # git rev-list --count 1aa0b7d..HEAD, the CI fix and its SUMMARY commit included
 plan_head_before: 1aa0b7d4021e0fbcab0dddf4726f6ce44d8801c2
 ---
 
@@ -25,7 +25,7 @@ A role's CA switch (its `next` key active, its old key `draining` until an immut
 ## Hand-over
 
 - **Done:** Tasks 1 to 8 in six sessions (2026-11-17 and 2026-11-18): S1 1b7a4a4, R1 c06479a, T1 83b13cb; R2 d0b809d, T2 9be1f99; S3 40d7ae0, R3 d686446, T3 943e97a; R4 ebd0f1f, T4 bae6459; R5 b6a8430, T5 042658f; A13 2e9b9e7; R6 c7c8cff, T6 f4a6739; R7 f893382, T7 4ac82dd; A22 e162f4a; R8 b75217c, T8 73181ba, D8 e2ac205 (amended once from 8bd1f41). The sixth session stopped before Task 9 because its precondition was unmet (`03-12e2-PLAN.md` was not in the working tree; no Task 9 edit was made). The orchestrator then placed it (114723 bytes, sha256 698e7f989edbbb8cbf21ca65bded6ab757da8fd408136eeb2489d02cbff2ae0b, wave 37, depending on 03-12e).
-- **Seventh session (2026-11-18): Task 9 up to the green PR** (see "Task 9"): the plan commit, the bookkeeping commit, the base re-measured and both gates, the push, the PR, the tracking update and this SUMMARY.
+- **Seventh session (2026-11-18): Task 9 up to the green PR** (see "Task 9"): the plan commit, the bookkeeping commit, the base re-measured and both gates, the push, the PR, the tracking update and this SUMMARY, then one CI fix (deviation 32: the windows and darwin lint of the signer's tests).
 - **Next step:** the pre-merge review (the orchestrator's; its results go into this SUMMARY under "Pre-merge review" by one more docs commit), then Task 10 (the owner's merge). The owner noted deviations 23 and 24 for that review round; deviations 25 to 28 are accepted.
 - **Open RED/mutant state:** none. No file is in a mutant state; every mutated file was restored from HEAD and its sha256 matched the pre-mutant value.
 - **TestTrustChangedUnderLiveSigner** failed once (T2's gate, see "Task 2") and has not recurred since, in any gate or in the delta and full gates of Task 9.
@@ -69,7 +69,9 @@ After `git fetch origin` (origin/main 1aa0b7d): the stop guard, the base values 
 | D8 | e2ac205 (first 8bd1f41) | docs(signer): document the switch install, key removal and the restore path after a switch | yes, both runbooks before 8bd1f41 (signer-install.md read again at its reflowed hunk after a re-stage); before the amend the one changed paragraph, read in context |
 | Plan | 8a9563e | docs(03-12e): plan out the CA rotation switch binding and fences | yes, the one file: the staged diff (1186 lines) saved to a file and read in full, every added, removed and context line |
 | Bookkeeping | 49938e7 | docs(03-12e2): add the ceremony tool and proof plan and shift the later waves | yes, all 7 files, one at a time: 03-12e2-PLAN.md (a new file, all 569 lines), the five frontmatter diffs and the ROADMAP diff |
-| Tracking | see "Task 9" | docs(03-12e): complete ca-rotation-switch-binding-and-fences plan | yes, all 3 files: ROADMAP.md, STATE.md and this SUMMARY (a new file, read in full) |
+| Tracking | 285467d | docs(03-12e): complete ca-rotation-switch-binding-and-fences plan | yes, all 3 files: ROADMAP.md, STATE.md and this SUMMARY (a new file, read in full) |
+| CI fix | a5218c4 | test(signer): build the switch, rotation and generation tests on linux only | yes, all 3 files (one build-constraint hunk each) |
+| SUMMARY | see "Task 9" | docs(03-12e): record the CI lint fix of the signer tests | yes, the one file |
 
 ## Task 1
 
@@ -408,7 +410,7 @@ Precondition (seventh session): 03-12e2-PLAN.md in the working tree with the siz
 - **Totals after the tracking update:** ROADMAP `**Plans:** 37/43 plans executed in 42 waves.` and `| 3. Linux Agent and Revocation | 37/43 | In Progress | - |`; STATE `total_plans: 78`, `completed_plans: 72`, `Plan: 37 of 43`, `stopped_at: "Completed 03-12e-PLAN.md (PR #110)"`.
 - **The publish scan** (the sixth verify command: private terms, lab host names, dotted quads other than loopback and design-review labels in both plan files and in every added line of the branch) exited 0 before the plan commit (with the commit messages and this SUMMARY scanned by the same terms), after the bookkeeping commit before the push, and before this commit (this SUMMARY scanned again by itself); the PR body was scanned with the same terms before the PR was opened.
 
-**Task 9's verify commands** (exit codes). The ROADMAP and STATE gate, the bookkeeping and file-list check, the delta gate, the full gate, the publish scan and the authorship check exit 0 on the tree of this commit (the gates on 49938e7, whose code is the same). The required-check and e2e gate command, the pushed-head check, the PR text scan and the auto-merge check run after this commit is pushed; their results and the check run IDs are recorded with the pre-merge review (deviation 29).
+**Task 9's verify commands** (exit codes). The ROADMAP and STATE gate, the bookkeeping and file-list check, the publish scan and the authorship check exit 0 on 285467d and again after the CI fix; the delta gate and the full gate exit 0 on 49938e7, whose code differs from the final head only by the build constraints of the CI fix (deviation 32), which change nothing on linux. On 285467d the pushed-head check, the PR text scan and the auto-merge check exited 0; its CI run failed one required check, `lint` (run 44262568580), fixed by a5218c4 (deviation 32). The required-check and e2e gate command is run on the head after the fix; its result and the check run IDs are recorded with the pre-merge review (deviation 29).
 
 **Pre-merge review:** pending. The orchestrator runs it on the green PR before Task 10; its results, fix rounds and checks go here by one more docs commit, read in full and pushed.
 
@@ -445,6 +447,7 @@ Precondition (seventh session): 03-12e2-PLAN.md in the working tree with the siz
 29. **[Order of the record] the check run IDs and the CI verify results are not in this commit.** The plan puts the check run IDs in the SUMMARY, but every push starts a new CI run and the house e2e gate requires the run for HEAD, so the IDs of the run on this commit cannot be written into it. They are reported to the orchestrator with the green PR and go into this SUMMARY with the pre-merge review's docs commit.
 30. **[Tooling, as the plan foresaw] the tracking tools' prefix hazard and two numbers they do not write.** `roadmap update-plan-progress` ticked the 03-12e2 row as well as this plan's; it was unticked by a scoped edit. The tools wrote neither `in 42 waves` nor the `of 43` total of the Plan line; both were set by scoped edits, as the plan's step 3 says for the total. Recorded under "Task 9"; the ROADMAP and STATE gate passed after the edits.
 31. **[SUMMARY form] the hand-over was condensed.** The per-task working notes the sessions left for each other (now all done) were replaced by a short final hand-over; the facts they carried are in the task sections and the deviations above.
+32. **[Defect of this branch, fixed: CI lint on windows and darwin] a5218c4.** The plan's gates run golangci-lint for linux only; CI's `lint` job also lints with GOOS=windows and GOOS=darwin, and on 285467d (run 44262568580, the first CI run of the branch) its windows step refused internal/signer with typecheck errors: drain_test.go (new in R1, untagged) calls helpers that only linux-tagged test files define (`certOf`, `makeCert`, `newHostEnv`, `newMachineEnv`, `logEnv.recover`), and rotate_test.go (untagged on main) imports internal/keystore/software since R6, which does not build for windows. Every other required check of that run passed. The fix gives drain_test.go, rotate_test.go and generations_test.go `//go:build linux`, as 15 signer test files already had it (generations_test.go too, because its helpers `drop`, `held`, `provisionCount` and `lastLeaf` are used only by the other two and would be unused elsewhere). Test-only; on linux the compiled set is identical, so the delta and full gates on 49938e7 still stand. Checked locally before the commit: golangci-lint `0 issues` for GOOS=windows, GOOS=darwin and linux; `go vet ./internal/signer/` for linux, windows and darwin; the linux test binary builds; gofmt clean. No windows or macOS job runs the signer's tests (cli-windows and cli-macos test cmd/keyroster, winagent, webauthn, wire, trust, sshsig and directory), so no executed test is lost.
 
 ## What stays UNVERIFIED, and the residuals
 
