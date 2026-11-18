@@ -15,6 +15,15 @@ type DrainEntry struct {
 	KeyID                     string
 }
 
+// MaxDrainKeys is the most distinct CA keys a DrainMax holds (03-12e):
+// a bundle names a few CA keys per role, so more than this is a log no
+// verifier needs to keep, and the accumulator's memory stays bounded.
+const MaxDrainKeys = 4096
+
+// ErrDrainTooManyKeys is the refusal of a certificate whose CA key would
+// be the accumulator's key number MaxDrainKeys + 1 (03-12e).
+var ErrDrainTooManyKeys = errors.New("krl: drain: more than 4096 distinct CA keys")
+
 // DrainMax is the drain accumulator (03-12e): per CA key, the logged
 // certificate with the largest ValidBefore, in constant memory per key. It
 // takes certificates that internal/tlog parsed from verified leaves; the
