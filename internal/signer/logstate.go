@@ -546,7 +546,7 @@ func rebuildLogFromWith(ctx context.Context, db *signerdb.DB, v note.Verifier, o
 		if err := revoked.check(snap.Revocations); err != nil {
 			return nil, 0, loggedInstalls{}, err
 		}
-		if err := checkPreviousExtended(opts.previous, tree); err != nil {
+		if err := checkPreviousExtended(opts.previous, hashes); err != nil {
 			return nil, 0, loggedInstalls{}, err
 		}
 		installs.revoked = revoked
@@ -569,23 +569,38 @@ func rebuildLogFromWith(ctx context.Context, db *signerdb.DB, v note.Verifier, o
 	if err := revoked.check(snap.Revocations); err != nil {
 		return nil, 0, loggedInstalls{}, err
 	}
-	if err := checkPreviousExtended(opts.previous, tree); err != nil {
+	if err := checkPreviousExtended(opts.previous, hashes); err != nil {
 		return nil, 0, loggedInstalls{}, err
 	}
 	installs.revoked = revoked
 	return tree, last, installs, nil
 }
 
-// checkPreviousExtended refuses install_previous_not_extended when
-// previous, a checkpoint verified with the log key (nil for none), covers
-// more entries than tree, the rebuilt log (03-12e).
-func checkPreviousExtended(previous *tlog.Checkpoint, tree *tlog.Log) error {
+// checkPreviousExtended refuses install_previous_not_extended unless the
+// log whose leaf hashes are hashes extends previous, the verified
+// checkpoint of an export-log file kept off the box (03-12e): previous
+// may cover no more entries than the log, and the first previous.Size
+// leaves must reproduce its root, so neither a shrunk or restored log nor
+// a fork of the same or a larger size passes. A nil previous passes.
+func checkPreviousExtended(previous *tlog.Checkpoint, hashes [][]byte) error {
 	if previous == nil {
 		return nil
 	}
-	if previous.Size > tree.Size() {
-		return fmt.Errorf("%w: the log does not extend the checkpoint in --previous (it covers %d entries, this log has %d)",
-			ErrInstallPreviousNotExtended, previous.Size, tree.Size())
+	refuse := fmt.Errorf("%w: the log does not extend the checkpoint in --previous (it covers %d entries, this log has %d)",
+		ErrInstallPreviousNotExtended, previous.Size, len(hashes))
+	if previous.Size > uint64(len(hashes)) {
+		return refuse
+	}
+	prefix, err := tlog.FromHashes(hashes[:previous.Size])
+	if err != nil {
+		return fmt.Errorf("%w: %w", errLogMismatch, err)
+	}
+	root, err := prefix.Root()
+	if err != nil {
+		return fmt.Errorf("%w: %w", errLogMismatch, err)
+	}
+	if !bytes.Equal(root, previous.Root) {
+		return refuse
 	}
 	return nil
 }

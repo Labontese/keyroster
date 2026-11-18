@@ -39,6 +39,18 @@ type DrainNote struct {
 	Recorded     bool
 }
 
+// String is the install-bundle line of n (03-12e): "drain <role>
+// generation <g> until <t>; the last certificate the log records for it
+// is valid until <v>", with <v> "none recorded" when the log records no
+// certificate of the key.
+func (n DrainNote) String() string {
+	v := "none recorded"
+	if n.Recorded {
+		v = drainTime(n.Max.ValidBefore)
+	}
+	return fmt.Sprintf("drain %s generation %d until %s; the last certificate the log records for it is valid until %s", n.Role, n.Generation, n.TrustedUntil, v)
+}
+
 // InstallBundleWithPrevious verifies a trust bundle and its policy and
 // installs them (KEY-07), as InstallBundle documents, and binds a switch
 // (03-12e). previous, when not nil, is the checkpoint note of an
@@ -105,9 +117,10 @@ func InstallBundleWithPrevious(ctx context.Context, db *signerdb.DB, be keystore
 		return nil, nil, err
 	}
 	var (
-		b         *trust.Bundle
-		p         *trust.Policy
-		installed *trust.Bundle
+		b            *trust.Bundle
+		p            *trust.Policy
+		installed    *trust.Bundle
+		installedPol *trust.Policy
 	)
 	latest, err := db.LatestBundle(ctx)
 	if err == nil || errors.Is(err, signerdb.ErrNoBundle) {
@@ -128,6 +141,12 @@ func InstallBundleWithPrevious(ctx context.Context, db *signerdb.DB, be keystore
 		installed, err = trust.ParseBundle(latest.Bundle)
 		if err != nil {
 			return nil, nil, fmt.Errorf("installed bundle: %w", err)
+		}
+		// The upper bound of a switch reads the installed policy too
+		// (03-12e).
+		installedPol, err = trust.ParsePolicy(latest.Policy)
+		if err != nil {
+			return nil, nil, fmt.Errorf("installed policy: %w", err)
 		}
 		b, p, err = trust.VerifySuccessor(installed, latest.Bundle, latest.Policy, bundle, bundleSigs, policy, policySigs)
 		if err == nil && b.Version <= latest.Version {
@@ -155,7 +174,7 @@ func InstallBundleWithPrevious(ctx context.Context, db *signerdb.DB, be keystore
 		return nil, nil, fmt.Errorf("%w: log origin %q is not the log key's %q", ErrBundleKeys, b.Log.Origin, tlog.Origin(logKey.PublicKey()))
 	}
 	// The switch's fences, before anything is written (03-12e).
-	notes, err := checkSwitchInstall(lw, installed, nil, b, p, now, previous != nil)
+	notes, err := checkSwitchInstall(lw, installed, installedPol, b, p, now, previous != nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -211,10 +230,14 @@ func openPrevious(logKey keystore.CAKey, previous []byte) (tlog.Checkpoint, erro
 // for each newly draining entry the largest ValidBefore that the scan
 // recorded for its key must leave no certificate live at its
 // trusted_until (krl.DrainBindingHolds), else drain_window_too_short. It
-// returns one DrainNote per newly draining entry. The installed bundle's
-// policy, b's policy and the install's clock reading are what the upper
-// bound reads.
-func checkSwitchInstall(lw *Signer, installed *trust.Bundle, _ *trust.Policy, b *trust.Bundle, _ *trust.Policy, _ time.Time, havePrevious bool) ([]DrainNote, error) {
+// returns one DrainNote per newly draining entry. Each newly draining
+// entry's trusted_until must also be at most drainUpperBound of the
+// install's clock reading now, the larger max_ttl_seconds of its role in
+// the installed bundle's policy installedPol and in b's policy p, and that
+// maximum, else drain_window_too_long; the bound is a sanity bound that
+// never falls below the binding, and audit re-derives it with the install
+// leaf's time as the clock.
+func checkSwitchInstall(lw *Signer, installed *trust.Bundle, installedPol *trust.Policy, b *trust.Bundle, p *trust.Policy, now time.Time, havePrevious bool) ([]DrainNote, error) {
 	if lw == nil || lw.loaded.drain == nil {
 		return nil, fmt.Errorf("%w: the install was handed no scan of the log", ErrDrainScanMissing)
 	}
@@ -240,6 +263,14 @@ func checkSwitchInstall(lw *Signer, installed *trust.Bundle, _ *trust.Policy, b 
 			return nil, fmt.Errorf("%w: the switch of CA %s ends trust at %s, but the log records a certificate of generation %d valid until %s (serial %d, key ID %s, leaf %d); the earliest acceptable trusted_until is %s",
 				ErrDrainWindowTooShort, ca.Role, ca.TrustedUntil, ca.Generation, drainTime(m.ValidBefore), m.Serial, m.KeyID, m.Leaf, earliestTrustedUntil(m.ValidBefore))
 		}
+		bound, err := switchUpperBound(installedPol, p, ca.Role, now, m.ValidBefore)
+		if err != nil {
+			return nil, fmt.Errorf("%w: the switch of CA %s: %w", ErrDrainWindowTooLong, ca.Role, err)
+		}
+		if tu > bound {
+			return nil, fmt.Errorf("%w: the switch of CA %s ends trust at %s, above the latest acceptable %s",
+				ErrDrainWindowTooLong, ca.Role, ca.TrustedUntil, drainTime(bound))
+		}
 		notes = append(notes, DrainNote{Role: ca.Role, Generation: ca.Generation, TrustedUntil: ca.TrustedUntil, Max: m, Recorded: ok})
 	}
 	return notes, nil
@@ -248,8 +279,34 @@ func checkSwitchInstall(lw *Signer, installed *trust.Bundle, _ *trust.Policy, b 
 // drainUpperBound is the latest trusted_until a switch install accepts
 // (03-12e): max(signerNow + the larger TTL, maxVB) + 300 +
 // MaxDrainAllowance + 300, an overflow being an error.
-func drainUpperBound(_, _, _, _ uint64) (uint64, error) {
-	return math.MaxUint64, nil
+func drainUpperBound(signerNow, ttlPrev, ttlNext, maxVB uint64) (uint64, error) {
+	ttl := max(ttlPrev, ttlNext)
+	if signerNow > math.MaxUint64-ttl {
+		return 0, errors.New("signer-now plus the larger max TTL overflows")
+	}
+	base := max(signerNow+ttl, maxVB)
+	add := uint64(trust.DrainMargin) + uint64(trust.MaxDrainAllowance/time.Second) + krl.PruneMargin
+	if base > math.MaxUint64-add {
+		return 0, errors.New("the upper bound overflows")
+	}
+	return base + add, nil
+}
+
+// switchUpperBound is drainUpperBound for a switch of role installed at
+// now, with the larger max_ttl_seconds of the role in the installed
+// policy and in the new one, and maxVB the largest logged ValidBefore of
+// the draining key (0 when none). A policy without the role's profile, or
+// a clock before 1970, cannot give a bound and refuses (03-12e).
+func switchUpperBound(installedPol, p *trust.Policy, role string, now time.Time, maxVB uint64) (uint64, error) {
+	ttlPrev, okPrev := trust.RoleMaxTTL(installedPol, role)
+	ttlNext, okNext := trust.RoleMaxTTL(p, role)
+	if !okPrev || !okNext {
+		return 0, errors.New("the upper bound cannot be computed: a policy has no profile of the role")
+	}
+	if now.Unix() < 0 {
+		return 0, errors.New("the upper bound cannot be computed: the signer's clock reads before 1970")
+	}
+	return drainUpperBound(uint64(now.Unix()), ttlPrev, ttlNext, maxVB) //nolint:gosec // G115: not before 1970, checked above
 }
 
 // newlyDraining returns the draining entries of b that installed (nil for
