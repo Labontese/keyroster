@@ -2193,7 +2193,7 @@ old key. Follow the restore procedure above, in this order:
    that shows it:
 
    ```
-   keyroster audit verify --pin SHA256:<A from paper> --threshold 1 --installation-id <installation id> \
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \
      --previous /tmp/restored.jsonl <the newest saved export>
    ```
 

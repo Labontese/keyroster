@@ -891,6 +891,48 @@ func TestSignerInstallSwitchPreviousCopy(t *testing.T) {
 	}
 }
 
+// TestRunbookAuditVerifyPins (03-12e pre-merge review): trust.MatchPins needs
+// the pinned set to equal the bundle's root set, so every `keyroster audit
+// verify --pin SHA256:` command of the runbooks pins both roots; one pin
+// fails a valid export and sends the operator to escalate as for a fork.
+func TestRunbookAuditVerifyPins(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("..", "..", "docs", "runbooks", "*.md"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no runbooks found: %v", err)
+	}
+	signerInstall := 0
+	for _, f := range files {
+		for i, l := range strings.Split(string(readTestFile(t, f)), "\n") {
+			if !strings.Contains(l, "keyroster audit verify --pin SHA256:") {
+				continue
+			}
+			if filepath.Base(f) == "signer-install.md" {
+				signerInstall++
+			}
+			if n := strings.Count(l, "--pin SHA256:"); n != 2 {
+				t.Errorf("%s:%d pins %d roots, want both: %s", filepath.Base(f), i+1, n, strings.TrimSpace(l))
+			}
+		}
+	}
+	if signerInstall < 9 {
+		t.Errorf("signer-install.md has %d audit verify --pin commands, want at least 9", signerInstall)
+	}
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
+	lines := strings.Split(data, "\n")
+	restore := 0
+	for i, l := range lines {
+		if strings.Contains(l, "--previous /tmp/restored.jsonl <the newest saved export>") {
+			restore++
+			if i == 0 || strings.Count(lines[i-1], "--pin SHA256:") != 2 {
+				t.Errorf("the restore check at line %d does not pin both roots", i+1)
+			}
+		}
+	}
+	if restore != 1 {
+		t.Errorf("found %d restore step 5 checks, want 1", restore)
+	}
+}
+
 // TestSwitchRunbookLinkSafety (03-12e): the switch sections of
 // signer-install.md, which neither TestCARotationRunbookLinkSafety nor
 // TestSignerInstallGenesisLinkSafety reads, run nothing as root below the
