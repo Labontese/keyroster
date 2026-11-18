@@ -14,7 +14,7 @@ requirements-completed: []
 actuals:
   tokens: 245000   # chars/4 over the realized diff against 1aa0b7d, this SUMMARY included
   tasks: 9         # Tasks 1 to 9; Task 10 is the owner's merge
-  commits: 26      # git rev-list --count 1aa0b7d..HEAD, the CI fix and its SUMMARY commit included
+  commits: 30      # git rev-list --count 1aa0b7d..HEAD, the CI fix, the review fixes and their two SUMMARY commits included
 plan_head_before: 1aa0b7d4021e0fbcab0dddf4726f6ce44d8801c2
 ---
 
@@ -26,7 +26,7 @@ A role's CA switch (its `next` key active, its old key `draining` until an immut
 
 - **Done:** Tasks 1 to 8 in six sessions (2026-11-17 and 2026-11-18): S1 1b7a4a4, R1 c06479a, T1 83b13cb; R2 d0b809d, T2 9be1f99; S3 40d7ae0, R3 d686446, T3 943e97a; R4 ebd0f1f, T4 bae6459; R5 b6a8430, T5 042658f; A13 2e9b9e7; R6 c7c8cff, T6 f4a6739; R7 f893382, T7 4ac82dd; A22 e162f4a; R8 b75217c, T8 73181ba, D8 e2ac205 (amended once from 8bd1f41). The sixth session stopped before Task 9 because its precondition was unmet (`03-12e2-PLAN.md` was not in the working tree; no Task 9 edit was made). The orchestrator then placed it (114723 bytes, sha256 698e7f989edbbb8cbf21ca65bded6ab757da8fd408136eeb2489d02cbff2ae0b, wave 37, depending on 03-12e).
 - **Seventh session (2026-11-18): Task 9 up to the green PR** (see "Task 9"): the plan commit, the bookkeeping commit, the base re-measured and both gates, the push, the PR, the tracking update and this SUMMARY, then one CI fix (deviation 32: the windows and darwin lint of the signer's tests).
-- **Next step:** the pre-merge review (the orchestrator's; its results go into this SUMMARY under "Pre-merge review" by one more docs commit), then Task 10 (the owner's merge). The owner noted deviations 23 and 24 for that review round; deviations 25 to 28 are accepted.
+- **Next step:** Task 10 (the owner's merge). The pre-merge review has run; its results and the two fixes it led to are under "Pre-merge review". The owner noted deviations 23 and 24 for that review round; deviations 25 to 28 are accepted.
 - **Open RED/mutant state:** none. No file is in a mutant state; every mutated file was restored from HEAD and its sha256 matched the pre-mutant value.
 - **TestTrustChangedUnderLiveSigner** failed once (T2's gate, see "Task 2") and has not recurred since, in any gate or in the delta and full gates of Task 9.
 
@@ -71,7 +71,11 @@ After `git fetch origin` (origin/main 1aa0b7d): the stop guard, the base values 
 | Bookkeeping | 49938e7 | docs(03-12e2): add the ceremony tool and proof plan and shift the later waves | yes, all 7 files, one at a time: 03-12e2-PLAN.md (a new file, all 569 lines), the five frontmatter diffs and the ROADMAP diff |
 | Tracking | 285467d | docs(03-12e): complete ca-rotation-switch-binding-and-fences plan | yes, all 3 files: ROADMAP.md, STATE.md and this SUMMARY (a new file, read in full) |
 | CI fix | a5218c4 | test(signer): build the switch, rotation and generation tests on linux only | yes, all 3 files (one build-constraint hunk each) |
-| SUMMARY | see "Task 9" | docs(03-12e): record the CI lint fix of the signer tests | yes, the one file |
+| SUMMARY | 3791dec | docs(03-12e): record the CI lint fix of the signer tests | yes, the one file |
+| Review fix 1 | c23cd44 | docs(signer): remove a stale previous export before a switch install copies the new one | yes, both files |
+| Review fix 2 | d298b78 | docs(signer): pin both roots in the snapshot-restore audit check | yes, both files |
+| Review record | 92835c2 | docs(03-12e): record the pre-merge review and its two fixes | yes, the one file |
+| Review record, correction | this commit | docs(03-12e): bring the hand-over and the commit list up to date after the review | yes, the one file |
 
 ## Task 1
 
@@ -412,7 +416,7 @@ Precondition (seventh session): 03-12e2-PLAN.md in the working tree with the siz
 
 **Task 9's verify commands** (exit codes). The ROADMAP and STATE gate, the bookkeeping and file-list check, the publish scan and the authorship check exit 0 on 285467d and again after the CI fix; the delta gate and the full gate exit 0 on 49938e7, whose code differs from the final head only by the build constraints of the CI fix (deviation 32), which change nothing on linux. On 285467d the pushed-head check, the PR text scan and the auto-merge check exited 0; its CI run failed one required check, `lint` (run 44262568580), fixed by a5218c4 (deviation 32). The required-check and e2e gate command is run on the head after the fix; its result and the check run IDs are recorded with the pre-merge review (deviation 29).
 
-**Pre-merge review:** pending. The orchestrator runs it on the green PR before Task 10; its results, fix rounds and checks go here by one more docs commit, read in full and pushed.
+**Pre-merge review:** ran after this task on the green PR; its results, the two fixes and the check run IDs are under "Pre-merge review" (written by one more docs commit).
 
 ## Deviations from Plan
 
@@ -465,18 +469,18 @@ Every commit named in this SUMMARY is an ancestor of the branch head (`git merge
 
 ## Pre-merge review
 
-The review ran on PR #110 at head 3791dec (the green run below): run wf_97a057ff-c13, two Opus lenses, a Codex lens at high effort, and Sonnet skeptics that tried to disprove each result. Six review results survived to the skeptics: 2 were confirmed (both medium, both docs, fixed below) and 4 were refuted.
+The review ran on PR #110 at head 3791dec (the green run below): run wf_97a057ff-c13, two Opus lenses, a Codex lens at high effort, and Sonnet skeptics that tried to disprove each result. Result: 2 confirmed (both medium, both docs, fixed below) and 4 refuted.
 
 ### Pre-merge review fixes
 
 1. **[Confirmed, medium] a second switch install ran against a stale previous export (c23cd44).** The switch install block of docs/runbooks/signer-install.md ("Install a CA switch: `--previous`") copied the export into `incoming/previous.jsonl` with `set -C`, and nothing removed the export of an earlier switch. On a second switch, the normal case since roles switch one at a time, the copy failed with "File exists", the block had no `set -e` and no chaining, and `install-bundle --previous` ran against the first switch's export, which is an honest prefix and is accepted. A rollback or fork of `signer.db` between that export and the newest saved export then went undetected. The block now runs `runuser -u keyroster-signer -- rm -f "$S/incoming/previous.jsonl"` first, as the genesis and ca-rotation.md blocks remove a stale file, and chains the rm, the copy and the install with `&&`; the prose says why. The rm runs as keyroster-signer, never as root, so the link-safety tests accept it. Restore step 6 needs no rm: it installs from `fresh.jsonl`, which `export-log --out` writes by temp file and rename (it replaces an old file), and it copies no previous export in. Test: `TestSignerInstallSwitchPreviousCopy` (rm as the signer's user, then the `set -C` copy, then the install, on consecutive lines, the first two ending in `&&`).
 2. **[Confirmed, medium] the snapshot-restore check pinned one root (d298b78).** Restore step 5 ran `keyroster audit verify --pin SHA256:<A from paper> --threshold 1 ...`, while every other audit verify of the runbooks passes both roots. `trust.MatchPins` requires the pinned set to equal the bundle's root set, so a valid saved export failed the check and sent the operator to escalate as for a fork. It now passes `--pin SHA256:<A from paper> --pin SHA256:<B from paper>`. No other runbook this PR changed (ca-rotation.md, signer-install.md) has a single-pin audit verify; root-ceremony.md's command pins both new roots. Test: `TestRunbookAuditVerifyPins` (every `keyroster audit verify --pin SHA256:` line of docs/runbooks carries exactly two pins, signer-install.md has at least 9 of them, and the restore line itself is checked).
-3. **Evidence, before and after.** With docs/runbooks/signer-install.md taken from 3791dec, both new tests fail: `TestSignerInstallSwitchPreviousCopy` reports the block lacks the rm as the signer's user (-1), and `TestRunbookAuditVerifyPins` reports `signer-install.md:2191 pins 1 roots, want both` and that the restore check at line 2192 does not pin both roots. With the fixed file (sha256 2da79d879e69a39920b2a76b89afa6d8c94be5a14185beb469035d67b0dd77f1, identical after the revert and restore) both pass, with `TestSwitchRunbookLinkSafety`, `TestSignerInstallGenesisLinkSafety`, `TestCARotationRunbookLinkSafety` and the other runbook tests. gofmt -l and go vet of cmd/keyroster are clean, and the whole package passes (`go test -count=1 ./cmd/keyroster/`, 78.7 s).
+3. **Evidence, before and after.** With docs/runbooks/signer-install.md taken from 3791dec, both new tests fail: `TestSignerInstallSwitchPreviousCopy` reports the block lacks the rm as the signer's user (-1), and `TestRunbookAuditVerifyPins` reports `signer-install.md:2191 pins 1 roots, want both` and that the restore check at line 2192 does not pin both roots. With the fixed file (sha256 2da79d879e69a39920b2a76b89afa6d8c94be5a14185beb469035d67b0dd77f1, identical after the revert and restore) both pass, with `TestSwitchRunbookLinkSafety`, `TestSignerInstallGenesisLinkSafety`, `TestCARotationRunbookLinkSafety` and the other runbook tests. The order and chaining assertions of the first test are not reached on 3791dec (the missing rm stops it first), so they were shown on two mutants of the fixed file: with the trailing `&&` removed from the copy line it fails with "the copy line does not end in && and so does not gate the next command", and with the rm moved after the copy it fails with "order is rm 3, copy 2, install 4"; the file was restored from HEAD and its sha256 matched. gofmt -l and go vet of cmd/keyroster are clean, and the whole package passes (`go test -count=1 ./cmd/keyroster/`, 78.7 s).
 
 Refuted, with the reason each stays unchanged:
 
 - **retire-key directory sync retry (low).** If the directory sync after the key removal fails, a retry is not needed for safety: the signer fails closed, because `serve` refuses to start while the draining key is held and doctor reports it. Not changed.
-- **retire-key socket override hint.** The hint about `--backend-opt socket=` is the behaviour recorded as deviation 17 (and 24 for doctor); cosmetic. Not changed.
+- **retire-key socket override hint.** The hint about `--backend-opt socket=` is the behaviour recorded as deviation 17; cosmetic. Not changed.
 - **doctor's `log_mismatch` text.** Deviation 23: the text says serve refuses to start in a corner where serve would accept the log; doctor fails closed and the switch install refuses that log. Not changed.
 - **The upper bound reads the installed policy's `max_ttl`.** A coverage remark only, no behaviour defect. Not changed.
 
