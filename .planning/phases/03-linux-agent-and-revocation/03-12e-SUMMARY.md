@@ -14,7 +14,7 @@ requirements-completed: []
 actuals:
   tokens: 245000   # chars/4 over the realized diff against 1aa0b7d, this SUMMARY included
   tasks: 9         # Tasks 1 to 9; Task 10 is the owner's merge
-  commits: 30      # git rev-list --count 1aa0b7d..HEAD, the CI fix, the review fixes and their two SUMMARY commits included
+  commits: 32      # git rev-list --count 1aa0b7d..HEAD, the CI fix, the review fixes, their lint fix and their three SUMMARY commits included
 plan_head_before: 1aa0b7d4021e0fbcab0dddf4726f6ce44d8801c2
 ---
 
@@ -75,7 +75,9 @@ After `git fetch origin` (origin/main 1aa0b7d): the stop guard, the base values 
 | Review fix 1 | c23cd44 | docs(signer): remove a stale previous export before a switch install copies the new one | yes, both files |
 | Review fix 2 | d298b78 | docs(signer): pin both roots in the snapshot-restore audit check | yes, both files |
 | Review record | 92835c2 | docs(03-12e): record the pre-merge review and its two fixes | yes, the one file |
-| Review record, correction | this commit | docs(03-12e): bring the hand-over and the commit list up to date after the review | yes, the one file |
+| Review record, correction | ddc78f5 | docs(03-12e): bring the hand-over and the commit list up to date after the review | yes, the one file |
+| Review fix, lint | fe9ae36 | test(runbook): apply De Morgan's law in the switch copy order check | yes, the one file |
+| Review record, lint | this commit | docs(03-12e): record the lint fix of the review's runbook test | yes, the one file |
 
 ## Task 1
 
@@ -476,6 +478,7 @@ The review ran on PR #110 at head 3791dec (the green run below): run wf_97a057ff
 1. **[Confirmed, medium] a second switch install ran against a stale previous export (c23cd44).** The switch install block of docs/runbooks/signer-install.md ("Install a CA switch: `--previous`") copied the export into `incoming/previous.jsonl` with `set -C`, and nothing removed the export of an earlier switch. On a second switch, the normal case since roles switch one at a time, the copy failed with "File exists", the block had no `set -e` and no chaining, and `install-bundle --previous` ran against the first switch's export, which is an honest prefix and is accepted. A rollback or fork of `signer.db` between that export and the newest saved export then went undetected. The block now runs `runuser -u keyroster-signer -- rm -f "$S/incoming/previous.jsonl"` first, as the genesis and ca-rotation.md blocks remove a stale file, and chains the rm, the copy and the install with `&&`; the prose says why. The rm runs as keyroster-signer, never as root, so the link-safety tests accept it. Restore step 6 needs no rm: it installs from `fresh.jsonl`, which `export-log --out` writes by temp file and rename (it replaces an old file), and it copies no previous export in. Test: `TestSignerInstallSwitchPreviousCopy` (rm as the signer's user, then the `set -C` copy, then the install, on consecutive lines, the first two ending in `&&`).
 2. **[Confirmed, medium] the snapshot-restore check pinned one root (d298b78).** Restore step 5 ran `keyroster audit verify --pin SHA256:<A from paper> --threshold 1 ...`, while every other audit verify of the runbooks passes both roots. `trust.MatchPins` requires the pinned set to equal the bundle's root set, so a valid saved export failed the check and sent the operator to escalate as for a fork. It now passes `--pin SHA256:<A from paper> --pin SHA256:<B from paper>`. No other runbook this PR changed (ca-rotation.md, signer-install.md) has a single-pin audit verify; root-ceremony.md's command pins both new roots. Test: `TestRunbookAuditVerifyPins` (every `keyroster audit verify --pin SHA256:` line of docs/runbooks carries exactly two pins, signer-install.md has at least 9 of them, and the restore line itself is checked).
 3. **Evidence, before and after.** With docs/runbooks/signer-install.md taken from 3791dec, both new tests fail: `TestSignerInstallSwitchPreviousCopy` reports the block lacks the rm as the signer's user (-1), and `TestRunbookAuditVerifyPins` reports `signer-install.md:2191 pins 1 roots, want both` and that the restore check at line 2192 does not pin both roots. With the fixed file (sha256 2da79d879e69a39920b2a76b89afa6d8c94be5a14185beb469035d67b0dd77f1, identical after the revert and restore) both pass, with `TestSwitchRunbookLinkSafety`, `TestSignerInstallGenesisLinkSafety`, `TestCARotationRunbookLinkSafety` and the other runbook tests. The order and chaining assertions of the first test are not reached on 3791dec (the missing rm stops it first), so they were shown on two mutants of the fixed file: with the trailing `&&` removed from the copy line it fails with "the copy line does not end in && and so does not gate the next command", and with the rm moved after the copy it fails with "order is rm 3, copy 2, install 4"; the file was restored from HEAD and its sha256 matched. gofmt -l and go vet of cmd/keyroster are clean, and the whole package passes (`go test -count=1 ./cmd/keyroster/`, 78.7 s).
+4. **[Defect of the review fixes, fixed: CI lint] fe9ae36.** CI's lint refused the first push of the fixes (ddc78f5, run 44279267473): staticcheck QF1001 at `if !(rm < cp && cp < inst)` in `TestSignerInstallSwitchPreviousCopy`. golangci-lint is not installed on the development machine, so the new test was checked with gofmt, go vet and the tests only. The condition is now `rm >= cp || cp >= inst`; same behaviour (the mutants above still fail it, the runbook tests pass).
 
 Refuted, with the reason each stays unchanged:
 
