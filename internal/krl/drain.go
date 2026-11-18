@@ -36,8 +36,9 @@ type DrainMax struct{ m map[string]DrainEntry }
 func NewDrainMax() *DrainMax { return &DrainMax{m: map[string]DrainEntry{}} }
 
 // Add records the certificate c of leaf under its signature key. A nil
-// certificate and one without a signature key are errors, never skipped.
-// On a tie of ValidBefore the earliest leaf keeps the entry.
+// certificate and one without a signature key are errors, never skipped,
+// and so is a key beyond MaxDrainKeys (ErrDrainTooManyKeys). On a tie of
+// ValidBefore the earliest leaf keeps the entry.
 func (d *DrainMax) Add(leaf uint64, c *ssh.Certificate) error {
 	if c == nil {
 		return errors.New("krl: drain: no certificate")
@@ -46,8 +47,12 @@ func (d *DrainMax) Add(leaf uint64, c *ssh.Certificate) error {
 		return errors.New("krl: drain: the certificate has no signature key")
 	}
 	k := string(c.SignatureKey.Marshal())
-	if cur, ok := d.m[k]; ok && cur.ValidBefore >= c.ValidBefore {
+	cur, ok := d.m[k]
+	if ok && cur.ValidBefore >= c.ValidBefore {
 		return nil
+	}
+	if !ok && len(d.m) >= MaxDrainKeys {
+		return ErrDrainTooManyKeys
 	}
 	d.m[k] = DrainEntry{ValidBefore: c.ValidBefore, Leaf: leaf, Serial: c.Serial, KeyID: c.KeyId}
 	return nil
