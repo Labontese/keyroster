@@ -2126,3 +2126,71 @@ func BenchmarkInstallBundleDrainScan(b *testing.B) {
 		})
 	}
 }
+
+// TestLogDrain (03-12e): LogDrain walks the verified log with the drain
+// scan and returns its accumulator, which for every CA key holds the
+// certificate with the largest ValidBefore that the leaves record (the
+// earliest leaf on a tie), as a walk of tlog.LeafCertificates over the
+// same leaves finds; a log that does not verify gives an error and no
+// accumulator.
+func TestLogDrain(t *testing.T) {
+	ctx := context.Background()
+	t.Run("returns_the_accumulator_of_a_verified_log", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		k.issueAdmin(t, wire.CARoleHost, 86400)
+		k.stopped(t, func(db *signerdb.DB) {
+			acc, err := LogDrain(ctx, db, k.e.fx.Roles[keystore.RoleLog].PublicKey())
+			if err != nil || acc == nil {
+				t.Fatalf("LogDrain = %v, %v; want an accumulator", acc, err)
+			}
+			want := map[string]krl.DrainEntry{}
+			if err := db.ForEachLeaf(ctx, func(idx uint64, raw []byte) error {
+				l, err := tlog.DecodeLeaf(raw)
+				if err != nil {
+					return err
+				}
+				certs, err := tlog.LeafCertificates(l)
+				if err != nil {
+					return err
+				}
+				for _, c := range certs {
+					ca := string(c.SignatureKey.Marshal())
+					if cur, ok := want[ca]; !ok || c.ValidBefore > cur.ValidBefore {
+						want[ca] = krl.DrainEntry{ValidBefore: c.ValidBefore, Leaf: idx, Serial: c.Serial, KeyID: c.KeyId}
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			for _, role := range []keystore.Role{keystore.RoleUser, keystore.RoleHost} {
+				ca := k.e.fx.Roles[role].PublicKey().Marshal()
+				w, ok := want[string(ca)]
+				if !ok {
+					t.Fatalf("the log records no certificate of the %s CA; the fixture must issue one", role)
+				}
+				if got, ok := acc.For(ca); !ok || got != w {
+					t.Fatalf("LogDrain's entry for the %s CA = %+v, %t; want %+v", role, got, ok, w)
+				}
+			}
+			if got, ok := acc.For(k.e.fx.Roles[keystore.RoleMachine].PublicKey().Marshal()); ok {
+				t.Fatalf("LogDrain holds %+v for the machine CA, which issued nothing", got)
+			}
+		})
+	})
+	t.Run("refuses_a_log_that_does_not_verify", func(t *testing.T) {
+		k, _ := drainEnv(t)
+		k.offline(t, func(db *signerdb.DB) {
+			if acc, err := LogDrain(ctx, db, newEd25519(t).PublicKey()); err == nil || acc != nil {
+				t.Fatalf("LogDrain under another log key = %v, %v; want an error and no accumulator", acc, err)
+			}
+		})
+		k.e.exec(t, `UPDATE log_leaf SET leaf = leaf || x'00' WHERE idx = 1`)
+		k.offline(t, func(db *signerdb.DB) {
+			if acc, err := LogDrain(ctx, db, k.e.fx.Roles[keystore.RoleLog].PublicKey()); err == nil || acc != nil {
+				t.Fatalf("LogDrain over an edited leaf = %v, %v; want an error and no accumulator", acc, err)
+			}
+		})
+	})
+}

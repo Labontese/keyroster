@@ -277,6 +277,15 @@ func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error 
 	return err
 }
 
+// LogDrain runs CheckLog's verified log walk with the drain scan and
+// returns its accumulator (03-12e): per CA key, the certificate with the
+// largest ValidBefore that the log records, carried certificates included.
+// keyroster-signer doctor shows from it the earliest trusted_until a
+// switch of each role could carry. It only reads db.
+func LogDrain(_ context.Context, _ *signerdb.DB, _ ssh.PublicKey) (*krl.DrainMax, error) {
+	return nil, errors.New("signer: LogDrain is declared, not implemented")
+}
+
 // CheckTrust runs the start-up trust checks of serve that need no
 // keystore backend, on one snapshot of db (it only reads): the installed
 // trust bundle record must be consistent (version, policy hash), list

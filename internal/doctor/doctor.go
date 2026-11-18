@@ -192,6 +192,42 @@ type Facts struct {
 	// UnrecordedGenerationFiles are the {state-dir}/software/<role>-g<N>.age
 	// files that no generation row names (03-12).
 	UnrecordedGenerationFiles []string
+
+	// DrainingHeld are the generations of the installed bundle's draining
+	// CA entries that the backend still holds, or whose holding could not
+	// be checked (Unchecked set) (03-12e): serve refuses to start while
+	// any is held.
+	DrainingHeld []HeldFact
+	// SwitchFloors are, per CA role with an active key, the certificate
+	// of that key with the largest ValidBefore that the verified log
+	// records (03-12e): a switch of the role cannot end the key's trust
+	// before that ValidBefore plus 300 s.
+	SwitchFloors []SwitchFloor
+}
+
+// HeldFact is one generation of a draining CA entry that the backend
+// still holds (03-12e). Unchecked, when set, is why doctor could not ask
+// the backend; the generation is then not known to be gone.
+type HeldFact struct {
+	Role        string
+	Generation  uint32
+	Fingerprint string
+	Unchecked   string
+}
+
+// SwitchFloor is, for the active key of one CA role, the certificate the
+// log records with the largest ValidBefore (03-12e). HasCertificate is
+// false when the log records none of that key; Saturated is true when
+// ValidBefore plus 300 s does not fit in 64 bits (the certificate never
+// expires).
+type SwitchFloor struct {
+	Role           string
+	Generation     uint32
+	HasCertificate bool
+	Serial         uint64
+	KeyID          string
+	ValidBefore    uint64
+	Saturated      bool
 }
 
 // GenerationFact is one stored CA key generation (03-12): State is the
