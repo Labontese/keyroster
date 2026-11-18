@@ -11,10 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1112,4 +1114,368 @@ func TestRecoverRevocations(t *testing.T) {
 		}
 		r2.verifyExport()
 	})
+}
+
+// countingBackend is a genBackend that counts, by role, every key a
+// signer opens from it (03-12e).
+type countingBackend struct {
+	*genBackend
+	cmu    sync.Mutex
+	opened map[keystore.Role]int
+}
+
+func (b *countingBackend) count(role keystore.Role) {
+	b.cmu.Lock()
+	defer b.cmu.Unlock()
+	if b.opened == nil {
+		b.opened = map[keystore.Role]int{}
+	}
+	b.opened[role]++
+}
+
+// opens is how often a key of role was opened.
+func (b *countingBackend) opens(role keystore.Role) int {
+	b.cmu.Lock()
+	defer b.cmu.Unlock()
+	return b.opened[role]
+}
+
+func (b *countingBackend) Key(role keystore.Role, fp string) (keystore.CAKey, error) {
+	b.count(role)
+	return b.genBackend.Key(role, fp)
+}
+
+func (b *countingBackend) KeyAt(role keystore.Role, generation uint32, fp, location string) (keystore.CAKey, error) {
+	b.count(role)
+	return b.genBackend.KeyAt(role, generation, fp, location)
+}
+
+// startConfig tries to start k's signer with cfg completed by the env's
+// database handles, clock and peer allowlist, and returns New's error; on
+// success the env holds the new signer (03-12e).
+func (k *swKit) startConfig(t *testing.T, cfg Config) error {
+	t.Helper()
+	k.e.close()
+	db, err := signerdb.Open(k.e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdb, err := signerdb.OpenReadOnly(k.e.dbPath)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	cfg.DB, cfg.StatusDB, cfg.Clock, cfg.AllowUIDs = db, sdb, k.clk.Now, []uint32{1000}
+	s, err := New(cfg)
+	if err != nil {
+		_ = sdb.Close()
+		_ = db.Close()
+		return err
+	}
+	k.e.db, k.e.sdb, k.e.s = db, sdb, s
+	return nil
+}
+
+// TestRecoveryOpensNoCAKey (03-12e, RC-01 and RC-02): the recovery
+// configuration starts on a switched state whose old key the backend still
+// holds, opens only the ops and log keys, and its signer issues nothing
+// and serves nothing.
+func TestRecoveryOpensNoCAKey(t *testing.T) {
+	recoverySigner := func(t *testing.T) (*swKit, *countingBackend) {
+		t.Helper()
+		k, _ := heldSwitch(t, trust.RoleUser)
+		cb := &countingBackend{genBackend: k.gb}
+		if err := k.startConfig(t, Config{Backend: cb, Recovery: true}); err != nil {
+			t.Fatalf("start in the recovery configuration: %v", err)
+		}
+		return k, cb
+	}
+	t.Run("opens_only_ops_and_log", func(t *testing.T) {
+		_, cb := recoverySigner(t)
+		for _, role := range []keystore.Role{keystore.RoleUser, keystore.RoleHost, keystore.RoleMachine} {
+			if n := cb.opens(role); n != 0 {
+				t.Fatalf("the recovery configuration opened the %s CA key %d times", role, n)
+			}
+		}
+		if cb.opens(keystore.RoleOps) == 0 || cb.opens(keystore.RoleLog) == 0 {
+			t.Fatalf("the recovery configuration opened ops %d and log %d times, want both", cb.opens(keystore.RoleOps), cb.opens(keystore.RoleLog))
+		}
+	})
+	t.Run("recovery_signer_cannot_issue", func(t *testing.T) {
+		k, _ := recoverySigner(t)
+		req := k.e.request()
+		req.Evidence = SignRequest(t, req, k.e.fx.Admins...)
+		if _, err := k.e.s.Issue(context.Background(), Peer{UID: 1000}, req); err == nil || !strings.Contains(err.Error(), "ca_not_configured") {
+			t.Fatalf("issue on the recovery signer = %v, want ca_not_configured", err)
+		}
+	})
+	t.Run("recovery_signer_cannot_serve", func(t *testing.T) {
+		k, _ := recoverySigner(t)
+		dir, err := os.MkdirTemp("", "krrc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		l, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, "s.sock"), Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = l.Close() }()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := k.e.s.Serve(ctx, l); !errors.Is(err, ErrRecoveryConfiguration) {
+			t.Fatalf("Serve on the recovery signer = %v, want recovery_configuration", err)
+		}
+	})
+}
+
+// TestNewDefaultConfigIsServing (03-12e, SR-05): a Config that leaves
+// Recovery unset is the serving configuration: it refuses a held draining
+// key and, once the key is gone, opens every CA key.
+func TestNewDefaultConfigIsServing(t *testing.T) {
+	k, _ := heldSwitch(t, trust.RoleUser)
+	cb := &countingBackend{genBackend: k.gb}
+	if err := k.startConfig(t, Config{Backend: cb}); !errors.Is(err, ErrDrainingKeyUsable) {
+		t.Fatalf("a zero Config with the draining key held: %v, want draining_key_still_usable", err)
+	}
+	k.gb.drop(t, keystore.RoleUser, 1)
+	if err := k.startConfig(t, Config{Backend: cb}); err != nil {
+		t.Fatalf("a zero Config once the draining key is gone: %v", err)
+	}
+	for _, role := range []keystore.Role{keystore.RoleUser, keystore.RoleHost, keystore.RoleMachine} {
+		if cb.opens(role) == 0 {
+			t.Fatalf("the serving configuration did not open the %s CA key", role)
+		}
+	}
+}
+
+// drainedState is drainEnv with the switch of role installed and its old
+// key removed, the signer serving and its clock 20 s after the ceremony
+// (03-12e). It returns the kit and the draining entry's trusted_until, in
+// seconds and as written.
+func drainedState(t *testing.T, role string) (*swKit, uint64, string) {
+	t.Helper()
+	k, at := drainEnv(t)
+	k.at(t, at.Add(10*time.Second))
+	notes, err := k.install(t, k.switchDocs(t, at, 0, role), true)
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("the %s switch: %v", role, err)
+	}
+	tu, err := unixSeconds(notes[0].TrustedUntil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.at(t, at.Add(20*time.Second))
+	return k, tu, notes[0].TrustedUntil
+}
+
+// TestRecoveryNamesCertificateBeyondDrain (03-12e, RC-04): a recovery that
+// carries a certificate of a draining key whose ValidBefore is above
+// trusted_until minus 300 s names it, kept or revoked, and applies as
+// before; a certificate at trusted_until minus 300 s, one of the active
+// key and one of a role that does not drain are not named.
+func TestRecoveryNamesCertificateBeyondDrain(t *testing.T) {
+	carry := func(t *testing.T, k *swKit, certs ...wire.RecoveredCertificate) *RecoveryResult {
+		t.Helper()
+		return k.e.recover(t, k.e.recoveryRequest(t, nil, certs, nil))
+	}
+	t.Run("kept_beyond_the_drain_named", func(t *testing.T) {
+		k, tu, tus := drainedState(t, trust.RoleHost)
+		c := k.lostCert(t, keystore.RoleHost, tu-299)
+		res := carry(t, k, wire.RecoveredCertificate{Cert: c.Marshal()})
+		want := BeyondDrain{Role: trust.RoleHost, Generation: 1, Serial: c.Serial, KeyID: c.KeyId, ValidBefore: tu - 299, TrustedUntil: tus, Kept: true}
+		if res.Kept != 1 || len(res.BeyondDrain) != 1 || res.BeyondDrain[0] != want {
+			t.Fatalf("recovery result %+v, want one kept certificate named %+v", res, want)
+		}
+		line := fmt.Sprintf("warning: carried certificate serial %d (key ID %s, kept) of the draining host CA generation 1 is valid until %s, after %s minus 300 s; a kept one stops working at %s",
+			c.Serial, c.KeyId, unixTime(tu-299), tus, tus)
+		if got := res.BeyondDrain[0].String(); got != line {
+			t.Fatalf("the recovery line:\n got %q\nwant %q", got, line)
+		}
+	})
+	t.Run("revoked_beyond_the_drain_named", func(t *testing.T) {
+		k, tu, tus := drainedState(t, trust.RoleUser)
+		c := k.lostCert(t, keystore.RoleUser, tu+86400)
+		res := carry(t, k, wire.RecoveredCertificate{Cert: c.Marshal(), Revoke: true})
+		want := BeyondDrain{Role: trust.RoleUser, Generation: 1, Serial: c.Serial, KeyID: c.KeyId, ValidBefore: tu + 86400, TrustedUntil: tus, Kept: false}
+		if res.Revoked != 1 || len(res.BeyondDrain) != 1 || res.BeyondDrain[0] != want {
+			t.Fatalf("recovery result %+v, want one revoked certificate named %+v", res, want)
+		}
+	})
+	t.Run("within_the_drain_not_named", func(t *testing.T) {
+		k, tu, _ := drainedState(t, trust.RoleHost)
+		res := carry(t, k, wire.RecoveredCertificate{Cert: k.lostCert(t, keystore.RoleHost, tu-300).Marshal()})
+		if res.Kept != 1 || len(res.BeyondDrain) != 0 {
+			t.Fatalf("recovery result %+v, want the certificate at trusted_until minus 300 s kept and not named", res)
+		}
+	})
+	t.Run("active_key_certificate_not_named", func(t *testing.T) {
+		k, tu, _ := drainedState(t, trust.RoleHost)
+		k.gb.mu.Lock()
+		active := k.gb.keys[k.fpGen(t, keystore.RoleHost, 2)]
+		k.gb.mu.Unlock()
+		s := nextSerial(t, k.e.db) + 1000
+		c := makeCert(t, active, ssh.HostCert, string(keystore.RoleHost), "u:lost", s, s, tu+86400, nil)
+		res := carry(t, k, wire.RecoveredCertificate{Cert: c.Marshal()})
+		if res.Kept != 1 || len(res.BeyondDrain) != 0 {
+			t.Fatalf("recovery result %+v, want the certificate of the active key kept and not named", res)
+		}
+	})
+	t.Run("other_role_not_named", func(t *testing.T) {
+		k, tu, _ := drainedState(t, trust.RoleHost)
+		res := carry(t, k, wire.RecoveredCertificate{Cert: k.lostCert(t, keystore.RoleUser, tu+86400).Marshal(), Revoke: true})
+		if res.Revoked != 1 || len(res.BeyondDrain) != 0 {
+			t.Fatalf("recovery result %+v, want the user certificate revoked and not named", res)
+		}
+	})
+}
+
+// TestRestoredPreSwitchSignerCannotIssue (03-12e, RC-03): a copy of the
+// state database taken before the switch install, restored over the
+// backend after retire-key removed the old key. Serve is refused (its
+// bundle names the old key active), the recovery applies without any CA
+// key, and after a fresh export, the switch install behind that export's
+// checkpoint and retire-key, the signer issues with the new key.
+func TestRestoredPreSwitchSignerCannotIssue(t *testing.T) {
+	k, at := drainEnv(t)
+	k.at(t, at.Add(10*time.Second))
+	k.e.close()
+	restored := copyState(t, k.e.dbPath)
+	k.reopen(t)
+	if _, err := k.install(t, k.switchDocs(t, at, 0, trust.RoleUser), true); err != nil {
+		t.Fatalf("the switch install: %v", err)
+	}
+	r := &swKit{e: &logEnv{t: t, dbPath: restored, fx: k.e.fx, clock: k.clk.Now}, clk: k.clk, gb: k.gb}
+	t.Cleanup(r.e.close)
+	recovered := false
+	t.Run("start_is_refused", func(t *testing.T) {
+		if err := r.start(t, r.gb); err == nil || !strings.Contains(err.Error(), "bundle key for role user") {
+			t.Fatalf("serve on the restored database without the old key: %v, want the missing user key", err)
+		}
+	})
+	t.Run("recovery_works_without_ca_keys", func(t *testing.T) {
+		if err := r.startConfig(t, Config{Backend: r.gb, Recovery: true}); err != nil {
+			t.Fatalf("the recovery configuration on the restored database: %v", err)
+		}
+		c := r.lostCert(t, keystore.RoleUser, uint64(at.Unix())+600) //nolint:gosec // G115: after 1970
+		res := r.e.recover(t, r.e.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: c.Marshal(), Revoke: true}}, nil))
+		if res.Revoked != 1 {
+			t.Fatalf("recovery result %+v, want one revoked certificate", res)
+		}
+		recovered = true
+	})
+	t.Run("fresh_export_then_switch_install_with_previous", func(t *testing.T) {
+		r.offline(t, func(db *signerdb.DB) {
+			if err := auditExport(t, r.e.fx, db); err != nil {
+				t.Fatalf("audit of the restored log: %v", err)
+			}
+			cp, _, err := db.LatestCheckpoint(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := switchDocsDB(t, db, r.e.fx.Root, at, 0, trust.RoleUser)
+			if _, _, err := InstallBundleWithPrevious(context.Background(), db, r.gb, nil, 0, d[0], d[1], d[2], d[3], r.clk.Now, cp); err != nil {
+				t.Fatalf("the switch install on the restored database: %v", err)
+			}
+		})
+	})
+	t.Run("serve_issues_with_the_new_key", func(t *testing.T) {
+		if !recovered {
+			t.Fatal("the recovery of the restored database did not apply")
+		}
+		if res, err := r.retire(t, keystore.RoleUser); err != nil || outcomes(res) != "1 not held" {
+			t.Fatalf("retire-key on the restored database = %s, %v; want generation 1 not held", outcomes(res), err)
+		}
+		if err := r.start(t, r.gb); err != nil {
+			t.Fatalf("serve after the switch install and retire-key: %v", err)
+		}
+		req := r.e.request()
+		req.Evidence = SignRequest(t, req, r.e.fx.Admins...)
+		resp, err := r.e.s.Issue(context.Background(), Peer{UID: 1000}, req)
+		if err != nil {
+			t.Fatalf("issue: %v", err)
+		}
+		if got, want := ssh.FingerprintSHA256(certOf(t, resp).SignatureKey), r.fpGen(t, keystore.RoleUser, 2); got != want {
+			t.Fatalf("the certificate is signed by %s, want generation 2 (%s)", got, want)
+		}
+	})
+}
+
+// TestUnloggedSignatureNotCovered (03-12e, a documentation test of a
+// residual): a certificate signed directly with the old key, outside the
+// signer, with ValidBefore a day after the switch's trusted_until, is in no
+// row and no leaf, so neither the install binding nor audit sees it: both
+// pass. The guarantee covers what the verified log records.
+func TestUnloggedSignatureNotCovered(t *testing.T) {
+	k, at := drainEnv(t)
+	k.at(t, at.Add(10*time.Second))
+	d := k.switchDocs(t, at, 0, trust.RoleUser)
+	b, err := trust.ParseBundle(d[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tu uint64
+	for _, ca := range b.CAs {
+		if ca.Role == trust.RoleUser && ca.State == "draining" {
+			if tu, err = unixSeconds(ca.TrustedUntil); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	c := gen1Cert(t, k.e.fx, keystore.RoleUser, nextSerial(t, k.e.db)+1000, tu+86400)
+	if _, err := k.install(t, d, true); err != nil {
+		t.Fatalf("the switch install with an unlogged certificate outliving it: %v", err)
+	}
+	if err := k.audit(t); err != nil {
+		t.Fatalf("audit of the switch with an unlogged certificate outliving it: %v", err)
+	}
+	var n int
+	if err := k.e.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		return tx.QueryRow(`SELECT count(*) FROM issuance WHERE serial = ?`, c.Serial).Scan(&n)
+	}); err != nil || n != 0 {
+		t.Fatalf("the unlogged certificate has %d issuance rows (%v), want none", n, err)
+	}
+}
+
+// TestRotationKRLKeepsLiveEntry (03-12e): after a switch, the KRL the
+// signer publishes still lists a revoked certificate of the old generation
+// that is still live, under the old CA key.
+func TestRotationKRLKeepsLiveEntry(t *testing.T) {
+	re := newRevokeEnv(t, 1, 1, testInstallationID)
+	k := newSwKit(re)
+	at := k.ceremonyTime(t)
+	k.ceremony1(t, at, keystore.RoleUser)
+	k.at(t, at.Add(5*time.Second))
+	old := re.issueRole(t, wire.CARoleUser)
+	re.revokeAny(t, &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: old.Serial})
+	k.at(t, at.Add(10*time.Second))
+	if _, err := k.install(t, k.switchDocs(t, at, 0, trust.RoleUser), true); err != nil {
+		t.Fatalf("the switch install: %v", err)
+	}
+	k.at(t, at.Add(15*time.Second))
+	newer := re.issueRole(t, wire.CARoleUser)
+	re.revokeAny(t, &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: newer.Serial})
+	p, err := krl.Parse(re.s.GetKRL().KRL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := func(ca ssh.PublicKey, serial uint64) bool {
+		for _, sec := range p.Certs {
+			if !bytes.Equal(sec.CAKey, ca.Marshal()) {
+				continue
+			}
+			for _, r := range sec.Serials {
+				if r.Lo <= serial && serial <= r.Hi {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if !listed(old.SignatureKey, old.Serial) {
+		t.Fatalf("the KRL published after the switch (v%d) does not list serial %d under the old CA key", p.Version, old.Serial)
+	}
+	if !listed(newer.SignatureKey, newer.Serial) || bytes.Equal(old.SignatureKey.Marshal(), newer.SignatureKey.Marshal()) {
+		t.Fatal("the certificate issued after the switch is not signed by the new key, or not listed under it")
+	}
 }

@@ -64,6 +64,15 @@ type Config struct {
 	// wait for a transaction on DB. It must not be DB itself. Nil means
 	// every Status refuses state_unavailable.
 	StatusDB *signerdb.DB
+	// Recovery selects the recovery configuration (03-12e): New runs every
+	// stored-trust and log check and opens the ops and log keys, but opens
+	// no CA private key and skips the draining-key refusal, so a database
+	// restored from before a switch stays recoverable after the old key is
+	// gone. Its issuance paths refuse ca_not_configured and Serve refuses
+	// recovery_configuration. Only recover-revocations sets it. The zero
+	// value is the serving configuration on purpose: a caller that forgets
+	// the field gets the strict behaviour.
+	Recovery bool
 }
 
 // Signer issues certificates.

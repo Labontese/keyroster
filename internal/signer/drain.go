@@ -33,6 +33,10 @@ var (
 // removes that key before serve may start.
 var ErrDrainingKeyUsable = errors.New("draining_key_still_usable")
 
+// ErrRecoveryConfiguration refuses Serve on a signer started in the
+// recovery configuration (Config.Recovery, 03-12e), which holds no CA key.
+var ErrRecoveryConfiguration = errors.New("recovery_configuration")
+
 // DrainNote is what a switch install bound for one newly draining CA
 // entry (03-12e): its role, generation and trusted_until, and the logged
 // certificate of its key with the largest ValidBefore (Recorded false when

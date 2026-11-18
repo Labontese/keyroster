@@ -519,6 +519,87 @@ func TestSignerRestartMixedBundle(t *testing.T) {
 		installNext(t, st, g, genesisChain(t, g), pf)
 		check(t, st, ssh.FingerprintSHA256(pub1), fp2)
 	})
+	// activeUser is the fingerprint of the active user CA entry of c.
+	activeUser := func(t *testing.T, c chainDocs) string {
+		t.Helper()
+		pub, err := trust.ParseKey(trust.ActiveCA(c.b, trust.RoleUser).Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ssh.FingerprintSHA256(pub)
+	}
+	t.Run("switch_leg_issues_with_the_new_key", func(t *testing.T) {
+		// 03-12e: after the switch install, the old key removed from the
+		// in-process agent, retire-key and a restart, the signer issues
+		// with generation 2.
+		st, g, c, export := switchFlagState(t)
+		if code, out := installSwitch(t, st, g, c, "--previous", export); code != 0 {
+			t.Fatalf("install-bundle of the switch exited %d:\n%s", code, out)
+		}
+		user, _ := st.caPubKeys(t).Key(trust.RoleUser)
+		pub1, err := trust.ParseKey(user.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.keyring.Remove(pub1); err != nil {
+			t.Fatal(err)
+		}
+		if code, out := retireKey(t, st, "user"); code != 0 {
+			t.Fatalf("retire-key exited %d:\n%s", code, out)
+		}
+		s := startSigner(t, st)
+		req := &wire.IssueRequest{CARole: wire.CARoleUser, SubjectKey: newTestSigner(t).PublicKey().Marshal(), Subject: "u:alice", Principals: []string{"alice"},
+			ValidForSeconds: 600, CreatedAt: uint64(time.Now().Unix()), InstallationID: g.b.InstallationID} //nolint:gosec // G115: after 1970
+		if _, err := rand.Read(req.RequestID[:]); err != nil {
+			t.Fatal(err)
+		}
+		sig, err := sshsig.Sign(rand.Reader, g.admin, req.Namespace(), req.SigningBytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+		resp, err := s.Issue(context.Background(), signer.Peer{UID: uint32(os.Getuid())}, req) //nolint:gosec // G115: a uid
+		if err != nil {
+			t.Fatalf("issue after the switch: %v", err)
+		}
+		pub, err := ssh.ParsePublicKey(resp.Cert)
+		if err != nil {
+			t.Fatal(err)
+		}
+		crt, ok := pub.(*ssh.Certificate)
+		if !ok {
+			t.Fatalf("the response holds a %T, not a certificate", pub)
+		}
+		if got, want := ssh.FingerprintSHA256(crt.SignatureKey), activeUser(t, c); got != want {
+			t.Fatalf("the certificate after the switch is signed by %s, want generation 2 (%s)", got, want)
+		}
+	})
+	t.Run("unheld_active_generation_refuses_at_start", func(t *testing.T) {
+		// 03-12e: after the switch install, with the old key gone and the
+		// active generation 2 missing from the agent too, the start is
+		// refused naming generation 2.
+		st, g, c, export := switchFlagState(t)
+		if code, out := installSwitch(t, st, g, c, "--previous", export); code != 0 {
+			t.Fatalf("install-bundle of the switch exited %d:\n%s", code, out)
+		}
+		user, _ := st.caPubKeys(t).Key(trust.RoleUser)
+		pub1, err := trust.ParseKey(user.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub2, err := trust.ParseKey(trust.ActiveCA(c.b, trust.RoleUser).Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []ssh.PublicKey{pub1, pub2} {
+			if err := st.keyring.Remove(k); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := startErr(t, st); err == nil || !strings.Contains(err.Error(), "bundle key for role user (generation 2)") {
+			t.Fatalf("start without the active generation 2: %v, want the refusal naming generation 2", err)
+		}
+	})
 }
 
 // prepareNext adds a fresh key to st's agent and runs ca-rotate prepare

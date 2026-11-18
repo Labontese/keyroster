@@ -31,6 +31,31 @@ type RecoveryResult struct {
 	Imports      int
 	Revoked      int
 	Kept         int
+	// BeyondDrain names each carried certificate of a draining CA key of
+	// the bundle in force that is still live at the trusted_until of that
+	// entry (03-12e, RC-04). The recovery applies as before: it is named,
+	// never repaired.
+	BeyondDrain []BeyondDrain
+}
+
+// BeyondDrain is a certificate a recovery carries that a draining CA key
+// signed and whose ValidBefore is above the trusted_until of the entry
+// minus 300 s (krl.EntryLive at trusted_until), kept or revoked (03-12e):
+// a kept one stops working at trusted_until on every host that applied
+// the switch, before its own ValidBefore.
+type BeyondDrain struct {
+	Role         string
+	Generation   uint32
+	Serial       uint64
+	KeyID        string
+	ValidBefore  uint64
+	TrustedUntil string
+	Kept         bool
+}
+
+// String is the recover-revocations line of b (03-12e).
+func (b BeyondDrain) String() string {
+	return ""
 }
 
 // recoveryRefusal is a recovery refusal: the reason name, with cause for
