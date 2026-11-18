@@ -1295,7 +1295,10 @@ func TestDrainBindingCountsCarriedCertificates(t *testing.T) {
 // TestDrainBindingSignerAuditAgree (03-12e): one corpus, the signer's
 // install and audit.Verify of the export give the same verdict at the
 // boundary of every environment's maximum; a tampered issuance row
-// changes neither; on the RC-04 state the later installs pass both.
+// changes neither; on the RC-04 state the later installs pass both; and
+// the signer's upper bound and audit's re-derivation of it, two copies of
+// one formula, agree at the bound, one second above it and on its
+// overflow edge.
 func TestDrainBindingSignerAuditAgree(t *testing.T) {
 	t.Run("corpus_around_the_boundary", func(t *testing.T) {
 		// Admin issue leaves of the user and host roles, a refusal and a
@@ -1393,6 +1396,101 @@ func TestDrainBindingSignerAuditAgree(t *testing.T) {
 				t.Fatalf("audit after the %s: %v", step, err)
 			}
 		})
+	})
+	t.Run("upper_bound_corpus", drainUpperBoundAgree)
+}
+
+// drainUpperBoundAgree (03-12e): the signer's drainUpperBound and audit's
+// copy of it give the same verdict on one corpus of user switches edited
+// by hand, each installed at a whole second of the clock, so the signer's
+// clock reading and the install leaf's time that audit reads are the same
+// second. Audit's verdict is taken first, on the install leaf forced into
+// a copy of the log, so it owes nothing to the signer's. At the bound set
+// by the clock and at the bound set by a logged certificate that outlives
+// it, one second above the bound both refuse drain_window_too_long naming
+// the same latest acceptable trusted_until, and the bound itself passes
+// both. On the overflow edge (a logged ValidBefore at which the bound's
+// sum just fits, and one second above it, where it overflows) both refuse
+// with the same code, drain_window_too_short: the binding runs before the
+// bound on both sides, and no trusted_until in TimeFormat reaches such a
+// certificate, so neither copy's overflow check is reachable through an
+// install or through Verify.
+func drainUpperBoundAgree(t *testing.T) {
+	const week = uint64(7 * 24 * 3600)
+	// carryUser applies a recovery that carries, revoked (a recovery
+	// revokes every lost user certificate), a user certificate of
+	// generation 1 valid until vb that no issue leaf holds: the route by
+	// which a ValidBefore far beyond the cap reaches a log that audit
+	// verifies. The maximum is revocation-blind, so it counts.
+	carryUser := func(t *testing.T, k *swKit, vb uint64) {
+		t.Helper()
+		k.recoverCarrying(t, wire.RecoveredCertificate{Cert: k.lostCert(t, keystore.RoleUser, vb).Marshal(), Revoke: true})
+	}
+	// clockBound is the bound of a user switch installed at the clock
+	// when no logged certificate outlives the clock plus the cap.
+	clockBound := func(t *testing.T, k *swKit) uint64 {
+		t.Helper()
+		return uint64(k.now().Unix()) + k.maxTTL(t, trust.RoleUser) + 600 + week //nolint:gosec // G115: after 1970
+	}
+	// atTheBound runs the pair of cases around bound b on k.
+	atTheBound := func(t *testing.T, k *swKit, at time.Time, b uint64) {
+		t.Helper()
+		d := k.handSwitch(t, at, trust.RoleUser, b+1)
+		aerr := k.auditForced(t, d)
+		_, err := k.install(t, d, true)
+		want := "the switch of CA user ends trust at " + unixTime(b+1) + ", above the latest acceptable " + unixTime(b)
+		if !errors.Is(err, ErrDrainWindowTooLong) || !strings.Contains(err.Error(), want) ||
+			aerr == nil || !strings.Contains(aerr.Error(), "drain_window_too_long: "+want) {
+			t.Fatalf("a switch one second above the bound %d: the signer %v, audit %v; want both drain_window_too_long: %s", b, err, aerr, want)
+		}
+		d = k.handSwitch(t, at, trust.RoleUser, b)
+		if aerr := k.auditForced(t, d); aerr != nil {
+			t.Fatalf("a switch exactly at the bound %d: audit refused: %v", b, aerr)
+		}
+		if _, err := k.install(t, d, true); err != nil {
+			t.Fatalf("a switch exactly at the bound %d: the signer refused: %v", b, err)
+		}
+		if err := k.audit(t); err != nil {
+			t.Fatalf("a switch exactly at the bound %d: audit of the installed switch: %v", b, err)
+		}
+	}
+	t.Run("clock_sets_the_bound", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		atTheBound(t, k, at, clockBound(t, k))
+	})
+	t.Run("logged_certificate_sets_the_bound", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(5*time.Second))
+		vb := uint64(at.Unix()) + 60*86400 //nolint:gosec // G115: after 1970
+		carryUser(t, k, vb)
+		k.at(t, at.Add(10*time.Second))
+		if vb <= clockBound(t, k)-600-week {
+			t.Fatal("the certificate does not outlive the clock plus the cap; the case proves nothing")
+		}
+		atTheBound(t, k, at, vb+600+week)
+	})
+	t.Run("overflow_edge", func(t *testing.T) {
+		for _, vb := range []uint64{math.MaxUint64 - 600 - week, math.MaxUint64 - 600 - week + 1} {
+			k, at := drainEnv(t)
+			k.at(t, at.Add(5*time.Second))
+			carryUser(t, k, vb)
+			k.at(t, at.Add(10*time.Second))
+			now := uint64(k.now().Unix()) //nolint:gosec // G115: after 1970
+			ttl := k.maxTTL(t, trust.RoleUser)
+			if _, oerr := drainUpperBound(now, ttl, ttl, vb); (oerr != nil) != (vb > math.MaxUint64-600-week) {
+				t.Fatalf("ValidBefore %d is not on the side of the overflow edge the case expects: %v", vb, oerr)
+			}
+			if err := k.audit(t); err != nil {
+				t.Fatalf("audit of the log before the switch, ValidBefore %d: %v", vb, err)
+			}
+			d := k.handSwitch(t, at, trust.RoleUser, clockBound(t, k))
+			aerr := k.auditForced(t, d)
+			_, err := k.install(t, d, true)
+			if !errors.Is(err, ErrDrainWindowTooShort) || aerr == nil || !strings.Contains(aerr.Error(), "drain_window_too_short") {
+				t.Fatalf("a switch over a certificate valid until %d: the signer %v, audit %v; want both drain_window_too_short", vb, err, aerr)
+			}
+		}
 	})
 }
 

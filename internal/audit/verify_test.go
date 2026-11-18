@@ -5180,6 +5180,28 @@ func unixAt(t testing.TB, s string) uint64 {
 	return uint64(at.Unix()) //nolint:gosec // G115: not before 1970, checked above
 }
 
+// TestDrainUpperBoundOverflow (03-12e): audit's copy of the signer's upper
+// bound refuses an overflow and never wraps, at the same edge as the
+// signer's copy (TestInstallUpperBound/overflow_refused): a maximum at
+// which the sum just fits gives 2^64 - 1, one more is an error. It is a
+// pure test because Verify cannot reach the overflow: a maximum that near
+// 2^64 makes the binding refuse first, and a leaf time cannot come near
+// it.
+func TestDrainUpperBoundOverflow(t *testing.T) {
+	const top, add = ^uint64(0), uint64(300 + 7*24*3600 + 300)
+	if got, err := drainUpperBound(1_800_000_000, 3600, 3600, top-add); err != nil || got != top {
+		t.Fatalf("drainUpperBound with maxVB %d = %d, %v; want %d", top-add, got, err, top)
+	}
+	for _, vb := range []uint64{top - add + 1, top} {
+		if got, err := drainUpperBound(1_800_000_000, 3600, 3600, vb); err == nil {
+			t.Fatalf("drainUpperBound with maxVB %d = %d, nil; want an overflow error", vb, got)
+		}
+	}
+	if got, err := drainUpperBound(top-100, 3600, 3600, 0); err == nil {
+		t.Fatalf("drainUpperBound with the leaf time near 2^64 = %d, nil; want an overflow error", got)
+	}
+}
+
 // TestVerifySwitchTracer (03-12e): audit re-derives the drain binding at a
 // switch's bundle_install from the leaves before it. A certificate of the
 // newly draining key valid until V leaves trust ending at V + 299 refused
