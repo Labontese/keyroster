@@ -270,21 +270,24 @@ Plans:
 - [x] 03-12d-PLAN.md — CA rotation, CLI readers (D-14, KEY-08): known_hosts narrowing, login and machine renew on the issuing set, and the host status live count
 
 **Wave 36** *(blocked on Wave 35 completion)*
-- [ ] 03-12e-PLAN.md — CA rotation, switch and fences (D-14, KEY-08): ceremony 2, the drain binding, key removal, recovery without CA keys and the no-failed-login e2e
+- [ ] 03-12e-PLAN.md — CA rotation, switch binding and fences (D-14, KEY-08): the chain rule switch, the drain binding, key removal, recovery without CA keys and audit re-derivation
 
 **Wave 37** *(blocked on Wave 36 completion)*
-- [ ] 03-12f-PLAN.md — CA rotation, TPM and PIV generations (D-14, KEY-08): generations and key removal on TPM and PIV, and the host-CA end-to-end test
+- [ ] 03-12e2-PLAN.md — CA rotation, ceremony 2 tool and proof (D-14, KEY-08): root sign --ca-switch, the ceremony runbook and the no-failed-login e2e
 
 **Wave 38** *(blocked on Wave 37 completion)*
-- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
+- [ ] 03-12f-PLAN.md — CA rotation, TPM and PIV generations (D-14, KEY-08): generations and key removal on TPM and PIV, and the host-CA end-to-end test
 
 **Wave 39** *(blocked on Wave 38 completion)*
-- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
+- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
 
 **Wave 40** *(blocked on Wave 39 completion)*
-- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
 
 **Wave 41** *(blocked on Wave 40 completion)*
+- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+
+**Wave 42** *(blocked on Wave 41 completion)*
 - [ ] 03-16-PLAN.md — Homelab dogfood: enroll the owner's hosts, take over the 02-14 hosts, drills (revocation, no TOFU, corrupt file, break-glass, machine, rotation if chosen, forget and re-enrollment)
 
 **Phase close (after verification):** the README quickstart (install server, signer and agent, first certificate) on branch `p03/close`, per the documentation convention.
