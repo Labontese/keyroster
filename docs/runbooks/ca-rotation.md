@@ -191,10 +191,10 @@ directory in place of `succ`.
 
 Every host drops the line on its next run, at once (a narrowing change
 needs no wait), and the agents' host-certificate and probe answer checks
-refuse the key. Then destroy the aborted key by hand, because there is no
-retire-key command yet (03-12e): delete `software/user-g2.age` in the
-state directory as the signer's user for the software backend
-(`runuser -u keyroster-signer -- rm -f "$S/software/user-g2.age"`), or
+refuse the key. Then destroy the aborted key by hand, because retire-key
+removes draining keys only, never an aborted one: delete
+`software/user-g2.age` in the state directory as the signer's user for
+the software backend (`runuser -u keyroster-signer -- rm -f "$S/software/user-g2.age"`), or
 remove it from the ssh-agent with `ssh-add -d` for the agent backend. The
 generation row stays, and doctor does not warn. The generation number is
 never reused: the next prepare makes generation 3.

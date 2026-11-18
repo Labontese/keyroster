@@ -2,8 +2,8 @@
 phase: 03-linux-agent-and-revocation
 plan: 12f
 type: execute
-wave: 37
-depends_on: ["03-12e"]
+wave: 38
+depends_on: ["03-12e2"]
 files_modified:
   - internal/keystore/tpm/tpm.go
   - internal/keystore/tpm/provision.go

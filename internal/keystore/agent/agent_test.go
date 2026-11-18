@@ -338,3 +338,98 @@ func TestKeyForSelectsByFingerprint(t *testing.T) {
 		t.Fatal("KeyFor returned a key for a fingerprint the agent does not hold")
 	}
 }
+
+// listFails is an agent whose List fails once failing is set.
+type listFails struct {
+	sshagent.Agent
+	mu      sync.Mutex
+	failing bool
+}
+
+func (a *listFails) List() ([]*sshagent.Key, error) {
+	a.mu.Lock()
+	failing := a.failing
+	a.mu.Unlock()
+	if failing {
+		return nil, errors.New("injected list failure")
+	}
+	return a.Agent.List()
+}
+
+// certOf returns a user certificate of subject signed by a fresh issuer.
+func certOf(t *testing.T, subject ssh.PublicKey) *ssh.Certificate {
+	t.Helper()
+	issuer, _ := ed25519Key(t)
+	s, err := ssh.NewSignerFromKey(issuer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cert.Build(buildRequest(subject), s, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// TestHoldsAgent (03-12e, SR-02): the agent holds a key while it lists it
+// as a plain key or as the key behind a certificate identity, because the
+// agent signs with that key when asked for the identity; an agent that
+// cannot be listed counts as holding it.
+func TestHoldsAgent(t *testing.T) {
+	holds := func(t *testing.T, b keystore.Backend, fp string) (bool, error) {
+		t.Helper()
+		h, ok := b.(keystore.GenerationHolder)
+		if !ok {
+			t.Fatal("the agent backend is not a GenerationHolder")
+		}
+		return h.Holds(keystore.RoleUser, 1, fp, "")
+	}
+	t.Run("holds_by_fingerprint", func(t *testing.T) {
+		keyring := sshagent.NewKeyring()
+		other, _ := ed25519Key(t)
+		k, pub := ed25519Key(t)
+		_, absent := ed25519Key(t)
+		addKey(t, keyring, sshagent.AddedKey{PrivateKey: other})
+		addKey(t, keyring, sshagent.AddedKey{PrivateKey: k})
+		b := openBackend(t, map[string]string{"socket": serveKeyring(t, keyring)})
+		if held, err := holds(t, b, ssh.FingerprintSHA256(pub)); err != nil || !held {
+			t.Fatalf("Holds of a listed key = %v, %v; want held", held, err)
+		}
+		if held, err := holds(t, b, ssh.FingerprintSHA256(absent)); err != nil || held {
+			t.Fatalf("Holds of a key the agent does not list = %v, %v; want not held", held, err)
+		}
+	})
+	t.Run("certificate_entry_of_the_key_is_held", func(t *testing.T) {
+		keyring := sshagent.NewKeyring()
+		k, pub := ed25519Key(t)
+		addKey(t, keyring, sshagent.AddedKey{PrivateKey: k, Certificate: certOf(t, pub)})
+		b := openBackend(t, map[string]string{"socket": serveKeyring(t, keyring)})
+		if _, err := b.Key(keystore.RoleUser, ssh.FingerprintSHA256(pub)); !errors.Is(err, agent.ErrKeyNotPresent) {
+			t.Fatalf("Key = %v; the key is listed only behind a certificate identity, which Key skips", err)
+		}
+		if held, err := holds(t, b, ssh.FingerprintSHA256(pub)); err != nil || !held {
+			t.Fatalf("Holds of a key behind a certificate identity = %v, %v; want held", held, err)
+		}
+	})
+	t.Run("certificate_entry_of_another_key_is_not_held", func(t *testing.T) {
+		keyring := sshagent.NewKeyring()
+		k, pub := ed25519Key(t)
+		_, drained := ed25519Key(t)
+		addKey(t, keyring, sshagent.AddedKey{PrivateKey: k, Certificate: certOf(t, pub)})
+		b := openBackend(t, map[string]string{"socket": serveKeyring(t, keyring)})
+		if held, err := holds(t, b, ssh.FingerprintSHA256(drained)); err != nil || held {
+			t.Fatalf("Holds of a key behind no identity = %v, %v; want not held", held, err)
+		}
+	})
+	t.Run("agent_error_is_held", func(t *testing.T) {
+		a := &listFails{Agent: sshagent.NewKeyring()}
+		b := openBackend(t, map[string]string{"socket": serveKeyring(t, a)})
+		a.mu.Lock()
+		a.failing = true
+		a.mu.Unlock()
+		_, pub := ed25519Key(t)
+		if held, err := holds(t, b, ssh.FingerprintSHA256(pub)); err == nil || !held {
+			t.Fatalf("Holds when the agent cannot list = %v, %v; want held with an error", held, err)
+		}
+	})
+}

@@ -170,10 +170,18 @@ func isInitRole(r keystore.Role) bool {
 }
 
 // newLogWriter returns a Signer that only appends to the audit log of db
-// with logKey, for ca-init and install-bundle; it rebuilds and checks the
-// stored log first.
+// with logKey, for ca-init and ca-rotate prepare; it rebuilds and checks
+// the stored log first. It asks for no drain scan (03-12e).
 func newLogWriter(ctx context.Context, db *signerdb.DB, logKey keystore.CAKey, clock serial.Clock) (*Signer, error) {
+	return newLogWriterWith(ctx, db, logKey, clock, rebuildOptions{})
+}
+
+// newLogWriterWith is newLogWriter whose log walk takes opts (03-12e):
+// InstallBundleWithPrevious alone asks for the drain scan and the check of
+// a previous checkpoint.
+func newLogWriterWith(ctx context.Context, db *signerdb.DB, logKey keystore.CAKey, clock serial.Clock, opts rebuildOptions) (*Signer, error) {
 	s := &Signer{db: db, logKey: logKey, clock: clock, log: slog.New(slog.DiscardHandler)}
+	s.rebuildOpts = opts
 	if err := s.initLog(ctx); err != nil {
 		return nil, err
 	}
@@ -196,116 +204,12 @@ func newLogWriter(ctx context.Context, db *signerdb.DB, logKey keystore.CAKey, c
 // documents, in one transaction; on any refusal nothing is written. Before
 // any of that, it refuses a bundle and policy whose Status reply would
 // exceed wire.MaxStatusFrame (wire.ErrStatusTooLarge), the limit Status
-// itself enforces.
+// itself enforces. It is InstallBundleWithPrevious without a previous
+// checkpoint, so it refuses a switch (03-12e).
 func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pins []string, threshold int,
 	bundle, bundleSigs, policy, policySigs []byte, clock serial.Clock) (*trust.Bundle, error) {
-	if db == nil || be == nil {
-		return nil, errors.New("signer: InstallBundle needs a state database and a keystore backend")
-	}
-	if clock == nil {
-		clock = time.Now
-	}
-	// The one clock read of an install: the issued_at bound, InstalledAt
-	// and the leaf time (03-12).
-	now := clock()
-	caKeys, err := db.CAKeys(ctx)
-	if errors.Is(err, signerdb.ErrNotInitialised) {
-		return nil, ErrNotInitialised
-	}
-	if err != nil {
-		return nil, err
-	}
-	gens, err := db.CAGenerations(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// One budget for install and Status: refuse, before any verification
-	// or write, a bundle and policy whose Status reply would not fit
-	// wire.MaxStatusFrame, so every installed trust state can be reported.
-	// The directory fields are fixed-size, so zero values size them.
-	if _, err := statusResponse(caKeys, 0, bundle, bundleSigs, policy, policySigs, statusDirectory{}).Marshal(); err != nil {
-		if errors.Is(err, wire.ErrStatusTooLarge) {
-			return nil, fmt.Errorf("%w: the bundle, policy and signatures make the Status reply too large: %w", ErrBundleInstall, err)
-		}
-		return nil, fmt.Errorf("%w: %w", ErrBundleInstall, err)
-	}
-	logKey, err := openRoleKey(be, caKeys, "log")
-	if err != nil {
-		return nil, err
-	}
-	lw, err := newLogWriter(ctx, db, logKey, clock)
-	if err != nil {
-		return nil, err
-	}
-	var (
-		b *trust.Bundle
-		p *trust.Policy
-	)
-	latest, err := db.LatestBundle(ctx)
-	if err == nil || errors.Is(err, signerdb.ErrNoBundle) {
-		// A successor is verified against the installed record, so that
-		// record must be the one the verified log carries.
-		if cerr := checkBundleLogged(latest, lw.loaded.last); cerr != nil {
-			return nil, cerr
-		}
-	}
-	switch {
-	case errors.Is(err, signerdb.ErrNoBundle):
-		b, p, err = trust.VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs, pins, threshold)
-	case err != nil:
-		return nil, err
-	case len(pins) != 0 || threshold != 0:
-		return nil, fmt.Errorf("%w: bundle version %d is installed; a successor is verified against it, so --pin and --threshold apply to the genesis bundle only", ErrBundleInstall, latest.Version)
-	default:
-		var prev *trust.Bundle
-		prev, err = trust.ParseBundle(latest.Bundle)
-		if err != nil {
-			return nil, fmt.Errorf("installed bundle: %w", err)
-		}
-		b, p, err = trust.VerifySuccessor(prev, latest.Bundle, latest.Policy, bundle, bundleSigs, policy, policySigs)
-		if err == nil && b.Version <= latest.Version {
-			err = fmt.Errorf("%w: version %d is not above the installed version %d", ErrBundleInstall, b.Version, latest.Version)
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := checkIssuedNotAhead(b, now); err != nil {
-		return nil, err
-	}
-	if err := checkBundleKeys(b, caKeys, gens); err != nil {
-		return nil, err
-	}
-	if err := checkPolicyAdmins(b, p, gens); err != nil {
-		return nil, err
-	}
-	// The verifiers above saw the roots of b and of the installed bundle
-	// only; no root of an earlier bundle may be an admin either.
-	if err := lw.loaded.checkAdmins(p); err != nil {
-		return nil, err
-	}
-	if b.Log.Origin != tlog.Origin(logKey.PublicKey()) {
-		return nil, fmt.Errorf("%w: log origin %q is not the log key's %q", ErrBundleKeys, b.Log.Origin, tlog.Origin(logKey.PublicKey()))
-	}
-	enc, err := (&tlog.BundleInstallBody{
-		BundleVersion: b.Version, Bundle: bundle, BundleSigs: bundleSigs, Policy: policy, PolicySigs: policySigs,
-	}).Encode()
-	if err != nil {
-		return nil, err
-	}
-	err = lw.logTx(ctx, func(tx *sql.Tx) error {
-		if err := db.InsertBundle(tx, signerdb.StoredBundle{
-			Version: b.Version, Bundle: bundle, BundleSigs: bundleSigs, Policy: policy, PolicySigs: policySigs, InstalledAt: now,
-		}); err != nil {
-			return err
-		}
-		_, err := lw.appendLocked(ctx, tx, tlog.Leaf{TimeMicros: micros(now), Kind: tlog.KindBundleInstall, Body: enc})
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
+	b, _, err := InstallBundleWithPrevious(ctx, db, be, pins, threshold, bundle, bundleSigs, policy, policySigs, clock, nil)
+	return b, err
 }
 
 // checkIssuedNotAhead refuses bundle_issued_in_future (03-12): a bundle,
@@ -327,26 +231,20 @@ func checkIssuedNotAhead(b *trust.Bundle, now time.Time) error {
 }
 
 // checkBundleKeys requires, for each of user, host and machine, exactly one
-// active CA entry, equal in key, algorithm, custody and generation number
-// to the role's stored generation 1, and accepts beside it a next or a
-// retired entry only when it equals a stored generation of its role in
-// generation number, key, algorithm and custody (03-12b); a draining entry
-// is refused until the switch (03-12e). Then the ops and log keys of
-// ca_keys with the same key, algorithm and custody, and no root key equal
-// to any stored key or generation of any role (03-12). The active entry
-// still has to be generation 1: the chain rule (trust.checkSuccessorChain)
-// keeps it from changing, and the switch that makes a later generation
-// active arrives in 03-12e.
+// active CA entry, equal in key, algorithm and custody to the stored
+// generation of its role whose key it carries and naming that
+// generation's number, and accepts beside it a next, retired or draining
+// entry only when it equals a stored generation of its role in generation
+// number, key, algorithm and custody (03-12b, 03-12e), whatever the
+// backend holds. Then the ops and log keys of ca_keys with the same key,
+// algorithm and custody, and no root key equal to any stored key or
+// generation of any role (03-12). Which stored generation is active is
+// the chain rule's (trust.checkSuccessorChain): only the switch makes a
+// later generation active (03-12e).
 func checkBundleKeys(b *trust.Bundle, caKeys []signerdb.CAKey, gens []signerdb.CAGeneration) error {
 	want := map[string]signerdb.CAKey{}
 	for _, k := range caKeys {
 		want[k.Role] = k
-	}
-	gen1 := map[string]signerdb.CAKey{}
-	for _, g := range gens {
-		if g.Generation == 1 {
-			gen1[g.Role] = signerdb.CAKey{Role: g.Role, PublicKey: g.PublicKey, Alg: g.Alg, Custody: g.Custody}
-		}
 	}
 	same := func(where, key, alg, custody string, k signerdb.CAKey) error {
 		pub, err := ssh.ParsePublicKey(k.PublicKey)
@@ -373,6 +271,19 @@ func checkBundleKeys(b *trust.Bundle, caKeys []signerdb.CAKey, gens []signerdb.C
 		}
 		return false
 	}
+	// byKey returns the stored generation of ca's role whose key is ca's.
+	byKey := func(ca trust.CAEntry) (signerdb.CAGeneration, bool) {
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			return signerdb.CAGeneration{}, false
+		}
+		for _, g := range gens {
+			if g.Role == ca.Role && bytes.Equal(g.PublicKey, pub.Marshal()) {
+				return g, true
+			}
+		}
+		return signerdb.CAGeneration{}, false
+	}
 	roles := []string{trust.RoleUser, trust.RoleHost, trust.RoleMachine}
 	for _, ca := range b.CAs {
 		if !slices.Contains(roles, ca.Role) {
@@ -388,24 +299,23 @@ func checkBundleKeys(b *trust.Bundle, caKeys []signerdb.CAKey, gens []signerdb.C
 			switch ca.State {
 			case "active":
 				active++
-				g, ok := gen1[ca.Role]
+				g, ok := byKey(ca)
 				if !ok {
-					return fmt.Errorf("%w: no stored generation 1 of CA %s", ErrBundleKeys, ca.Role)
+					return fmt.Errorf("%w: the active CA %s entry (generation %d, %s) is no stored generation of the role", ErrBundleKeys, ca.Role, ca.Generation, fingerprintOf(ca.Key))
 				}
-				if err := same("CA "+ca.Role, ca.Key, ca.Alg, ca.Custody, g); err != nil {
-					return err
+				if ca.Alg != g.Alg || ca.Custody != g.Custody {
+					return fmt.Errorf("%w: the active CA %s entry is %s (%s, %s); stored generation %d of that key is (%s, %s)", ErrBundleKeys, ca.Role,
+						fingerprintOf(ca.Key), ca.Alg, ca.Custody, g.Generation, g.Alg, g.Custody)
 				}
-				if ca.Generation != 1 {
-					return fmt.Errorf("%w: the active CA %s entry carries generation %d; its key is stored generation 1", ErrBundleKeys, ca.Role, ca.Generation)
+				if ca.Generation != g.Generation {
+					return fmt.Errorf("%w: the active CA %s entry carries generation %d; its key is stored generation %d", ErrBundleKeys, ca.Role, ca.Generation, g.Generation)
 				}
-			case "next", "retired":
+			case "next", "retired", "draining":
 				if !stored(ca) {
 					return fmt.Errorf("%w: CA %s is %s but generation %d is no stored generation of that key", ErrBundleKeys, ca.Role, ca.State, ca.Generation)
 				}
-			case "draining":
-				return fmt.Errorf("%w: CA %s is draining; the switch arrives in 03-12e", ErrBundleKeys, ca.Role)
 			default:
-				return fmt.Errorf("%w: CA %s is %s, want active, next or retired", ErrBundleKeys, ca.Role, ca.State)
+				return fmt.Errorf("%w: CA %s is %s, want active, next, draining or retired", ErrBundleKeys, ca.Role, ca.State)
 			}
 		}
 		if active != 1 {
@@ -602,9 +512,16 @@ type trustState struct {
 // loadTrust reads the ca-init keys and the latest installed bundle,
 // checks them (checkStoredTrust) and opens every bundle key in the
 // backend. It refuses when ca-init or install-bundle has not run, when the
-// stored bundle no longer matches the stored keys or its policy, and when
-// any bundle key (CA, ops or log) is missing from the backend (KEY-01).
-func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trustState, error) {
+// stored bundle no longer matches the stored keys or its policy, when
+// any bundle key (CA, ops or log) is missing from the backend (KEY-01),
+// and, before it opens any key, when the backend still holds, or cannot
+// say whether it holds, the key of a draining CA entry of the bundle
+// (draining_key_still_usable, 03-12e). In the recovery configuration
+// (recovery true, 03-12e) it keeps every check that needs no CA key, opens
+// only the ops and log keys, leaves the CA key map empty, so every
+// issuance path refuses ca_not_configured, and skips the draining-key
+// refusal.
+func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend, recovery bool) (*trustState, error) {
 	caKeys, err := db.CAKeys(ctx)
 	if errors.Is(err, signerdb.ErrNotInitialised) {
 		return nil, ErrNotInitialised
@@ -627,6 +544,11 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	if err != nil {
 		return nil, err
 	}
+	if !recovery {
+		if err := checkDrainingNotHeld(be, ts.bundle, gens); err != nil {
+			return nil, err
+		}
+	}
 	// Each CA role's signing key is the generation the bundle names as
 	// active, opened by generation through keystore.KeyFor with the
 	// location its row records (03-12); ops and log are still the ca-init
@@ -643,10 +565,14 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 			if err != nil {
 				return nil, err
 			}
+			row = signerdb.CAKey{Role: g.Role, PublicKey: g.PublicKey, Alg: g.Alg, Custody: g.Custody}
+			if recovery {
+				rows = append(rows, row)
+				continue
+			}
 			if key, err = openGenerationKey(be, g); err != nil {
 				return nil, err
 			}
-			row = signerdb.CAKey{Role: g.Role, PublicKey: g.PublicKey, Alg: g.Alg, Custody: g.Custody}
 		} else if key, err = openRoleKey(be, caKeys, k.Role); err != nil {
 			return nil, err
 		}
@@ -654,7 +580,9 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 		rows = append(rows, row)
 	}
 	for role, kr := range caRoles {
-		ts.ca[role] = keys[string(kr)]
+		if key, ok := keys[string(kr)]; ok {
+			ts.ca[role] = key
+		}
 	}
 	ts.logKey = keys["log"]
 	ts.opsKey = keys["ops"]
@@ -665,10 +593,45 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	return ts, nil
 }
 
+// checkDrainingNotHeld refuses ErrDrainingKeyUsable when be still holds
+// the key of any draining CA entry of b, in any role (03-12e): the old key
+// must be gone (ca-rotate retire-key) before the signer serves. It asks
+// keystore.Holds with the location of the entry's generation row (empty
+// when no row matches; checkBundleKeys has already required one), and
+// keystore.Holds fails closed: a backend that cannot say, or whose answer
+// is an error, counts as holding the key. It opens no key.
+func checkDrainingNotHeld(be keystore.Backend, b *trust.Bundle, gens []signerdb.CAGeneration) error {
+	for _, ca := range b.CAs {
+		if ca.State != "draining" {
+			continue
+		}
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			return fmt.Errorf("%w: CA %s generation %d: %w", ErrBundleKeys, ca.Role, ca.Generation, err)
+		}
+		fp, location := ssh.FingerprintSHA256(pub), ""
+		for _, g := range gens {
+			if g.Role == ca.Role && g.Generation == ca.Generation && bytes.Equal(g.PublicKey, pub.Marshal()) {
+				location = g.Location
+			}
+		}
+		held, err := keystore.Holds(be, keystore.Role(ca.Role), ca.Generation, fp, location)
+		switch {
+		case err != nil:
+			return fmt.Errorf("%w: generation %d of the %s CA (%s), which the installed bundle drains: cannot tell whether the backend holds it: %w; run keyroster-signer ca-rotate retire-key",
+				ErrDrainingKeyUsable, ca.Generation, ca.Role, fp, err)
+		case held:
+			return fmt.Errorf("%w: the backend still holds generation %d of the %s CA (%s), which the installed bundle drains; run keyroster-signer ca-rotate retire-key",
+				ErrDrainingKeyUsable, ca.Generation, ca.Role, fp)
+		}
+	}
+	return nil
+}
+
 // checkStoredTrust is the part of loadTrust that needs no backend, shared
 // with CheckTrust (doctor): the stored bundle record must be consistent
-// (version, policy hash), list exactly the generation-1 keys
-// (checkBundleKeys), name no stored generation nor a root as a policy
+// (version, policy hash), list only stored generations (checkBundleKeys),
+// name no stored generation nor a root as a policy
 // admin (checkPolicyAdmins), carry a profile for every CA role, and name
 // the recorded log key's origin, and the ca_keys rows must equal the
 // generation-1 rows (checkCAKeysGeneration1, 03-12). It returns the trust

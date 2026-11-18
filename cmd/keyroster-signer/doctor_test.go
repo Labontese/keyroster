@@ -24,8 +24,11 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/Labontese/keyroster/internal/doctor"
+	"github.com/Labontese/keyroster/internal/signer"
 	"github.com/Labontese/keyroster/internal/signerdb"
+	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 // doctorState is a state directory initialised by ca-init with the agent
@@ -372,4 +375,129 @@ func TestDoctorDrainingTrustedUntil(t *testing.T) {
 			t.Fatalf("the generations line %q lacks %q", line, want)
 		}
 	}
+}
+
+// issueUserCert issues one user certificate through s, signed by g's
+// admin, and returns it (03-12e).
+func issueUserCert(t *testing.T, s *signer.Signer, g genesisDocs) *ssh.Certificate {
+	t.Helper()
+	req := &wire.IssueRequest{CARole: wire.CARoleUser, SubjectKey: newTestSigner(t).PublicKey().Marshal(), Subject: "u:alice", Principals: []string{"alice"},
+		ValidForSeconds: 600, CreatedAt: uint64(time.Now().Unix()), InstallationID: g.b.InstallationID} //nolint:gosec // G115: after 1970
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, g.admin, req.Namespace(), req.SigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+	resp, err := s.Issue(context.Background(), signer.Peer{UID: uint32(os.Getuid())}, req) //nolint:gosec // G115: a uid
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	pub, err := ssh.ParsePublicKey(resp.Cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, ok := pub.(*ssh.Certificate)
+	if !ok {
+		t.Fatalf("the response holds a %T, not a certificate", pub)
+	}
+	return c
+}
+
+// TestDoctorSwitch (03-12e, SR-08 and SR-09, the command): after a switch
+// install doctor fails draining_key_still_usable while the backend holds
+// the draining key, the software backend by its file (no passphrase) and
+// the agent backend through the stored socket; it warns
+// draining_key_unchecked when the agent cannot be reached; after
+// retire-key, or with an agent that no longer lists the key, it gives no
+// such line and exits 0. Per CA role with an active key, gatherFacts reads
+// from the verified log the certificate that sets the earliest
+// trusted_until a switch could carry, which doctor prints.
+func TestDoctorSwitch(t *testing.T) {
+	held := func(fp string) string {
+		return "FAIL draining_key_still_usable: user generation 1 " + fp + " is still held by the backend\n"
+	}
+	doctorRun := func(t *testing.T, st *rotateState) (int, string) {
+		t.Helper()
+		return runSigner(t, "doctor", "--state-dir", st.dir)
+	}
+	t.Run("held_software_key_fails", func(t *testing.T) {
+		st, fp1, _ := softwareSwitchState(t)
+		if code, out := doctorRun(t, st); code == 0 || !strings.Contains(out, held(fp1)) {
+			t.Fatalf("doctor with the draining key file present exited %d, want 1 with\n%s\ngot:\n%s", code, held(fp1), out)
+		}
+	})
+	t.Run("agent_backend_held_fails", func(t *testing.T) {
+		st, fp1 := agentSwitchState(t)
+		if code, out := doctorRun(t, st); code == 0 || !strings.Contains(out, held(fp1)) {
+			t.Fatalf("doctor while the agent lists the draining key exited %d, want 1 with\n%s\ngot:\n%s", code, held(fp1), out)
+		}
+	})
+	t.Run("agent_unreachable_warns", func(t *testing.T) {
+		st, fp1 := agentSwitchState(t)
+		if err := os.Remove(st.sock); err != nil {
+			t.Fatal(err)
+		}
+		_, out := doctorRun(t, st)
+		requireLine(t, out, "WARN draining_key_unchecked: user generation 1 "+fp1+": ")
+		if strings.Contains(out, "draining_key_still_usable") {
+			t.Fatalf("doctor reports the unreachable agent's key as held:\n%s", out)
+		}
+	})
+	t.Run("floor_line_names_the_certificate", func(t *testing.T) {
+		st := newRotateState(t)
+		g := genesisFiles(t, st)
+		install(t, st, g)
+		c := issueUserCert(t, startSigner(t, st), g)
+		f := gatherFacts(context.Background(), st.dir, nil)
+		var user, host *doctor.SwitchFloor
+		for i := range f.SwitchFloors {
+			switch f.SwitchFloors[i].Role {
+			case trust.RoleUser:
+				user = &f.SwitchFloors[i]
+			case trust.RoleHost:
+				host = &f.SwitchFloors[i]
+			}
+		}
+		want := doctor.SwitchFloor{Role: trust.RoleUser, Generation: 1, HasCertificate: true, Serial: c.Serial, KeyID: c.KeyId, ValidBefore: c.ValidBefore}
+		if user == nil || *user != want {
+			t.Fatalf("the user CA's switch floor is %+v, want %+v (facts %+v)", user, want, f.SwitchFloors)
+		}
+		if host == nil || host.HasCertificate || host.Generation != 1 {
+			t.Fatalf("the host CA's switch floor is %+v, want generation 1 with no certificate", host)
+		}
+		_, out := doctorRun(t, st)
+		line := "OK switch_floor: user generation 1: the certificate that sets the earliest trusted_until a switch could carry is serial " +
+			strconv.FormatUint(c.Serial, 10) + " (key ID " + c.KeyId + ", valid until " + time.Unix(int64(c.ValidBefore), 0).UTC().Format(trust.TimeFormat) + //nolint:gosec // G115: a ValidBefore of this test
+			"); the earliest is " + time.Unix(int64(c.ValidBefore)+300, 0).UTC().Format(trust.TimeFormat) + "\n" //nolint:gosec // G115: a ValidBefore of this test
+		if !strings.Contains(out, line) {
+			t.Fatalf("doctor does not print\n%s\ngot:\n%s", line, out)
+		}
+	})
+	t.Run("draining_not_held_ok", func(t *testing.T) {
+		st, _, _ := softwareSwitchState(t)
+		if code, out := retireKey(t, st, "user"); code != 0 {
+			t.Fatalf("retire-key exited %d:\n%s", code, out)
+		}
+		if code, out := doctorRun(t, st); code != 0 || strings.Contains(out, "draining_key_still_usable") {
+			t.Fatalf("doctor after retire-key exited %d:\n%s", code, out)
+		}
+	})
+	t.Run("agent_backend_not_held_ok", func(t *testing.T) {
+		st, fp1 := agentSwitchState(t)
+		user, _ := st.caPubKeys(t).Key(trust.RoleUser)
+		pub1, err := trust.ParseKey(user.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.keyring.Remove(pub1); err != nil {
+			t.Fatal(err)
+		}
+		code, out := doctorRun(t, st)
+		if code != 0 || strings.Contains(out, "draining_key_still_usable") || strings.Contains(out, "draining_key_unchecked") {
+			t.Fatalf("doctor with an agent that no longer lists %s exited %d:\n%s", fp1, code, out)
+		}
+	})
 }

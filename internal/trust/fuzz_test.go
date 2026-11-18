@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -98,10 +99,12 @@ func caFuzzGens(mask byte, last uint32, limit int) []uint32 {
 // builds every legal successor list of the previous one (unchanged; one
 // next entry added for each pool key the previous bundle does not hold, at
 // each generation above the role's maximum up to 8, in either custody the
-// bytes can name, when the role has no next entry; one next entry aborted)
-// and reports whether next's lists are among them, with the keys added
-// across roles distinct.
-func caFuzzModel(prev, next [3][]CAEntry, pool []string, prevHeld map[string]bool) bool {
+// bytes can name, when the role has no next entry; one next entry aborted;
+// the switch, 03-12e: the next entry made active and the active entry
+// draining until one of switchEnds of the role, the ends the bytes can
+// name that are at or above the role's floor) and reports whether next's
+// lists are among them, with the keys added across roles distinct.
+func caFuzzModel(prev, next [3][]CAEntry, pool []string, prevHeld map[string]bool, switchEnds [3][]string) bool {
 	var added []string
 	for r := range prev {
 		var legal [][]CAEntry
@@ -134,6 +137,16 @@ func caFuzzModel(prev, next [3][]CAEntry, pool []string, prevHeld map[string]boo
 				legal = append(legal, l)
 			}
 		}
+		pn := slices.IndexFunc(prev[r], func(e CAEntry) bool { return e.State == "next" })
+		pa := slices.IndexFunc(prev[r], func(e CAEntry) bool { return e.State == "active" })
+		if pn >= 0 && pa >= 0 {
+			for _, end := range switchEnds[r] {
+				l := slices.Clone(prev[r])
+				l[pn].State = "active"
+				l[pa].State, l[pa].TrustedUntil = "draining", end
+				legal = append(legal, l)
+			}
+		}
 		found := false
 		for _, l := range legal {
 			if slices.Equal(l, next[r]) {
@@ -162,7 +175,9 @@ func caFuzzModel(prev, next [3][]CAEntry, pool []string, prevHeld map[string]boo
 // four entries of generations 2 to 6, next or retired, at most one next;
 // keys distinct across the bundle) and a successor list (generation 1 and
 // up to five entries of generations 2 to 8, any state, either custody;
-// keys drawn freely from the pool).
+// keys drawn freely from the pool; a draining entry's end one second
+// before, at, one second after or a day after its role's switch floor,
+// 03-12e).
 func FuzzCATransitions(f *testing.F) {
 	pool := make([]string, caFuzzPool)
 	for i := range pool {
@@ -197,6 +212,29 @@ func FuzzCATransitions(f *testing.F) {
 		return out
 	}
 	seed := func(parts ...[]byte) []byte { return slices.Concat(parts...) }
+	// The switch's ends (03-12e): a draining entry's end byte picks one of
+	// drainOffsets seconds from its role's floor (the golden issued_at plus
+	// the role's golden max_ttl_seconds plus 300 s); switchEnds are those
+	// at or above the floor, which the model accepts.
+	drainOffsets := []int64{-1, 0, 1, 86400}
+	issued, err := time.Parse(TimeFormat, goldenIssue)
+	if err != nil {
+		f.Fatal(err)
+	}
+	var floors [3]time.Time
+	var switchEnds [3][]string
+	for r, role := range caRoles {
+		ttl, ok := RoleMaxTTL(goldenPolicy(f), role)
+		if !ok {
+			f.Fatalf("the golden policy has no %s profile", role)
+		}
+		floors[r] = issued.Add(time.Duration(ttl+300) * time.Second) //nolint:gosec // G115: a policy TTL
+		for _, off := range drainOffsets {
+			if off >= 0 {
+				switchEnds[r] = append(switchEnds[r], floors[r].Add(time.Duration(off)*time.Second).Format(TimeFormat))
+			}
+		}
+	}
 	plain := seed(prevRole(0), prevRole(1), prevRole(2))
 	f.Add(seed(plain, nextRole(0, 0), nextRole(0, 1), nextRole(0, 2)))                   // unchanged
 	f.Add(seed(plain, nextRole(0, 0, [3]byte{2, 1, 3}), nextRole(0, 1), nextRole(0, 2))) // add
@@ -206,6 +244,12 @@ func FuzzCATransitions(f *testing.F) {
 		nextRole(0, 0), nextRole(0, 1), nextRole(0, 2))) // removal
 	f.Add(seed(plain, nextRole(0, 5), nextRole(0, 1), nextRole(0, 2)))                                     // active key swap
 	f.Add(seed(plain, nextRole(0, 0, [3]byte{2, 1, 7}), nextRole(0, 1, [3]byte{2, 1, 7}), nextRole(0, 2))) // two roles add one key
+	// The switch of the user role (03-12e): g1 (key 0) draining with end
+	// byte e, then g2 (key 3) active; end byte 0 is one second short of the
+	// floor, 1 is the floor.
+	switchUser := func(e byte) []byte { return []byte{3, 0, e, 1, 0, 3} }
+	f.Add(seed(prevRole(0, [3]byte{2, 1, 3}), prevRole(1), prevRole(2), switchUser(0), nextRole(0, 1), nextRole(0, 2))) // switch one second short
+	f.Add(seed(prevRole(0, [3]byte{2, 1, 3}), prevRole(1), prevRole(2), switchUser(1), nextRole(0, 1), nextRole(0, 2))) // switch at the floor
 	f.Fuzz(func(t *testing.T, data []byte) {
 		in := &caFuzzInput{data: data}
 		held := map[string]bool{}
@@ -232,9 +276,14 @@ func FuzzCATransitions(f *testing.F) {
 		entry := func(role string, g uint32) CAEntry {
 			st := in.next()
 			e := CAEntry{Role: role, Key: pool[int(in.next())%caFuzzPool], Alg: ssh.KeyAlgoECDSA256, Custody: "vtpm",
-				State: []string{"active", "next", "retired", "retired"}[st&3], Generation: g}
+				State: []string{"active", "next", "retired", "draining"}[st&3], Generation: g}
 			if st&4 != 0 {
 				e.Custody = "software"
+			}
+			if e.State == "draining" {
+				// One more byte picks the end (03-12e).
+				r := slices.Index(caRoles, role)
+				e.TrustedUntil = floors[r].Add(time.Duration(drainOffsets[int(in.next())%len(drainOffsets)]) * time.Second).Format(TimeFormat)
 			}
 			return e
 		}
@@ -250,9 +299,11 @@ func FuzzCATransitions(f *testing.F) {
 			t.Fatalf("the previous bundle does not validate: %v", err)
 		}
 		next := *prev
+		// Version 2, so that a draining entry validates (03-12e).
+		next.Version, next.Prev = 2, SHA256Hex(mustCanonical(t, prev))
 		next.CAs = slices.Concat(nextLists[0], nextLists[1], nextLists[2])
-		err := checkCATransitions(prev, &next)
-		want := caFuzzModel(prevLists, nextLists, pool, held)
+		err := checkCATransitions(prev, &next, goldenPolicy(t), goldenPolicy(t))
+		want := caFuzzModel(prevLists, nextLists, pool, held, switchEnds)
 		if (err == nil) != want {
 			t.Fatalf("checkCATransitions = %v, the model accepts %t\nprev %+v\nnext %+v", err, want, prev.CAs, next.CAs)
 		}

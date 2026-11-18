@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 
@@ -21,18 +22,116 @@ import (
 func init() {
 	register(command{
 		Name:    "ca-rotate",
-		Summary: "CA key rotation: prepare records the next CA key generation of a role (signer stopped)",
+		Summary: "CA key rotation: prepare records the next CA key generation of a role; retire-key removes its draining keys after a switch (signer stopped)",
 		Run:     runCARotate,
 	})
 }
 
-// runCARotate dispatches the ca-rotate subcommands (03-12: prepare only).
+// runCARotate dispatches the ca-rotate subcommands: prepare (03-12) and
+// retire-key (03-12e).
 func runCARotate(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] != "prepare" {
-		_, _ = fmt.Fprintln(stderr, "ca-rotate: want a subcommand: prepare")
+	if len(args) > 0 {
+		switch args[0] {
+		case "prepare":
+			return runCARotatePrepare(ctx, args[1:], stdout, stderr)
+		case "retire-key":
+			return runCARotateRetireKey(ctx, args[1:], stdout, stderr)
+		}
+	}
+	_, _ = fmt.Fprintln(stderr, "ca-rotate: want a subcommand: prepare or retire-key")
+	return errUsage
+}
+
+// runCARotateRetireKey removes the draining CA keys of a role after a
+// switch install, with signer.RetireKeys, and prints one line per draining
+// generation (03-12e). It takes the state lock, so it is refused under the
+// restore marker, and refuses a backend by its stored name before the
+// backend opens. It exits 0 only when no draining key of the role is
+// held.
+func runCARotateRetireKey(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("ca-rotate retire-key", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	stateDir := flags.String("state-dir", "", "state directory initialised by ca-init (required)")
+	role := flags.String("role", "", "the CA role whose draining keys to remove: user, host or machine (required)")
+	var backendOpts listFlag
+	flags.Var(&backendOpts, "backend-opt", "override a backend option stored by ca-init, key=value (repeatable)")
+	if err := flags.Parse(args); err != nil {
 		return errUsage
 	}
-	return runCARotatePrepare(ctx, args[1:], stdout, stderr)
+	if flags.NArg() != 0 || *stateDir == "" || *role == "" {
+		_, _ = fmt.Fprintln(stderr, "ca-rotate retire-key: --state-dir and --role are required; no positional arguments")
+		return errUsage
+	}
+	overrides, err := parseBackendOpts(backendOpts)
+	if err != nil {
+		return err
+	}
+	db, unlock, err := openState(*stateDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	defer func() { _ = db.Close() }()
+	name, _, err := db.BackendConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if err := signer.CheckRotationBackend(name); err != nil {
+		return err
+	}
+	_, be, err := openStoredBackend(ctx, db, overrides, *stateDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = be.Close() }()
+	res, err := signer.RetireKeys(ctx, db, be, keystore.Role(*role))
+	if res != nil {
+		if werr := writeRetireResult(stdout, res); werr != nil {
+			return werr
+		}
+	}
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "retire-key: no draining key of role %s is held\n", res.Role)
+	return err
+}
+
+// writeRetireResult prints one line per draining generation of res
+// (03-12e): "role <r> generation <g> <fingerprint>: removed", ": not
+// held", ": not removed: <reason>", or, for a key the agent still holds,
+// the ssh-add command through the stored agent socket with the key's
+// public line and one more command and line per certificate identity of
+// that key, then "run retire-key again".
+func writeRetireResult(w io.Writer, res *signer.RetireResult) error {
+	var b strings.Builder
+	for _, g := range res.Generations {
+		head := fmt.Sprintf("role %s generation %d %s: ", res.Role, g.Generation, g.Fingerprint)
+		switch g.Outcome {
+		case signer.RetireRemoved, signer.RetireNotHeld:
+			fmt.Fprintf(&b, "%s%s\n", head, g.Outcome)
+		case signer.RetireNotRemoved:
+			fmt.Fprintf(&b, "%snot removed: %s\n", head, g.Detail)
+		default:
+			if g.Detail != "" {
+				fmt.Fprintf(&b, "%sstill held: %s\n", head, g.Detail)
+			}
+			if res.Socket == "" {
+				fmt.Fprintf(&b, "%sstill held by the backend; remove it there, then run retire-key again\n", head)
+				continue
+			}
+			file := fmt.Sprintf("retire-%s-g%d", res.Role, g.Generation)
+			fmt.Fprintf(&b, "%sstill held by the agent; write this public key line into %s and run: SSH_AUTH_SOCK=%s ssh-add -d %s\n%s\n",
+				head, file, res.Socket, file, g.KeyLine)
+			for _, c := range g.CertLines {
+				fmt.Fprintf(&b, "%swrite this certificate line into %s-cert.pub and run: SSH_AUTH_SOCK=%s ssh-add -d %s-cert.pub\n%s\n",
+					head, file, res.Socket, file, c)
+			}
+			b.WriteString("run retire-key again\n")
+		}
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 // runCARotatePrepare records the next CA key generation of a role with

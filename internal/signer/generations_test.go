@@ -1,3 +1,5 @@
+//go:build linux
+
 package signer
 
 import (
@@ -30,15 +32,28 @@ import (
 // provisioner path and the location's round trip without the software
 // backend (03-12). It counts its provisioning calls and records the used
 // argument of each one and the location every KeyAt call receives.
+//
+// It also says whether it holds a generation and removes one
+// (keystore.GenerationHolder and GenerationRemover, 03-12e). What it holds
+// is, by definition, what its KeyAt can open, and drop and
+// RemoveGeneration remove a key from that same map, so the double can
+// never report a key as not held while it still signs with it. holdsErr
+// and removeErr, when set, make Holds and RemoveGeneration fail.
 type genBackend struct {
 	*memBackend
+	fx         *Fixture // generation 1 of each role is fx's role key
 	mu         sync.Mutex
 	provisions int
 	used       [][]string
 	locations  []string
+	created    map[string]string // "role/N" of each generation it created, to its fingerprint
+	holdsErr   error
+	removeErr  error
 }
 
-func newGenBackend(fx *Fixture) *genBackend { return &genBackend{memBackend: newMemBackend(fx)} }
+func newGenBackend(fx *Fixture) *genBackend {
+	return &genBackend{memBackend: newMemBackend(fx), fx: fx}
+}
 
 // ProvisionGeneration generates an Ed25519 key, holds it, and returns it
 // with the location loc-<role>-g<N>.
@@ -56,7 +71,63 @@ func (b *genBackend) ProvisionGeneration(role keystore.Role, generation uint32, 
 	b.provisions++
 	b.used = append(b.used, slices.Clone(used))
 	b.keys[ssh.FingerprintSHA256(s.PublicKey())] = s
+	if b.created == nil {
+		b.created = map[string]string{}
+	}
+	b.created[fmt.Sprintf("%s/%d", role, generation)] = ssh.FingerprintSHA256(s.PublicKey())
 	return s.PublicKey(), fmt.Sprintf("loc-%s-g%d", role, generation), nil
+}
+
+// Holds reports whether the key with fp is in the map KeyAt opens from,
+// or fails with holdsErr (03-12e).
+func (b *genBackend) Holds(_ keystore.Role, _ uint32, fp, _ string) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.holdsErr != nil {
+		return true, b.holdsErr
+	}
+	_, ok := b.keys[fp]
+	return ok, nil
+}
+
+// RemoveGeneration removes the key with fp, or fails with removeErr
+// (03-12e).
+func (b *genBackend) RemoveGeneration(_ keystore.Role, _ uint32, fp, _ string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.removeErr != nil {
+		return b.removeErr
+	}
+	delete(b.keys, fp)
+	return nil
+}
+
+// drop removes the key of generation of role, as the runbook's removal
+// step does after a switch install (03-12e): generation 1 is the
+// fixture's role key, a later one a key this double created. A generation
+// it cannot map fails the test, so a missed stand-in names itself.
+func (b *genBackend) drop(t testing.TB, role keystore.Role, generation uint32) {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	fp, ok := b.created[fmt.Sprintf("%s/%d", role, generation)]
+	if generation == 1 && b.fx != nil {
+		if s, has := b.fx.Roles[role]; has {
+			fp, ok = ssh.FingerprintSHA256(s.PublicKey()), true
+		}
+	}
+	if !ok {
+		t.Fatalf("drop: the double cannot map generation %d of %s to a key", generation, role)
+	}
+	delete(b.keys, fp)
+}
+
+// held reports, for a test, whether the double holds the key with fp.
+func (b *genBackend) held(fp string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.keys[fp]
+	return ok
 }
 
 // KeyAt records location and selects by fingerprint, as memBackend does.
@@ -231,14 +302,14 @@ func insertCA(b *trust.Bundle, e trust.CAEntry) {
 	b.CAs = slices.Insert(b.CAs, at, e)
 }
 
-// TestCheckBundleKeysGenerations (03-12, 03-12b): an install accepts exactly
-// one active CA entry per role, equal in key, algorithm, custody and
-// generation to the role's stored generation 1, and a next or retired
-// entry only when it equals a stored generation of its role; it refuses a
-// draining entry, and a root or a policy admin equal to any stored
-// generation, prepared ones included. An edit of the active entry is
-// refused by the chain rule first (03-12b), so those cases also call
-// checkBundleKeys directly. 03-12e rewrites active_not_generation_1_refused.
+// TestCheckBundleKeysGenerations (03-12, 03-12b, 03-12e): an install accepts
+// exactly one active CA entry per role, equal in key, algorithm and custody
+// to a stored generation of its role whose number it carries, and a next,
+// retired or draining entry only when it equals a stored generation of its
+// role, whatever the backend holds; it refuses a root or a policy admin
+// equal to any stored generation, prepared ones included. An edit of the
+// active entry is refused by the chain rule first (03-12b), so those cases
+// also call checkBundleKeys directly.
 func TestCheckBundleKeysGenerations(t *testing.T) {
 	refused := func(t *testing.T, e *genEnv, docs [4][]byte) {
 		t.Helper()
@@ -255,17 +326,31 @@ func TestCheckBundleKeysGenerations(t *testing.T) {
 			t.Fatalf("start after the successor: %v", err)
 		}
 	})
-	t.Run("active_not_generation_1_refused", func(t *testing.T) {
+	t.Run("active_later_generation_ok", func(t *testing.T) {
+		// Since the switch (03-12e) the active entry may be any stored
+		// generation; replacing the active key in place is still the chain
+		// rule's to refuse.
 		e := newGenEnv(t)
 		g := e.mustPrepare(t, keystore.RoleUser)
 		docs := editedSuccessor(t, e.db, func(b *trust.Bundle) {
 			ca := caEntry(t, b, "user")
 			ca.Key, ca.Generation = formatWire(t, g.PublicKey), 2
 		}, nil, e.fx.Root)
-		if err := e.checkKeys(t, docs, nil); !errors.Is(err, ErrBundleKeys) {
-			t.Fatalf("checkBundleKeys = %v, want ErrBundleKeys", err)
+		if err := e.checkKeys(t, docs, nil); err != nil {
+			t.Fatalf("checkBundleKeys with the stored generation 2 active = %v, want nil", err)
 		}
 		_ = mustRefusedInstall(t, e, docs, trust.ErrVersionChain)
+	})
+	t.Run("active_not_stored_refused", func(t *testing.T) {
+		// An active entry whose key no stored generation holds.
+		e := newGenEnv(t)
+		e.mustPrepare(t, keystore.RoleUser)
+		docs := editedSuccessor(t, e.db, func(b *trust.Bundle) {
+			caEntry(t, b, "user").Key = trust.FormatKey(newEd25519(t).PublicKey())
+		}, nil, e.fx.Root)
+		if err := e.checkKeys(t, docs, nil); !errors.Is(err, ErrBundleKeys) {
+			t.Fatalf("checkBundleKeys with a foreign active key = %v, want ErrBundleKeys", err)
+		}
 	})
 	t.Run("generation_field_mismatch_refused", func(t *testing.T) {
 		e := newGenEnv(t)
@@ -319,23 +404,24 @@ func TestCheckBundleKeysGenerations(t *testing.T) {
 			t.Fatalf("checkBundleKeys = %v, want ErrBundleKeys naming the retired entry", err)
 		}
 	})
-	t.Run("draining_refused_until_switch", func(t *testing.T) {
-		// No bundle parses with a draining entry until 03-12c, so the case
-		// is a direct call with an unvalidated bundle struct.
+	t.Run("draining_stored_generation_ok", func(t *testing.T) {
+		// A direct call with an unvalidated bundle struct: a draining entry
+		// that is a stored generation of its role is accepted, whatever the
+		// backend holds (03-12e).
 		e := newGenEnv(t)
 		g := e.mustPrepare(t, keystore.RoleUser)
 		b, _ := installedDocs(t, e.db)
 		draining := nextEntry(t, g)
 		draining.State = "draining"
 		insertCA(b, draining)
-		if err := e.checkKeys(t, [4][]byte{}, b); !errors.Is(err, ErrBundleKeys) || !strings.Contains(err.Error(), "03-12e") {
-			t.Fatalf("checkBundleKeys with a draining entry = %v, want ErrBundleKeys naming 03-12e", err)
+		if err := e.checkKeys(t, [4][]byte{}, b); err != nil {
+			t.Fatalf("checkBundleKeys with the stored generation 2 draining = %v, want nil", err)
 		}
 	})
-	t.Run("draining_parsed_bundle_refused", func(t *testing.T) {
-		// Since 03-12c a bundle with a draining entry parses (version 2 or
-		// above, with a trusted_until): the signer still refuses it until
-		// 03-12e.
+	t.Run("draining_parsed_bundle_stored_ok", func(t *testing.T) {
+		// A bundle with a draining entry parses (version 2 or above, with a
+		// trusted_until, 03-12c); the signer accepts it when the entry is a
+		// stored generation of its role (03-12e).
 		e := newGenEnv(t)
 		g := e.mustPrepare(t, keystore.RoleUser)
 		b, _ := installedDocs(t, e.db)
@@ -351,8 +437,19 @@ func TestCheckBundleKeysGenerations(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a version 2 bundle with a draining entry does not parse: %v", err)
 		}
-		if err := e.checkKeys(t, [4][]byte{}, parsed); !errors.Is(err, ErrBundleKeys) || !strings.Contains(err.Error(), "03-12e") {
-			t.Fatalf("checkBundleKeys with a parsed draining entry = %v, want ErrBundleKeys naming 03-12e", err)
+		if err := e.checkKeys(t, [4][]byte{}, parsed); err != nil {
+			t.Fatalf("checkBundleKeys with a parsed draining entry of the stored generation 2 = %v, want nil", err)
+		}
+	})
+	t.Run("draining_not_stored_refused", func(t *testing.T) {
+		// A draining entry whose key no stored generation holds (03-12e).
+		e := newGenEnv(t)
+		b, _ := installedDocs(t, e.db)
+		insertCA(b, trust.CAEntry{Role: "user", Key: trust.FormatKey(newEd25519(t).PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "agent",
+			State: "draining", Generation: 2, TrustedUntil: "2026-12-01T00:00:00Z"})
+		want := "CA user is draining but generation 2 is no stored generation of that key"
+		if err := e.checkKeys(t, [4][]byte{}, b); !errors.Is(err, ErrBundleKeys) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("checkBundleKeys with a foreign draining entry = %v, want ErrBundleKeys naming %q", err, want)
 		}
 	})
 	t.Run("draining_successor_refused_by_the_chain_rule", func(t *testing.T) {

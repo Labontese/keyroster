@@ -20,7 +20,10 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/doctor"
+	"github.com/Labontese/keyroster/internal/keystore"
+	"github.com/Labontese/keyroster/internal/keystore/software"
 	"github.com/Labontese/keyroster/internal/keystore/tpm"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/signer"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -37,13 +40,15 @@ func init() {
 // runDoctor prints one line per check, "LEVEL code: message", and fails
 // (exit status 1) when any check is FAIL. It only reads: the database is
 // opened read-only and never created, and it opens no network socket and
-// runs no program. With the TPM backend it reads the TPM's manufacturer ID.
+// runs no program. With the TPM backend it reads the TPM's manufacturer ID;
+// with the agent backend, after a CA switch, it asks the stored agent
+// socket whether the agent still lists a draining key (03-12e).
 func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	stateDir := fs.String("state-dir", "", "state directory of the signer (required)")
 	var backendOpts listFlag
-	fs.Var(&backendOpts, "backend-opt", "override a backend option stored by ca-init, key=value (repeatable), as given to serve; used to reach the TPM")
+	fs.Var(&backendOpts, "backend-opt", "override a backend option stored by ca-init, key=value (repeatable), as given to serve; used to reach the TPM or the agent")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -118,14 +123,139 @@ func gatherFacts(ctx context.Context, stateDir string, overrides map[string]stri
 		return f
 	}
 	defer func() { _ = db.Close() }()
-	if err := readDBFacts(ctx, db, &f, overrides); err != nil {
+	drain, err := readDBFacts(ctx, db, &f, overrides)
+	if err != nil {
 		f.DBError = err.Error()
 	}
 	if gens, err := db.CAGenerations(ctx); err == nil {
 		f.Generations = generationFacts(gens, f.Bundle)
 		f.UnrecordedGenerationFiles = unrecordedGenerationFiles(stateDir, gens)
+		if f.DBError == "" {
+			f.SwitchFloors = switchFloors(gens, f.Bundle, drain)
+			f.DrainingHeld = drainingHeld(ctx, db, stateDir, overrides, gens, f.Bundle)
+		}
 	}
 	return f
+}
+
+// storedGeneration is the stored generation row of role whose key is the
+// bundle key key, or nil.
+func storedGeneration(gens []signerdb.CAGeneration, role, key string) *signerdb.CAGeneration {
+	for i, g := range gens {
+		if g.Role != role {
+			continue
+		}
+		if pub, err := ssh.ParsePublicKey(g.PublicKey); err == nil && trust.FormatKey(pub) == key {
+			return &gens[i]
+		}
+	}
+	return nil
+}
+
+// switchFloors are, per active CA entry of b, the certificate of its key
+// with the largest ValidBefore in drain, the verified log's accumulator
+// (03-12e). With no bundle, or no accumulator (the log did not verify,
+// which doctor reports as a FAIL), there are none.
+func switchFloors(gens []signerdb.CAGeneration, b *trust.Bundle, drain *krl.DrainMax) []doctor.SwitchFloor {
+	if b == nil || drain == nil {
+		return nil
+	}
+	var out []doctor.SwitchFloor
+	for _, ca := range b.CAs {
+		if ca.State != "active" {
+			continue
+		}
+		pub, err := trust.ParseKey(ca.Key)
+		if err != nil {
+			continue
+		}
+		sf := doctor.SwitchFloor{Role: ca.Role, Generation: ca.Generation}
+		if g := storedGeneration(gens, ca.Role, ca.Key); g != nil {
+			sf.Generation = g.Generation
+		}
+		if e, ok := drain.For(pub.Marshal()); ok {
+			_, fits := krl.EarliestTrustedUntil(e.ValidBefore)
+			sf.HasCertificate, sf.Serial, sf.KeyID, sf.ValidBefore, sf.Saturated = true, e.Serial, e.KeyID, e.ValidBefore, !fits
+		}
+		out = append(out, sf)
+	}
+	return out
+}
+
+// drainingHeld asks, for every draining CA entry of b, whether the stored
+// backend still holds its generation (03-12e), as serve does at start:
+// the software backend by its file (software.GenerationHeld, which needs
+// no passphrase), the agent backend through the stored socket
+// (keystore.Holds). A generation doctor cannot check, because no stored
+// row names its key, the agent cannot be reached or answers with an
+// error, or the backend is neither, is reported Unchecked, never as gone.
+func drainingHeld(ctx context.Context, db *signerdb.DB, stateDir string, overrides map[string]string, gens []signerdb.CAGeneration, b *trust.Bundle) []doctor.HeldFact {
+	if b == nil {
+		return nil
+	}
+	type target struct {
+		fact doctor.HeldFact
+		gen  *signerdb.CAGeneration
+	}
+	var targets []target
+	for _, ca := range b.CAs {
+		if ca.State != "draining" {
+			continue
+		}
+		t := target{fact: doctor.HeldFact{Role: ca.Role, Generation: ca.Generation, Fingerprint: ca.Key}}
+		if pub, err := trust.ParseKey(ca.Key); err == nil {
+			t.fact.Fingerprint = ssh.FingerprintSHA256(pub)
+		}
+		if t.gen = storedGeneration(gens, ca.Role, ca.Key); t.gen == nil {
+			t.fact.Unchecked = "no stored generation row names this key"
+		} else {
+			t.fact.Generation = t.gen.Generation
+		}
+		targets = append(targets, t)
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	var (
+		be      keystore.Backend
+		openErr error
+	)
+	switch name, _, err := db.BackendConfig(ctx); {
+	case err != nil:
+		openErr = err
+	case name == "agent":
+		if _, be, openErr = openStoredBackend(ctx, db, overrides, stateDir); openErr == nil {
+			defer func() { _ = be.Close() }()
+		}
+	case name != "software":
+		openErr = fmt.Errorf("doctor does not ask the %s backend", name)
+	}
+	var out []doctor.HeldFact
+	for _, t := range targets {
+		f := t.fact
+		if f.Unchecked == "" {
+			var (
+				held bool
+				err  error
+			)
+			switch {
+			case openErr != nil:
+				err = openErr
+			case be == nil:
+				held, err = software.GenerationHeld(stateDir, keystore.Role(f.Role), f.Generation)
+			default:
+				held, err = keystore.Holds(be, keystore.Role(f.Role), f.Generation, f.Fingerprint, t.gen.Location)
+			}
+			switch {
+			case err != nil:
+				f.Unchecked = err.Error()
+			case !held:
+				continue
+			}
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 // generationFacts are the stored CA key generations with the state of the
@@ -199,48 +329,52 @@ func unrecordedGenerationFiles(stateDir string, gens []signerdb.CAGeneration) []
 }
 
 // readDBFacts fills the facts that come from the state database (and, for
-// the TPM backend, from the TPM the database names).
-func readDBFacts(ctx context.Context, db *signerdb.DB, f *doctor.Facts, overrides map[string]string) error {
+// the TPM backend, from the TPM the database names). It returns the
+// verified log's drain accumulator (03-12e), nil when the log does not
+// verify.
+func readDBFacts(ctx context.Context, db *signerdb.DB, f *doctor.Facts, overrides map[string]string) (*krl.DrainMax, error) {
 	out, err := db.IntegrityCheck(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	f.IntegrityOK, f.IntegrityDetail = out == "ok", out
 
 	keys, err := db.CAKeys(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var logKey ssh.PublicKey
 	for _, k := range keys {
 		f.CAKeys = append(f.CAKeys, doctor.CAKeyFact{Role: k.Role, Alg: k.Alg, Custody: k.Custody})
 		if k.Role == "log" {
 			if logKey, err = ssh.ParsePublicKey(k.PublicKey); err != nil {
-				return fmt.Errorf("recorded log key: %w", err)
+				return nil, fmt.Errorf("recorded log key: %w", err)
 			}
 		}
 	}
 	if logKey == nil {
-		return errors.New("no log key recorded")
+		return nil, errors.New("no log key recorded")
 	}
-	if err := signer.CheckLog(ctx, db, logKey); err != nil {
+	// One walk: CheckLog's verified rebuild with the drain scan (03-12e).
+	drain, err := signer.LogDrain(ctx, db, logKey)
+	if err != nil {
 		f.LogDetail = err.Error()
 	} else {
 		f.LogMatches = true
 	}
 
 	if f.HighWaterMicros, err = db.LastSerial(ctx); err != nil {
-		return err
+		return nil, err
 	}
 
 	stored, err := db.LatestBundle(ctx)
 	switch {
 	case errors.Is(err, signerdb.ErrNoBundle):
 	case err != nil:
-		return err
+		return nil, err
 	default:
 		if f.Bundle, err = trust.ParseBundle(stored.Bundle); err != nil {
-			return fmt.Errorf("installed trust bundle: %w", err)
+			return nil, fmt.Errorf("installed trust bundle: %w", err)
 		}
 	}
 	// The checks serve runs on the bundle at start, except opening the
@@ -252,7 +386,7 @@ func readDBFacts(ctx context.Context, db *signerdb.DB, f *doctor.Facts, override
 
 	name, opts, err := db.BackendConfig(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if name == "tpm" {
 		for k, v := range overrides {
@@ -265,5 +399,5 @@ func readDBFacts(ctx context.Context, db *signerdb.DB, f *doctor.Facts, override
 			f.TPMManufacturer, f.TPMCustody = id, string(custody)
 		}
 	}
-	return nil
+	return drain, nil
 }

@@ -338,7 +338,8 @@ runuser -u keyroster-signer -g keyroster-signer -G tss -- \
 
 It prints one line per check, `LEVEL code: message`, and exits 1 on any
 FAIL. It only reads: it opens the database read-only, opens no network
-socket and runs no program.
+socket and runs no program. With the agent backend, after a CA switch, it
+asks the agent's own Unix socket whether it still lists the draining key.
 
 | Result | Meaning | What to do |
 |---|---|---|
@@ -359,9 +360,14 @@ socket and runs no program.
 | `FAIL restore_recovery_pending` | the marker `restore-recovery-pending` exists in the state directory: a restore was not recovered or ruled out | Follow the restore section (step 2b). `serve`, `ca-init`, `install-bundle` and `ca-rotate prepare` refuse until then. |
 | `WARN installed_issued_at_after_now` | the installed bundle is dated after this clock | It blocks every later successor until real time catches up. Check the clock. |
 | `WARN unrecorded_generation_file` | a `<role>-g<N>.age` file in the state directory's `software` directory that no generation row names | See [Prepare a CA key generation](#prepare-a-ca-key-generation). |
+| `FAIL draining_key_still_usable` | the backend still holds the key of a draining CA entry: the software backend has a file at its generation's name, or the agent lists it | See [Remove the old key after a switch](#remove-the-old-key-after-a-switch). `serve` refuses to start until then. |
+| `WARN draining_key_unchecked` | doctor could not ask whether the backend still holds a draining key (the agent did not answer, or no generation row names the key) | Check the backend by hand; `serve` refuses to start while the key is held. |
 
 `OK generations` lists each role's active and prepared CA key
-generations with their fingerprints (03-12). (Run in CI: the doctor tests
+generations with their fingerprints (03-12). `OK switch_floor` names, per
+CA role, the certificate that sets the earliest `trusted_until` a switch
+of that role could carry (see [Remove the old key after a
+switch](#remove-the-old-key-after-a-switch)). (Run in CI: the doctor tests
 of cmd/keyroster-signer and internal/doctor.)
 
 On the homelab VM the expected result is no FAIL, `WARN vtpm_custody` and
@@ -517,6 +523,158 @@ take a `signer.db` backup and an export right after every bundle install: the
 restore section explains what a restore that brings back an older bundle
 costs. (Run in CI: TestInstallIssuedAtAhead. UNVERIFIED on the homelab
 signer.)
+
+### Install a CA switch: `--previous`
+
+The second ceremony of a CA rotation (docs/runbooks/ca-rotation.md)
+signs a switch: a successor in which a role's `next` key becomes
+`active` and its old `active` key becomes `draining`, trusted by hosts
+until the entry's `trusted_until`. A switch install needs `--previous`,
+an export-log file of this log kept off the box: the newest export you
+saved, taken right after the last install. The signer reads only the
+file's last line, the `{"checkpoint":...}` line that `export-log`
+writes, from at most its last 1 MiB, and requires that this log extends
+that checkpoint. Copy the export in as the signer's user, then install.
+The export of an earlier switch stays in `incoming`, and the copy refuses
+to overwrite it, so it is removed first, as that user. The three commands
+are chained, so that the install never runs against a stale export after
+a failed copy:
+
+```
+S=/var/lib/keyroster-signer
+systemctl stop keyroster-signer.service
+runuser -u keyroster-signer -- rm -f "$S/incoming/previous.jsonl" &&
+runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$S/incoming/previous.jsonl" <"/media/transfer/export.jsonl" &&
+runuser -u keyroster-signer -g keyroster-signer -G tss -- keyroster-signer install-bundle --state-dir /var/lib/keyroster-signer \
+  --bundle /var/lib/keyroster-signer/incoming/bundle.json \
+  --policy /var/lib/keyroster-signer/incoming/policy.json \
+  --previous /var/lib/keyroster-signer/incoming/previous.jsonl
+```
+
+After its CA lines, `install-bundle` prints one line per key the switch
+starts to drain: `drain <role> generation <g> until <t>; the last
+certificate the log records for it is valid until <v>` (`none recorded`
+when the log records no certificate of that key). Write it into the
+operations log. Do not start the signer yet: the old key must leave the
+backend first (below).
+
+The install binds the switch to the log: it reads every certificate the
+verified log records, the certificates a revocation recovery carries
+included, revoked or not, and requires that the draining key's
+`trusted_until` is at least 300 s after the largest ValidBefore among
+that key's certificates, so that no certificate the signer issued under
+the old key outlives the hosts' trust in it. The refusals, by name, and
+what to do (each writes nothing; destroy the refused switch files and
+never use them again):
+
+- `install_previous_required`: a switch install was run without
+  `--previous`. Run it again with the newest saved export.
+- `install_previous_invalid`: the file's last line is not a checkpoint
+  of this log: not an export-log file, a bare checkpoint, an export of
+  another installation, a checkpoint that covers no entry, or a last
+  line longer than 1 MiB. Use the export-log file itself.
+- `install_previous_not_extended`: this log does not extend the export:
+  it has fewer entries than the checkpoint covers, or its first entries
+  give another root (a fork). The database was restored or changed after
+  that export. Stop, do not install, and follow the restore section.
+- `drain_window_too_short`: the log records a certificate of the old
+  key valid until `<v>` (the refusal names its serial, key ID and log
+  entry), and `trusted_until` is earlier than `<v>` plus 300 s; the
+  refusal names the earliest acceptable `trusted_until`. Repeat the
+  second ceremony with an end at or after it. `none (that certificate
+  never expires)` means that certificate blocks a switch of this key for
+  good; escalate. Revoking the certificate does not help: the maximum
+  counts revoked certificates too.
+- `drain_window_too_long`: `trusted_until` is above the latest
+  acceptable end, the larger of the signer's clock plus the role's
+  largest `max_ttl_seconds` and that ValidBefore, plus 300 s, the
+  7-day drain allowance and 300 s more. Check the ceremony machine's
+  clock and the allowance, and repeat the second ceremony.
+
+`keyroster audit verify` derives both bounds again from the export's
+entries, with the install entry's time as the clock.
+
+The scan reads each log entry once. Measured with the repository's
+benchmark on a development machine, not in CI: about 1.2 s for 100 000
+entries and 11 s for 1 000 000 (about 11 µs per entry). Larger logs, and
+the scan's peak memory, are UNVERIFIED.
+
+Take a `signer.db` backup and an export right after the switch install,
+as after every install, and keep the export off the box: it is the
+`--previous` of the next switch and the anchor of a later restore.
+
+### Remove the old key after a switch
+
+While the backend still holds the draining key, `serve` refuses to
+start with `draining_key_still_usable: the backend still holds
+generation <g> of the <role> CA (<fingerprint>), which the installed
+bundle drains; run keyroster-signer ca-rotate retire-key` (or `cannot
+tell whether the backend holds it: <error>` when the backend cannot
+answer), and doctor reports `FAIL draining_key_still_usable`. A switch
+is installed while the old key is still held; then, with the signer
+still stopped, remove the key as the signer's user:
+
+```
+runuser -u keyroster-signer -g keyroster-signer -G tss -- keyroster-signer ca-rotate retire-key --state-dir /var/lib/keyroster-signer --role user
+```
+
+retire-key proves before it removes: it checks that the stored bundle is
+the one the verified log records and signs a test message with the
+role's active key, and when that key cannot sign it refuses
+`active_key_unusable` and removes nothing. It then prints one line per
+draining generation of the role, `role <r> generation <g>
+<fingerprint>: removed` or `: not held`, and finally `retire-key: no
+draining key of role <r> is held` with exit 0. While a generation is
+still held it exits 1 with `retire_key_incomplete: <n> draining
+generation(s) of role <r> are still held`; run it again once the cause
+is fixed. Start the signer only after exit 0. Per backend:
+
+- **software:** it decrypts the generation's file (`software/<role>.age`
+  for generation 1, `software/<role>-g<N>.age` after), checks that it
+  holds the draining key, deletes it and syncs the directory. A link at
+  that name is removed, never followed. A file that holds another key
+  (`not removed: the file holds another key (<fingerprint>)`) or that
+  cannot be decrypted (`not removed: the file cannot be decrypted: ...`)
+  stays and counts as held: inspect it, and delete it as the signer's
+  user only once you know what it is.
+- **agent:** retire-key cannot remove a key from an agent. For a key the
+  agent still lists it prints `... still held by the agent; write this
+  public key line into retire-<role>-g<g> and run:
+  SSH_AUTH_SOCK=<socket> ssh-add -d retire-<role>-g<g>`, then that public
+  key line, and for each certificate identity of the same key a second
+  command for `retire-<role>-g<g>-cert.pub` with the certificate's line.
+  `<socket>` is the signer's own agent socket, the `socket` option stored
+  at ca-init, never your default agent. Run the commands, then run
+  retire-key again. With a PKCS#11 provider behind the agent (custody
+  `pkcs11-agent`), the old key object must also be deleted from the
+  token: otherwise the next provider load adds it to the agent again, and
+  `serve` refuses `draining_key_still_usable` again (UNVERIFIED: no
+  PKCS#11 token has been rotated; CI removes the printed keys through the
+  printed socket with an agent client, not with `ssh-add`).
+- **tpm and piv:** refused `rotation_not_supported_on_backend` until
+  their generations exist (03-12f).
+
+Other refusals: `no_draining_entry` (the installed bundle drains no key
+of that role), `restore_recovery_pending`, `draining_generation_unknown`
+and `draining_names_the_active_generation` (the bundle and the stored
+generations disagree: stop and investigate), and the log refusals of
+`install-bundle`. retire-key writes no log entry. It removes draining
+keys only: an aborted key is destroyed by hand (ca-rotation.md, "Abort").
+
+After the switch, doctor prints, per CA role, `OK switch_floor: <role>
+generation <g>: the certificate that sets the earliest trusted_until a
+switch could carry is serial <s> (key ID <k>, valid until <v>); the
+earliest is <e>`, or `... the log records no certificate of this key;
+the earliest is the floor`: read it before the next second ceremony.
+
+The binding covers what the verified log records. It does not cover a
+certificate signed with the old key outside the signer, a copy of the
+state directory or of a key file taken before retire-key, or a restored
+database from before the switch that is served while its backend holds
+the old key again (next section). (Run in CI: TestSwitchTracer,
+TestInstallPrevious, TestInstallBundlePreviousFlag, TestDrainBinding,
+TestRetireKey, TestServeRefusesWhileBackendHoldsDrainingKey and
+TestDoctorSwitch. UNVERIFIED on a real signer host.)
 
 ## Snapshot restore: check the clock first
 
@@ -1429,9 +1587,9 @@ structurally (see the warning above).
      another ops key is possible only after 03-13 rotates the ops key, and
      a certificate that only a lost bundle's CA generation names
      (`recovery_certificate_invalid`) is possible only after a CA rotation
-     (03-12b to 03-12e) has installed a bundle that the restored database
-     lacks. The lost-bundle and lost-generation cases are 03-13's, with a
-     scoped exception to the restore marker; a lost installation ID is
+     has installed a bundle that the restored database lacks. The
+     lost-bundle and lost-generation cases are 03-13's, with a scoped
+     exception to the restore marker; a lost installation ID is
      the remedy of `recovery_installation_not_pinned` above
      (`--installation-id`), not a re-init (UNVERIFIED).
    - `recovery_revoke_lost_unknown`: `--revoke-lost` named a serial that
@@ -2006,3 +2164,73 @@ structurally (see the warning above).
 > and `log shrank` when K > L. The `grep` patterns of step 2 match
 > the export line format written by `keyroster-signer export-log`, not a
 > real export of a restored signer.
+
+### Restore from before the last switch
+
+When the restored `signer.db` is older than the last switch install, its
+bundle names the old key as the active key and has no draining entry,
+so nothing but the key's absence keeps `serve` from issuing under it:
+retire-key removed it, but an agent or PKCS#11 provider reload can bring
+it back. The recovery opens no CA private key, so it works without the
+old key. Follow the restore procedure above, in this order:
+
+1. Hold the signer and keyroster-server and write the marker, as above,
+   and export the restored log (`/tmp/restored.jsonl`, step 1).
+2. Make the recovery with `keyroster revoke recover` (step 2b).
+3. Apply it with `recover-revocations` (step 2b, part 5). It releases the
+   marker. A warning line after its `recovered:` line names each carried
+   certificate of a draining key that stays valid past that key's
+   `trusted_until` minus 300 s; write it into the operations log.
+4. Take a fresh export of the recovered log as the signer's user:
+
+   ```
+   runuser -u keyroster-signer -g keyroster-signer -G tss -- keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /var/lib/keyroster-signer/incoming/fresh.jsonl
+   ```
+
+5. Check that the restored log is a prefix of the newest saved export
+   and no fork. On this path the `--previous` of step 6 is an export of
+   the restored log itself and anchors nothing, so this check is the one
+   that shows it:
+
+   ```
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 --installation-id <installation id> \
+     --previous /tmp/restored.jsonl <the newest saved export>
+   ```
+
+   Go on only when it exits 0 with a verified report. Otherwise stop and
+   escalate, as for a fork in step 2.
+6. Install, from the ceremony media and in order, every trust bundle the
+   restored database lacks (the switch among them), each with that fresh
+   export, copied in as in "Install a successor bundle":
+
+   ```
+   runuser -u keyroster-signer -g keyroster-signer -G tss -- keyroster-signer install-bundle --state-dir /var/lib/keyroster-signer \
+     --bundle /var/lib/keyroster-signer/incoming/bundle.json \
+     --policy /var/lib/keyroster-signer/incoming/policy.json \
+     --previous /var/lib/keyroster-signer/incoming/fresh.jsonl
+   ```
+
+7. Run retire-key for each switched role, as in "Remove the old key
+   after a switch", and start the signer only after its exit 0.
+
+Before you start the restored signer, also check that the backend does
+not hold the old key, whose fingerprint the draining entry of the switch
+bundle names. With the software backend, the old generation's file
+(`user.age` for generation 1) must not be listed, not even as a link:
+
+```
+runuser -u keyroster-signer -g keyroster-signer -G tss -- ls -la /var/lib/keyroster-signer/software/
+```
+
+With the agent backend, through the signer's own socket (the `socket`
+option stored at ca-init), no line may show that fingerprint:
+
+```
+runuser -u keyroster-signer -g keyroster-signer -G tss -- env SSH_AUTH_SOCK=<socket> ssh-add -l
+```
+
+If the ceremony media lacks the switch bundle (a lost switch bundle), or
+the restored database lacks a generation row of a key the newest bundle
+names (a lost generation), stop: those cases are 03-13's. (Run in CI:
+TestRestoredPreSwitchSignerCannotIssue and TestRecoveryOpensNoCAKey.
+UNVERIFIED on a real signer host.)

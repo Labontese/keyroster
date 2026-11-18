@@ -3,6 +3,7 @@ package trust
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -81,6 +82,7 @@ func TestCATransitions(t *testing.T) {
 		reasonPrevKey  = "the key equals a key of the previous bundle"
 		reasonTwice    = "the key is added twice in this successor"
 		reasonCount    = "more than one change for this role"
+		reasonFloorNA  = "the switch floor cannot be computed"
 	)
 	// The draining cases (03-12c) start from a hand-built previous bundle
 	// whose user role holds g1 draining (until drainEnd) and g2 active.
@@ -91,13 +93,57 @@ func TestCATransitions(t *testing.T) {
 	d1 := drainingAt(t, RoleUser, seedCARotate, 1, drainEnd)
 	a2 := caAt(t, RoleUser, seedCANext, "active", 2)
 	d1Other := drainingAt(t, RoleUser, seedCARotate, 1, "2026-10-27T00:00:00Z")
+	// The switch cases (03-12e) start from u1 active and g2 (seedCANext)
+	// next; floorEnd is the switch floor of a successor issued at the
+	// golden issued_at under the golden policy: issued_at plus the user
+	// max_ttl_seconds plus 300 s.
+	n2 := caAt(t, RoleUser, seedCANext, "next", 2)
+	floorEnd := func(t *testing.T) string {
+		t.Helper()
+		issued, err := time.Parse(TimeFormat, goldenIssue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ttl, found := uint64(0), false
+		for _, prof := range goldenPolicy(t).CAProfiles {
+			if prof.Role == RoleUser {
+				ttl, found = prof.MaxTTLSeconds, true
+			}
+		}
+		if !found {
+			t.Fatal("the golden policy has no user profile")
+		}
+		return issued.Add(time.Duration(ttl+300) * time.Second).UTC().Format(TimeFormat) //nolint:gosec // G115: a policy TTL
+	}(t)
+	// floorShort is one second before floorEnd; floorReason is the reason
+	// that refuses the trusted_until end below the switch floor (03-12e).
+	floorShort := func(t *testing.T) string {
+		t.Helper()
+		end, err := time.Parse(TimeFormat, floorEnd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return end.Add(-time.Second).Format(TimeFormat)
+	}(t)
+	floorReason := func(end, floor string) string {
+		return "trusted_until " + end + " is before the switch floor " + floor + " (issued_at plus the larger max_ttl_seconds of the two policies plus 300 s)"
+	}
+	// The second-switch cases start from g1 draining, g2 active and g3
+	// (seedCANext2) next.
+	n3 := caAt(t, RoleUser, seedCANext2, "next", 3)
+	a3 := caAt(t, RoleUser, seedCANext2, "active", 3)
+	d2 := drainingAt(t, RoleUser, seedCANext, 2, floorEnd)
+	d1Switch := drainingAt(t, RoleUser, seedUserCA, 1, floorEnd)
 	for _, c := range []struct {
 		name       string
 		prev, next []CAEntry
 		edit       func(prev, next *Bundle)
-		role       string
-		gen        int
-		reason     string // "" accepts
+		// prevPol and nextPol are the two policies the rule reads; nil is
+		// the golden one.
+		prevPol, nextPol *Policy
+		role             string
+		gen              int
+		reason           string // "" accepts
 	}{
 		{name: "unchanged_ok",
 			prev: []CAEntry{u1, caAt(t, RoleUser, seedCANext, "retired", 2), caAt(t, RoleUser, seedCANext2, "next", 3)},
@@ -213,10 +259,77 @@ func TestCATransitions(t *testing.T) {
 			prev: []CAEntry{d1, a2},
 			next: []CAEntry{a2},
 			role: RoleUser, gen: 1, reason: reasonRemoved},
+		{name: "switch_ok",
+			// The switch (03-12e): next becomes active and active becomes
+			// draining, with a trusted_until at the floor.
+			prev: []CAEntry{u1, n2},
+			next: []CAEntry{drainingAt(t, RoleUser, seedUserCA, 1, floorEnd), caAt(t, RoleUser, seedCANext, "active", 2)}},
+		{name: "switch_without_next_refused",
+			prev: []CAEntry{u1},
+			next: []CAEntry{d1Switch},
+			role: RoleUser, gen: 1, reason: reasonChanges},
+		{name: "switch_trusted_until_one_second_short_refused",
+			prev: []CAEntry{u1, n2},
+			next: []CAEntry{drainingAt(t, RoleUser, seedUserCA, 1, floorShort), a2},
+			role: RoleUser, gen: 1, reason: floorReason(floorShort, floorEnd)},
+		{name: "switch_trusted_until_before_issued_at_refused",
+			prev: []CAEntry{u1, n2},
+			next: []CAEntry{drainingAt(t, RoleUser, seedUserCA, 1, "2026-10-04T00:00:00Z"), a2},
+			role: RoleUser, gen: 1, reason: floorReason("2026-10-04T00:00:00Z", floorEnd)},
+		{name: "switch_issued_before_epoch_refused",
+			// Both bundles issued in 1960, which Validate admits: the floor
+			// of a negative Unix time is never computed.
+			prev: []CAEntry{u1, n2},
+			next: []CAEntry{drainingAt(t, RoleUser, seedUserCA, 1, "2030-01-01T00:00:00Z"), a2},
+			edit: func(prev, next *Bundle) {
+				prev.IssuedAt, next.IssuedAt = "1960-01-01T00:00:00Z", "1960-01-01T00:00:00Z"
+			},
+			role: RoleUser, gen: 1, reason: reasonFloorNA},
+		{name: "switch_trusted_until_before_epoch_refused",
+			// Validate admits a trusted_until in 1969; a plain uint64
+			// conversion of its negative Unix time would wrap and pass the
+			// floor.
+			prev: []CAEntry{u1, n2},
+			next: []CAEntry{drainingAt(t, RoleUser, seedUserCA, 1, "1969-12-31T00:00:00Z"), a2},
+			role: RoleUser, gen: 1, reason: reasonFloorNA},
+		{name: "second_switch_while_draining_ok",
+			prev: []CAEntry{d1, a2, n3},
+			next: []CAEntry{d1, d2, a3}},
+		{name: "switch_changes_earlier_draining_end_refused",
+			prev: []CAEntry{d1, a2, n3},
+			next: []CAEntry{d1Other, d2, a3},
+			role: RoleUser, gen: 1, reason: reasonChanges},
+		{name: "switch_retires_earlier_draining_refused",
+			prev: []CAEntry{d1, a2, n3},
+			next: []CAEntry{caAt(t, RoleUser, seedCARotate, "retired", 1), d2, a3},
+			role: RoleUser, gen: 1, reason: reasonChanges},
+		{name: "switch_changes_key_refused",
+			// The new active entry carries another key than the next entry
+			// it replaces.
+			prev: []CAEntry{u1, n2},
+			next: []CAEntry{d1Switch, caAt(t, RoleUser, seedCAOther, "active", 2)},
+			role: RoleUser, gen: 1, reason: reasonChanges},
+		{name: "switch_with_added_next_refused",
+			prev: []CAEntry{u1, n2},
+			next: []CAEntry{d1Switch, a2, caAt(t, RoleUser, seedCAOther, "next", 3)},
+			role: RoleUser, gen: 1, reason: reasonCount},
+		{name: "two_roles_one_switch_one_add_ok",
+			prev: []CAEntry{u1, n2},
+			next: []CAEntry{d1Switch, a2},
+			edit: func(_, next *Bundle) {
+				next.CAs = slices.Insert(next.CAs, 3, caAt(t, RoleHost, seedCAOther, "next", 2))
+			}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			prev, next := caPair(t, c.prev, c.next, c.edit)
-			err := checkCATransitions(prev, next)
+			prevPol, nextPol := c.prevPol, c.nextPol
+			if prevPol == nil {
+				prevPol = goldenPolicy(t)
+			}
+			if nextPol == nil {
+				nextPol = goldenPolicy(t)
+			}
+			err := checkCATransitions(prev, next, prevPol, nextPol)
 			if c.reason == "" {
 				if err != nil {
 					t.Fatalf("checkCATransitions: %v, want nil", err)
@@ -226,6 +339,25 @@ func TestCATransitions(t *testing.T) {
 			mustChainRefusal(t, err, c.role, c.gen, c.reason)
 		})
 	}
+	t.Run("switch_uses_larger_of_prev_and_next_ttl", func(t *testing.T) {
+		// The previous policy's user maximum is 7200 s and the new one's
+		// 3600 s: the floor is issued_at plus 7200 plus 300, so a rule that
+		// read the new policy only would accept the first end.
+		prevPol, nextPol := goldenPolicy(t), goldenPolicy(t)
+		prevPol.CAProfiles[0].MaxTTLSeconds, nextPol.CAProfiles[0].MaxTTLSeconds = 7200, 3600
+		issued, err := time.Parse(TimeFormat, goldenIssue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		short := issued.Add((3600 + 300) * time.Second).Format(TimeFormat)
+		floor := issued.Add((7200 + 300) * time.Second).Format(TimeFormat)
+		prev, next := caPair(t, []CAEntry{u1, n2}, []CAEntry{drainingAt(t, RoleUser, seedUserCA, 1, short), a2}, nil)
+		mustChainRefusal(t, checkCATransitions(prev, next, prevPol, nextPol), RoleUser, 1, floorReason(short, floor))
+		prev, next = caPair(t, []CAEntry{u1, n2}, []CAEntry{drainingAt(t, RoleUser, seedUserCA, 1, floor), a2}, nil)
+		if err := checkCATransitions(prev, next, prevPol, nextPol); err != nil {
+			t.Fatalf("a switch at the floor of the larger TTL: %v, want nil", err)
+		}
+	})
 	t.Run("next_generation_not_above_prev_refused", func(t *testing.T) {
 		// Equal to the previous maximum: a repeated generation, which
 		// Validate refuses first in production, so only a direct call
@@ -233,7 +365,7 @@ func TestCATransitions(t *testing.T) {
 		prev, next := caPair(t,
 			[]CAEntry{u1, caAt(t, RoleUser, seedCANext, "retired", 2)},
 			[]CAEntry{u1, caAt(t, RoleUser, seedCANext, "retired", 2), caAt(t, RoleUser, seedCANext2, "next", 2)}, nil)
-		mustChainRefusal(t, checkCATransitions(prev, next), RoleUser, 2, reasonNotAbove)
+		mustChainRefusal(t, checkCATransitions(prev, next, goldenPolicy(t), goldenPolicy(t)), RoleUser, 2, reasonNotAbove)
 		// Below it, in the order Validate requires.
 		prev, next = caPair(t,
 			[]CAEntry{u1, caAt(t, RoleUser, seedCANext, "retired", 3)},
@@ -241,7 +373,7 @@ func TestCATransitions(t *testing.T) {
 		if err := next.Validate(); err != nil {
 			t.Fatalf("the successor does not validate: %v", err)
 		}
-		mustChainRefusal(t, checkCATransitions(prev, next), RoleUser, 2, reasonNotAbove)
+		mustChainRefusal(t, checkCATransitions(prev, next, goldenPolicy(t), goldenPolicy(t)), RoleUser, 2, reasonNotAbove)
 	})
 	t.Run("installation_id_new_with_next_ok", func(t *testing.T) {
 		// The previous bundle has no installation ID; the successor adds
@@ -499,6 +631,35 @@ func TestUserCAKeysFile(t *testing.T) {
 		got, err := UserCAKeysFile(nb, end.Add(-time.Hour))
 		if err == nil || got != nil {
 			t.Fatalf("UserCAKeysFile of a key that does not parse = %q, %v; want an error and no bytes", got, err)
+		}
+	})
+}
+
+// TestDrainFloor (03-12e): the switch floor is the Unix seconds of
+// issued_at plus the larger of the two TTLs plus DrainMargin; an issued_at
+// before 1970 and a sum that would overflow are errors.
+func TestDrainFloor(t *testing.T) {
+	issued, err := time.Parse(TimeFormat, goldenIssue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := uint64(issued.Unix()) //nolint:gosec // G115: after 1970
+	t.Run("larger_ttl_of_prev_and_next", func(t *testing.T) {
+		for _, ttls := range [][2]uint64{{7200, 3600}, {3600, 7200}} {
+			got, err := DrainFloor(goldenIssue, ttls[0], ttls[1])
+			if err != nil || got != at+7200+300 {
+				t.Fatalf("DrainFloor(%s, %d, %d) = %d, %v; want %d", goldenIssue, ttls[0], ttls[1], got, err, at+7200+300)
+			}
+		}
+	})
+	t.Run("overflow_refused", func(t *testing.T) {
+		if got, err := DrainFloor(goldenIssue, math.MaxUint64-10, 1); err == nil {
+			t.Fatalf("DrainFloor with a TTL near 2^64 = %d, want an error", got)
+		}
+	})
+	t.Run("negative_issued_at_refused", func(t *testing.T) {
+		if got, err := DrainFloor("1969-12-31T23:59:59Z", 1, 1); err == nil {
+			t.Fatalf("DrainFloor of an issued_at in 1969 = %d, want an error", got)
 		}
 	})
 }

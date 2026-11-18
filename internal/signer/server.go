@@ -154,6 +154,9 @@ func Listen(path string, gid int) (*net.UnixListener, error) {
 // waits for the close (keyroster-server) may dial its next call the moment
 // it sees it, and finds the slot already free.
 func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
+	if s.recovery {
+		return fmt.Errorf("%w: a signer started in the recovery configuration holds no CA key and never serves", ErrRecoveryConfiguration)
+	}
 	stop := context.AfterFunc(ctx, func() { _ = l.Close() })
 	defer stop()
 	s.republishIfDue(ctx)

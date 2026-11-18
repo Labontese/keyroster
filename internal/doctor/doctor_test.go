@@ -3,6 +3,7 @@ package doctor
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -526,5 +527,108 @@ func TestDoctorGenerationFiles(t *testing.T) {
 	})
 	t.Run("none_no_line", func(t *testing.T) {
 		requireNone(t, Run(healthy(t)), "unrecorded_generation_file")
+	})
+}
+
+// TestDoctorSwitch (03-12e, SR-08 and SR-09): a draining CA generation
+// the backend still holds is a FAIL draining_key_still_usable; per CA role
+// with an active key, an OK switch_floor line names the certificate that
+// sets the earliest trusted_until a switch could carry (its ValidBefore
+// plus 300 s), or says the log records none; a draining generation the
+// backend no longer holds gives no FAIL and exit code 0.
+func TestDoctorSwitch(t *testing.T) {
+	at := func(s string) uint64 {
+		t.Helper()
+		v, err := time.Parse(trust.TimeFormat, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return uint64(v.Unix()) //nolint:gosec // G115: after 1970
+	}
+	switched := func(t *testing.T) Facts {
+		t.Helper()
+		f := healthy(t)
+		f.Generations = []GenerationFact{
+			{Role: "user", Generation: 1, Fingerprint: "SHA256:aaa", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "draining", TrustedUntil: "2026-12-01T00:00:00Z"},
+			{Role: "user", Generation: 2, Fingerprint: "SHA256:bbb", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "active"},
+		}
+		return f
+	}
+	floorLines := func(rs []Result) []string {
+		var out []string
+		for _, r := range find(rs, "switch_floor") {
+			out = append(out, r.Line())
+		}
+		return out
+	}
+	t.Run("draining_key_held_fails", func(t *testing.T) {
+		f := switched(t)
+		f.DrainingHeld = []HeldFact{{Role: "user", Generation: 1, Fingerprint: "SHA256:aaa"}}
+		rs := Run(f)
+		r := requireOne(t, rs, FAIL, "draining_key_still_usable")
+		if want := "FAIL draining_key_still_usable: user generation 1 SHA256:aaa is still held by the backend"; r.Line() != want {
+			t.Fatalf("the line is\n%s\nwant\n%s", r.Line(), want)
+		}
+		if ExitCode(rs) != 1 {
+			t.Fatalf("ExitCode = %d, want 1", ExitCode(rs))
+		}
+	})
+	t.Run("switch_floor_shows_the_certificate", func(t *testing.T) {
+		f := switched(t)
+		f.SwitchFloors = []SwitchFloor{
+			{Role: "user", Generation: 2, HasCertificate: true, Serial: 42, KeyID: "kr1/ca=user/ser=42", ValidBefore: at("2026-12-01T00:00:00Z")},
+			{Role: "host", Generation: 1, HasCertificate: true, Serial: 7, KeyID: "kr1/ca=host/ser=7", ValidBefore: at("2027-01-01T12:00:00Z")},
+		}
+		got := floorLines(Run(f))
+		want := []string{
+			"OK switch_floor: user generation 2: the certificate that sets the earliest trusted_until a switch could carry is serial 42 (key ID kr1/ca=user/ser=42, valid until 2026-12-01T00:00:00Z); the earliest is 2026-12-01T00:05:00Z",
+			"OK switch_floor: host generation 1: the certificate that sets the earliest trusted_until a switch could carry is serial 7 (key ID kr1/ca=host/ser=7, valid until 2027-01-01T12:00:00Z); the earliest is 2027-01-01T12:05:00Z",
+		}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("the switch_floor lines are\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+	})
+	t.Run("switch_floor_adds_the_margin", func(t *testing.T) {
+		f := switched(t)
+		f.SwitchFloors = []SwitchFloor{{Role: "user", Generation: 2, HasCertificate: true, Serial: 9, KeyID: "k", ValidBefore: at("2026-12-31T23:57:00Z")}}
+		got := floorLines(Run(f))
+		if len(got) != 1 || !strings.HasSuffix(got[0], "valid until 2026-12-31T23:57:00Z); the earliest is 2027-01-01T00:02:00Z") {
+			t.Fatalf("the switch_floor lines %q do not name ValidBefore plus 300 s as the earliest", got)
+		}
+		f.SwitchFloors = []SwitchFloor{{Role: "user", Generation: 2, HasCertificate: true, Serial: 9, KeyID: "k", ValidBefore: math.MaxUint64, Saturated: true}}
+		got = floorLines(Run(f))
+		if len(got) != 1 || !strings.HasSuffix(got[0], "valid until forever); the earliest is none (that certificate never expires)") {
+			t.Fatalf("the switch_floor lines %q for a certificate that never expires", got)
+		}
+	})
+	t.Run("switch_floor_without_certificates", func(t *testing.T) {
+		f := switched(t)
+		f.SwitchFloors = []SwitchFloor{{Role: "machine", Generation: 1}}
+		got := floorLines(Run(f))
+		if want := "OK switch_floor: machine generation 1: the log records no certificate of this key; the earliest is the floor"; len(got) != 1 || got[0] != want {
+			t.Fatalf("the switch_floor lines are %q, want [%q]", got, want)
+		}
+	})
+	t.Run("no_draining_no_fact", func(t *testing.T) {
+		f := healthy(t)
+		f.Generations = []GenerationFact{{Role: "user", Generation: 1, Fingerprint: "SHA256:aaa", Alg: ssh.KeyAlgoED25519, Custody: "agent", State: "active"}}
+		rs := Run(f)
+		for _, code := range []string{"draining_key_still_usable", "draining_key_unchecked", "switch_floor"} {
+			requireNone(t, rs, code)
+		}
+	})
+	t.Run("draining_not_held_ok", func(t *testing.T) {
+		f := switched(t)
+		f.SwitchFloors = []SwitchFloor{{Role: "user", Generation: 2}}
+		rs := Run(f)
+		requireNone(t, rs, "draining_key_still_usable")
+		for _, r := range rs {
+			if r.Level == FAIL {
+				t.Fatalf("a draining generation the backend no longer holds gives %s", r)
+			}
+		}
+		if ExitCode(rs) != 0 {
+			t.Fatalf("ExitCode = %d, want 0", ExitCode(rs))
+		}
 	})
 }

@@ -94,10 +94,14 @@ var scryptWorkFactor = 0
 
 func init() { keystore.Register("software", open) }
 
-// The software backend keeps one key file per CA key generation (03-12).
+// The software backend keeps one key file per CA key generation (03-12),
+// says whether a generation's file is still present and removes it
+// (03-12e).
 var (
 	_ keystore.GenerationBackend     = (*backend)(nil)
 	_ keystore.GenerationProvisioner = (*backend)(nil)
+	_ keystore.GenerationHolder      = (*backend)(nil)
+	_ keystore.GenerationRemover     = (*backend)(nil)
 )
 
 type backend struct {
@@ -475,6 +479,111 @@ func (b *backend) KeyAt(role keystore.Role, generation uint32, fingerprint, _ st
 	b.privs = append(b.privs, priv)
 	b.mu.Unlock()
 	return &caKey{Signer: signer}, nil
+}
+
+// GenerationHeld reports whether the software key file of generation of
+// role is present in stateDir's key directory (03-12e): any directory
+// entry at its name counts, a regular file, a damaged file, a link
+// (dangling or not) or a directory, and only its absence is not held. It
+// needs no passphrase, so doctor can ask it. An error other than absence
+// is reported as held, with the error.
+func GenerationHeld(stateDir string, role keystore.Role, generation uint32) (bool, error) {
+	return (&backend{dir: filepath.Join(stateDir, "software")}).held(role, generation)
+}
+
+// held is GenerationHeld for b's key directory: os.Lstat of the
+// generation's file name, so a link is never followed.
+func (b *backend) held(role keystore.Role, generation uint32) (bool, error) {
+	path, err := b.keyPathAt(role, generation)
+	if err != nil {
+		return true, err
+	}
+	switch _, err := os.Lstat(path); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return true, fmt.Errorf("keystore software: %w", err)
+	}
+}
+
+// Holds reports whether the key file of generation of role is still
+// present (GenerationHeld); it ignores the fingerprint and the location
+// (03-12e).
+func (b *backend) Holds(role keystore.Role, generation uint32, _, _ string) (bool, error) {
+	return b.held(role, generation)
+}
+
+// RemoveGeneration removes the key file of generation (at least 1) of
+// role and fsyncs the key directory (03-12e). The directory must be
+// private. A missing file is done. A link at the name is unlinked without
+// being followed or decrypted, since it is no key. A regular file is
+// removed only after it decrypts with the passphrase to the key whose
+// SHA-256 fingerprint is fingerprint: another key refuses with
+// ErrGenerationFileMismatch, a file that cannot be read or decrypted with
+// ErrGenerationFileUndecryptable, and neither removes anything, because
+// the generation number alone never decides which key is destroyed.
+// Anything else at the name (a directory) is removed with os.Remove,
+// which fails on a non-empty directory. It ignores location.
+func (b *backend) RemoveGeneration(role keystore.Role, generation uint32, fingerprint, _ string) error {
+	if generation == 0 {
+		return fmt.Errorf("keystore software: no generation 0 of role %s", role)
+	}
+	path, err := b.keyPathAt(role, generation)
+	if err != nil {
+		return err
+	}
+	if err := checkPrivateDir(b.dir); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("keystore software: %w", err)
+	}
+	if fi.Mode().IsRegular() {
+		if err := b.checkFileKey(path, fingerprint); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("keystore software: remove %s: %w", path, err)
+	}
+	if err := syncDir(b.dir); err != nil {
+		return fmt.Errorf("keystore software: sync %s: %w", b.dir, err)
+	}
+	return nil
+}
+
+// checkFileKey requires the key file at path to decrypt with the
+// passphrase to the key whose SHA-256 fingerprint is fingerprint
+// (03-12e).
+func (b *backend) checkFileKey(path, fingerprint string) error {
+	enc, err := readPrivateFile(path)
+	if err != nil {
+		return fmt.Errorf("%w: %w", keystore.ErrGenerationFileUndecryptable, err)
+	}
+	pass, err := b.readPassphrase()
+	if err != nil {
+		return err
+	}
+	defer clear(pass)
+	priv, err := decryptKey(enc, pass)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", keystore.ErrGenerationFileUndecryptable, path, err)
+	}
+	defer clear(priv)
+	pub, err := ssh.NewPublicKey(priv.Public())
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", keystore.ErrGenerationFileUndecryptable, path, err)
+	}
+	if got := ssh.FingerprintSHA256(pub); got != fingerprint {
+		return fmt.Errorf("%w (%s)", keystore.ErrGenerationFileMismatch, got)
+	}
+	return nil
 }
 
 // decryptKey decrypts an armored age file with one scrypt recipient and

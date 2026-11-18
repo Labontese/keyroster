@@ -31,6 +31,62 @@ type RecoveryResult struct {
 	Imports      int
 	Revoked      int
 	Kept         int
+	// BeyondDrain names each carried certificate of a draining CA key of
+	// the bundle in force that is still live at the trusted_until of that
+	// entry (03-12e, RC-04). The recovery applies as before: it is named,
+	// never repaired.
+	BeyondDrain []BeyondDrain
+}
+
+// BeyondDrain is a certificate a recovery carries that a draining CA key
+// signed and whose ValidBefore is above the trusted_until of the entry
+// minus 300 s (krl.EntryLive at trusted_until), kept or revoked (03-12e):
+// a kept one stops working at trusted_until on every host that applied
+// the switch, before its own ValidBefore.
+type BeyondDrain struct {
+	Role         string
+	Generation   uint32
+	Serial       uint64
+	KeyID        string
+	ValidBefore  uint64
+	TrustedUntil string
+	Kept         bool
+}
+
+// String is the recover-revocations line of b (03-12e).
+func (b BeyondDrain) String() string {
+	state := "revoked"
+	if b.Kept {
+		state = "kept"
+	}
+	return fmt.Sprintf("warning: carried certificate serial %d (key ID %s, %s) of the draining %s CA generation %d is valid until %s, after %s minus 300 s; a kept one stops working at %s",
+		b.Serial, b.KeyID, state, b.Role, b.Generation, drainTime(b.ValidBefore), b.TrustedUntil, b.TrustedUntil)
+}
+
+// beyondDrain returns, for each carried certificate signed by the key of
+// a draining CA entry of b, a BeyondDrain when it is still live at the
+// trusted_until of that entry (03-12e). It decides nothing the recovery
+// applies.
+func beyondDrain(b *trust.Bundle, certs []recoveryCert) []BeyondDrain {
+	var out []BeyondDrain
+	for _, c := range certs {
+		for _, ca := range b.CAs {
+			if ca.State != "draining" {
+				continue
+			}
+			pub, err := trust.ParseKey(ca.Key)
+			if err != nil || !bytes.Equal(pub.Marshal(), c.CAKey) {
+				continue
+			}
+			tu, err := unixSeconds(ca.TrustedUntil)
+			if err != nil || !krl.EntryLive(c.ValidBefore, tu) {
+				continue
+			}
+			out = append(out, BeyondDrain{Role: ca.Role, Generation: ca.Generation, Serial: c.Serial, KeyID: c.KeyID,
+				ValidBefore: c.ValidBefore, TrustedUntil: ca.TrustedUntil, Kept: !c.Revoke})
+		}
+	}
+	return out
 }
 
 // recoveryRefusal is a recovery refusal: the reason name, with cause for
@@ -272,6 +328,7 @@ func (s *Signer) RecoverRevocations(ctx context.Context, data []byte) (*Recovery
 	res := &RecoveryResult{
 		RecoveryLeaf: recoveryLeaf, PublishLeaf: publishLeaf, KRLVersion: published.Version,
 		Entries: len(entries), Imports: len(imports), Revoked: revoked, Kept: len(certs) - revoked,
+		BeyondDrain: beyondDrain(s.bundle, certs),
 	}
 	s.log.Info("revocations recovered",
 		"entries", res.Entries,

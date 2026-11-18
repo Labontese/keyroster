@@ -102,6 +102,10 @@ func recoverRevocations(ctx context.Context, in io.Reader, stateDir string, back
 		// user stands in.
 		AllowUIDs: []uint32{uint32(os.Getuid())}, //nolint:gosec // G115: a uid fits uint32
 		Logger:    slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		// The recovery configuration (03-12e): no CA private key opens, so
+		// a database restored from before a switch recovers after
+		// retire-key removed the old key.
+		Recovery: true,
 	})
 	if err != nil {
 		return err
@@ -118,6 +122,11 @@ func recoverRevocations(ctx context.Context, in io.Reader, stateDir string, back
 	if _, err := fmt.Fprintf(stdout, "recovered: %d entries from %d imported KRLs, %d lost certificates revoked, %d kept; KRL v%d (log entries %d, %d)\n",
 		res.Entries, res.Imports, res.Revoked, res.Kept, res.KRLVersion, res.RecoveryLeaf, res.PublishLeaf); err != nil {
 		return err
+	}
+	for _, b := range res.BeyondDrain {
+		if _, err := fmt.Fprintln(stdout, b.String()); err != nil {
+			return err
+		}
 	}
 	// The recovery is committed: the restore hold can be released.
 	if err := releaseRestoreMarker(stateDir, stderr); err != nil {

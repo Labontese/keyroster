@@ -114,3 +114,63 @@ func KeyFor(b Backend, role Role, generation uint32, fingerprint, location strin
 	}
 	return b.Key(role, fingerprint)
 }
+
+// ErrHoldsUnsupported means a backend cannot say whether it still holds a
+// CA key generation: it does not implement GenerationHolder. Holds then
+// reports the key as held (03-12e): an unknown answer never lets a
+// draining key pass as removed.
+var ErrHoldsUnsupported = errors.New("keystore: the backend cannot say whether it holds a key generation")
+
+// The two refusals of a software key file's removal (03-12e). Their texts
+// are the reason retire-key prints after "not removed: ".
+var (
+	// ErrGenerationFileMismatch means the file at a generation's name
+	// holds another key than the generation's: it is not removed.
+	ErrGenerationFileMismatch = errors.New("the file holds another key")
+	// ErrGenerationFileUndecryptable means the file at a generation's
+	// name cannot be decrypted with the backend's passphrase, so it is
+	// not shown to hold the generation's key: it is not removed.
+	ErrGenerationFileUndecryptable = errors.New("the file cannot be decrypted")
+)
+
+// GenerationHolder is implemented by backends that can say whether they
+// still hold the key of a CA key generation (03-12e: software, agent).
+// Holds reports whether the key of generation of role, with fingerprint
+// and the generation row's location, is still present in the backend; an
+// error means the backend could not tell.
+type GenerationHolder interface {
+	Holds(role Role, generation uint32, fingerprint, location string) (bool, error)
+}
+
+// GenerationRemover is implemented by backends that can remove the key of
+// a CA key generation themselves (03-12e: software). RemoveGeneration
+// removes the key of generation of role with fingerprint and the
+// generation row's location; a key that is already absent is no error.
+type GenerationRemover interface {
+	RemoveGeneration(role Role, generation uint32, fingerprint, location string) error
+}
+
+// CertificateLister is implemented by backends whose entries can be
+// certificate identities of a key (03-12e: the agent backend).
+// Certificates returns every certificate entry whose underlying key has
+// fingerprint, so that retire-key can name each identity to remove.
+type CertificateLister interface {
+	Certificates(fingerprint string) ([]*ssh.Certificate, error)
+}
+
+// Holds reports whether b still holds the key of generation of role with
+// fingerprint and location (03-12e). It fails closed: a backend that does
+// not implement GenerationHolder returns true and ErrHoldsUnsupported, and
+// a backend whose Holds fails returns true and that error, so a caller
+// that refuses on a held key also refuses when the answer is unknown.
+func Holds(b Backend, role Role, generation uint32, fingerprint, location string) (bool, error) {
+	h, ok := b.(GenerationHolder)
+	if !ok {
+		return true, ErrHoldsUnsupported
+	}
+	held, err := h.Holds(role, generation, fingerprint, location)
+	if err != nil {
+		return true, err
+	}
+	return held, nil
+}

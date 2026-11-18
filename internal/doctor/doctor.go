@@ -34,6 +34,7 @@ package doctor
 import (
 	"fmt"
 	"io/fs"
+	"math"
 	"strings"
 	"time"
 
@@ -93,6 +94,10 @@ const (
 	CodeRestorePending           = "restore_recovery_pending"
 	CodeInstalledIssuedAfterNow  = "installed_issued_at_after_now"
 	CodeUnrecordedGenerationFile = "unrecorded_generation_file"
+	// A draining CA key the backend still holds, or one doctor could not
+	// check (03-12e).
+	CodeDrainingKeyUsable    = "draining_key_still_usable"
+	CodeDrainingKeyUnchecked = "draining_key_unchecked"
 )
 
 // Codes of OK results. Each names the check that passed.
@@ -110,6 +115,9 @@ const (
 	codeTPM       = "tpm"
 	// codeGenerations lists the CA key generations (03-12).
 	codeGenerations = "generations"
+	// codeSwitchFloor names the certificate that sets the earliest
+	// trusted_until a switch could carry (03-12e).
+	codeSwitchFloor = "switch_floor"
 )
 
 // Result is one finding.
@@ -192,6 +200,42 @@ type Facts struct {
 	// UnrecordedGenerationFiles are the {state-dir}/software/<role>-g<N>.age
 	// files that no generation row names (03-12).
 	UnrecordedGenerationFiles []string
+
+	// DrainingHeld are the generations of the installed bundle's draining
+	// CA entries that the backend still holds, or whose holding could not
+	// be checked (Unchecked set) (03-12e): serve refuses to start while
+	// any is held.
+	DrainingHeld []HeldFact
+	// SwitchFloors are, per CA role with an active key, the certificate
+	// of that key with the largest ValidBefore that the verified log
+	// records (03-12e): a switch of the role cannot end the key's trust
+	// before that ValidBefore plus 300 s.
+	SwitchFloors []SwitchFloor
+}
+
+// HeldFact is one generation of a draining CA entry that the backend
+// still holds (03-12e). Unchecked, when set, is why doctor could not ask
+// the backend; the generation is then not known to be gone.
+type HeldFact struct {
+	Role        string
+	Generation  uint32
+	Fingerprint string
+	Unchecked   string
+}
+
+// SwitchFloor is, for the active key of one CA role, the certificate the
+// log records with the largest ValidBefore (03-12e). HasCertificate is
+// false when the log records none of that key; Saturated is true when
+// ValidBefore plus 300 s does not fit in 64 bits (the certificate never
+// expires).
+type SwitchFloor struct {
+	Role           string
+	Generation     uint32
+	HasCertificate bool
+	Serial         uint64
+	KeyID          string
+	ValidBefore    uint64
+	Saturated      bool
 }
 
 // GenerationFact is one stored CA key generation (03-12): State is the
@@ -275,6 +319,7 @@ func Run(f Facts) []Result {
 	}
 	rs = append(rs, custodyResults(f)...)
 	rs = append(rs, generationResults(f)...)
+	rs = append(rs, switchResults(f)...)
 	if f.RestoreMarker != "" {
 		rs = append(rs, restoreMarkerResult(f.RestoreMarker))
 	}
@@ -287,6 +332,58 @@ func Run(f Facts) []Result {
 func restoreMarkerResult(marker string) Result {
 	return Result{Level: FAIL, Code: CodeRestorePending, Message: fmt.Sprintf(
 		"%s exists: this state directory was restored and no recovery has been applied or ruled out; serve, ca-init, install-bundle and ca-rotate prepare refuse until keyroster-signer recover-revocations applies the recovery, or its --no-recovery-needed rules it out (docs/runbooks/signer-install.md, restore step 2b)", marker)}
+}
+
+// switchResults are the facts of a CA switch (03-12e): a FAIL for each
+// draining generation the backend still holds, since serve refuses to
+// start while it does, a WARN for one doctor could not check, and per CA
+// role with an active key the certificate that sets the earliest
+// trusted_until a switch of that role could carry: its ValidBefore plus
+// trust.DrainMargin, which the switch install's binding requires.
+func switchResults(f Facts) []Result {
+	var rs []Result
+	for _, h := range f.DrainingHeld {
+		if h.Unchecked != "" {
+			rs = append(rs, Result{Level: WARN, Code: CodeDrainingKeyUnchecked, Message: fmt.Sprintf(
+				"%s generation %d %s: doctor could not check whether the backend still holds it (%s); serve refuses to start while it does: check the backend, then run keyroster-signer ca-rotate retire-key",
+				h.Role, h.Generation, h.Fingerprint, h.Unchecked)})
+			continue
+		}
+		rs = append(rs, Result{Level: FAIL, Code: CodeDrainingKeyUsable, Message: fmt.Sprintf(
+			"%s generation %d %s is still held by the backend", h.Role, h.Generation, h.Fingerprint)})
+	}
+	for _, s := range f.SwitchFloors {
+		if !s.HasCertificate {
+			rs = append(rs, Result{Level: OK, Code: codeSwitchFloor, Message: fmt.Sprintf(
+				"%s generation %d: the log records no certificate of this key; the earliest is the floor", s.Role, s.Generation)})
+			continue
+		}
+		earliest := "none (that certificate never expires)"
+		if !s.Saturated && s.ValidBefore <= math.MaxUint64-trust.DrainMargin {
+			earliest = switchTime(s.ValidBefore + trust.DrainMargin)
+		}
+		rs = append(rs, Result{Level: OK, Code: codeSwitchFloor, Message: fmt.Sprintf(
+			"%s generation %d: the certificate that sets the earliest trusted_until a switch could carry is serial %d (key ID %s, valid until %s); the earliest is %s",
+			s.Role, s.Generation, s.Serial, s.KeyID, switchTime(s.ValidBefore), earliest)})
+	}
+	return rs
+}
+
+// maxTimeFormat is 9999-12-31T23:59:59Z, the last second trust.TimeFormat
+// renders with four year digits.
+const maxTimeFormat = 253402300799
+
+// switchTime renders a certificate time in Unix seconds as the switch
+// install's refusal does (03-12e): in trust.TimeFormat up to 9999, as
+// "forever" for 2^64 - 1, and in seconds otherwise.
+func switchTime(u uint64) string {
+	switch {
+	case u <= maxTimeFormat:
+		return time.Unix(int64(u), 0).UTC().Format(trust.TimeFormat)
+	case u == math.MaxUint64:
+		return "forever"
+	}
+	return fmt.Sprintf("%d s after 1970", u)
 }
 
 // generationResults lists the CA key generations, warns about a software

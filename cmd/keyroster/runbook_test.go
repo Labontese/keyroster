@@ -784,3 +784,246 @@ func TestSectionWindowRefusals(t *testing.T) {
 		})
 	}
 }
+
+// switchRunuser is the prefix every signer command of the switch sections
+// of signer-install.md runs behind (03-12e).
+const switchRunuser = "runuser -u keyroster-signer -g keyroster-signer -G tss -- "
+
+// switchSections are the "## " sections of signer-install.md that hold the
+// switch install, the key removal and the restore from before a switch
+// (03-12e).
+var switchSections = []string{"Install a successor bundle: stop, install, start", "Snapshot restore: check the clock first"}
+
+// TestSignerInstallSwitchFences (03-12e): signer-install.md tells the
+// operator how to install a switch behind --previous, what each refusal
+// means, how retire-key removes the old key per backend and proves before
+// it removes, why serve and doctor refuse while the key is held, and how
+// to recover a restore older than the last switch; it reads as written in
+// its end state, naming no plan of this rotation outside a code span (the
+// later 03-13 is named).
+func TestSignerInstallSwitchFences(t *testing.T) {
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
+	flat := normalizeSpace(strings.ReplaceAll(data, "\\\n", " "))
+	for _, want := range []string{
+		"install_previous_required", "install_previous_not_extended", "drain_window_too_short", "drain_window_too_long",
+		"ca-rotate retire-key", "active_key_unusable", "draining_key_still_usable", "ssh-add -d", "SSH_AUTH_SOCK",
+		"deleted from the token", "a fresh export", "lost switch bundle", "does not hold the old key",
+		"is a prefix of the newest saved export", "03-13",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("signer-install.md lacks %q", want)
+		}
+	}
+	previous := false
+	for _, block := range fencedBlocks(data) {
+		for _, cmd := range joinContinued(block) {
+			if strings.Contains(cmd, "keyroster-signer install-bundle ") && strings.Contains(cmd, " --previous ") {
+				previous = true
+			}
+		}
+	}
+	if !previous {
+		t.Error("signer-install.md has no install-bundle command with --previous")
+	}
+	var prose strings.Builder
+	inBlock := false
+	for _, l := range strings.Split(data, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "```") {
+			inBlock = !inBlock
+			continue
+		}
+		if !inBlock {
+			prose.WriteString(l + "\n")
+		}
+	}
+	if bare := inlineSpan.ReplaceAllString(prose.String(), ""); strings.Contains(bare, "03-12e") {
+		t.Error("signer-install.md names 03-12e outside a code span; describe the rotation as written in its end state")
+	}
+}
+
+// TestSignerInstallSwitchPreviousCopy (03-12e pre-merge review): the switch
+// install block of signer-install.md removes an older incoming/previous.jsonl
+// as the signer's user before it copies the newest export in (set -C refuses
+// to overwrite, and a second switch is the normal case), and chains the rm,
+// the copy and install-bundle with && so the install never runs against a
+// stale export after a failed copy.
+func TestSignerInstallSwitchPreviousCopy(t *testing.T) {
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
+	win, err := sectionWindow(data, &signingSection{id: "switch", file: "signer-install.md", section: switchSections[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, b := range fencedBlocks(win) {
+		if slices.ContainsFunc(b, func(l string) bool {
+			return strings.Contains(l, "incoming/previous.jsonl") && strings.Contains(l, "set -C")
+		}) {
+			lines = b
+		}
+	}
+	if lines == nil {
+		t.Fatal("the switch section has no block that copies incoming/previous.jsonl in")
+	}
+	rm, cp, inst := -1, -1, -1
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "runuser -u keyroster-signer -- rm -f ") && strings.Contains(l, `"$S/incoming/previous.jsonl"`):
+			rm = i
+		case strings.HasPrefix(l, "runuser -u keyroster-signer -- sh -c ") && strings.Contains(l, "set -C") && strings.Contains(l, `"$S/incoming/previous.jsonl"`):
+			cp = i
+		case strings.HasPrefix(l, switchRunuser+"keyroster-signer install-bundle"):
+			inst = i
+		}
+	}
+	if rm < 0 || cp < 0 || inst < 0 {
+		t.Fatalf("the block lacks the rm as the signer's user (%d), the copy (%d) or the install (%d):\n%s", rm, cp, inst, strings.Join(lines, "\n"))
+	}
+	if rm >= cp || cp >= inst {
+		t.Errorf("order is rm %d, copy %d, install %d; want rm, then copy, then install", rm, cp, inst)
+	}
+	for name, i := range map[string]int{"rm": rm, "copy": cp} {
+		if !strings.HasSuffix(strings.TrimSpace(lines[i]), "&&") {
+			t.Errorf("the %s line does not end in && and so does not gate the next command: %q", name, lines[i])
+		}
+	}
+	if cp != rm+1 || inst != cp+1 {
+		t.Errorf("the rm, the copy and the install are not consecutive lines (%d, %d, %d)", rm, cp, inst)
+	}
+}
+
+// TestRunbookAuditVerifyPins (03-12e pre-merge review): trust.MatchPins needs
+// the pinned set to equal the bundle's root set, so every `keyroster audit
+// verify --pin SHA256:` command of the runbooks pins both roots; one pin
+// fails a valid export and sends the operator to escalate as for a fork.
+func TestRunbookAuditVerifyPins(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("..", "..", "docs", "runbooks", "*.md"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no runbooks found: %v", err)
+	}
+	signerInstall := 0
+	for _, f := range files {
+		for i, l := range strings.Split(string(readTestFile(t, f)), "\n") {
+			if !strings.Contains(l, "keyroster audit verify --pin SHA256:") {
+				continue
+			}
+			if filepath.Base(f) == "signer-install.md" {
+				signerInstall++
+			}
+			if n := strings.Count(l, "--pin SHA256:"); n != 2 {
+				t.Errorf("%s:%d pins %d roots, want both: %s", filepath.Base(f), i+1, n, strings.TrimSpace(l))
+			}
+		}
+	}
+	if signerInstall < 9 {
+		t.Errorf("signer-install.md has %d audit verify --pin commands, want at least 9", signerInstall)
+	}
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
+	lines := strings.Split(data, "\n")
+	restore := 0
+	for i, l := range lines {
+		if strings.Contains(l, "--previous /tmp/restored.jsonl <the newest saved export>") {
+			restore++
+			if i == 0 || strings.Count(lines[i-1], "--pin SHA256:") != 2 {
+				t.Errorf("the restore check at line %d does not pin both roots", i+1)
+			}
+		}
+	}
+	if restore != 1 {
+		t.Errorf("found %d restore step 5 checks, want 1", restore)
+	}
+}
+
+// TestSwitchRunbookLinkSafety (03-12e): the switch sections of
+// signer-install.md, which neither TestCARotationRunbookLinkSafety nor
+// TestSignerInstallGenesisLinkSafety reads, run nothing as root below the
+// signer's state directory: their fenced blocks pass signerDirLinkSafety
+// (their prose names the directory's files as nouns, so the inline spans
+// are not checked), and retire-key and install-bundle --previous run
+// behind the pinned runuser form. The fixture subtests pin the checker's
+// verdict on the root and runuser forms of both commands.
+func TestSwitchRunbookLinkSafety(t *testing.T) {
+	block := func(lines ...string) string { return "```\n" + strings.Join(lines, "\n") + "\n```\n" }
+	const (
+		retire  = "keyroster-signer ca-rotate retire-key --state-dir /var/lib/keyroster-signer --role user"
+		install = "keyroster-signer install-bundle --state-dir /var/lib/keyroster-signer --bundle /var/lib/keyroster-signer/incoming/bundle.json --policy /var/lib/keyroster-signer/incoming/policy.json --previous /root/export.jsonl"
+		// exempt is the one existing line of the restore section that names
+		// the state directory as root: it only prints its name.
+		exempt = `echo "$S is in use by another keyroster-signer process" >&2`
+	)
+	for _, c := range []struct {
+		name string
+		text string
+		bad  bool
+	}{
+		{"root_retire_key_refused", block(retire), true},
+		{"root_install_bundle_previous_refused", block(install), true},
+		{"runuser_retire_key_accepted", block(switchRunuser + retire), false},
+		{"runuser_install_bundle_previous_accepted", block(switchRunuser + install), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := signerDirLinkSafety(c.text); (len(got) != 0) != c.bad {
+				t.Fatalf("signerDirLinkSafety refused %q, want refused %t", got, c.bad)
+			}
+		})
+	}
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
+	windows := make([]string, 0, len(switchSections))
+	for _, section := range switchSections {
+		win, err := sectionWindow(data, &signingSection{id: section, file: "signer-install.md", section: section})
+		if err != nil {
+			t.Fatal(err)
+		}
+		windows = append(windows, win)
+	}
+	t.Run("switch_sections_pass_the_block_check", func(t *testing.T) {
+		for i, win := range windows {
+			var bad []string
+			for _, cmd := range signerDirLinkSafety(win) {
+				if cmd != exempt {
+					bad = append(bad, cmd)
+				}
+			}
+			if len(bad) != 0 {
+				t.Errorf("signer-install.md section %q runs, as root, below the signer's state directory:\n%s", switchSections[i], strings.Join(bad, "\n"))
+			}
+		}
+	})
+	t.Run("switch_sections_pin_the_runuser_forms", func(t *testing.T) {
+		retireForm, installForm := false, false
+		for _, win := range windows {
+			for _, b := range fencedBlocks(win) {
+				for _, cmd := range joinContinued(b) {
+					if strings.HasPrefix(cmd, switchRunuser+"keyroster-signer ca-rotate retire-key") {
+						retireForm = true
+					}
+					if strings.HasPrefix(cmd, switchRunuser+"keyroster-signer install-bundle") && strings.Contains(cmd, "--previous") {
+						installForm = true
+					}
+				}
+			}
+		}
+		if !retireForm || !installForm {
+			t.Fatalf("the switch sections lack the runuser form of retire-key (%t) or of install-bundle --previous (%t)", retireForm, installForm)
+		}
+	})
+}
+
+// TestCARotationAbortSentence (03-12e): ca-rotation.md's abort section no
+// longer promises a retire-key command for an aborted key: retire-key
+// removes draining keys only, and an aborted key is destroyed by hand.
+func TestCARotationAbortSentence(t *testing.T) {
+	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "ca-rotation.md")))
+	win, err := sectionWindow(data, &signingSection{id: "ca_abort_sentence", file: "ca-rotation.md", section: "Abort"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := normalizeSpace(win)
+	if strings.Contains(flat, "no retire-key command yet") {
+		t.Error("the abort section still says there is no retire-key command yet")
+	}
+	for _, want := range []string{"destroy the aborted key by hand", "retire-key removes draining keys only"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("the abort section lacks %q", want)
+		}
+	}
+}

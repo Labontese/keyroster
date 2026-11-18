@@ -2458,12 +2458,14 @@ func (rf *revokeFixture) revoke(req *wire.RevokeRequest, entries []tlog.RevokedE
 }
 
 // publishOpts changes a krl_publish entry before it is signed: its
-// version, issued_at (whole seconds), the entries the KRL is built from.
+// version, issued_at (whole seconds), the entries the KRL is built from,
+// and the bundle version it names (03-12e).
 type publishOpts struct {
 	version  uint64
 	issuedAt uint64
 	entries  []krl.Entry
 	data     []byte // the KRL bytes, instead of the ones built
+	bundle   uint64 // the bundle version in force
 }
 
 // publish logs a krl_publish entry as the signer writes one: issued at the
@@ -2472,7 +2474,7 @@ type publishOpts struct {
 // the ops key. edit (optional) changes the options first.
 func (rf *revokeFixture) publish(edit func(*publishOpts)) {
 	rf.t.Helper()
-	o := &publishOpts{issuedAt: rf.secs(), entries: rf.entries}
+	o := &publishOpts{issuedAt: rf.secs(), entries: rf.entries, bundle: 1}
 	o.version = max(rf.krlVersion+1, o.issuedAt)
 	if edit != nil {
 		edit(o)
@@ -2487,7 +2489,7 @@ func (rf *revokeFixture) publish(edit func(*publishOpts)) {
 		}
 	}
 	m := krl.Manifest{InstallationID: auditInstallationID, KRLVersion: o.version, KRLSHA256: krl.SHA256Hex(o.data),
-		IssuedAt: time.Unix(int64(o.issuedAt), 0).UTC().Format(trust.TimeFormat), BundleVersion: 1, LogIndex: uint64(len(rf.leaves))} //nolint:gosec // G115: test values
+		IssuedAt: time.Unix(int64(o.issuedAt), 0).UTC().Format(trust.TimeFormat), BundleVersion: o.bundle, LogIndex: uint64(len(rf.leaves))} //nolint:gosec // G115: test values
 	manifest, err := m.Canonical()
 	if err != nil {
 		rf.t.Fatal(err)
@@ -2496,7 +2498,7 @@ func (rf *revokeFixture) publish(edit func(*publishOpts)) {
 	if err != nil {
 		rf.t.Fatal(err)
 	}
-	body, err := (&tlog.KRLPublishBody{KRLVersion: o.version, BundleVersion: 1, IssuedAtSeconds: o.issuedAt,
+	body, err := (&tlog.KRLPublishBody{KRLVersion: o.version, BundleVersion: o.bundle, IssuedAtSeconds: o.issuedAt,
 		SHA256: sha256.Sum256(o.data), Manifest: manifest, Sig: sig}).Encode()
 	if err != nil {
 		rf.t.Fatal(err)
@@ -5032,4 +5034,464 @@ func encodeBody(t testing.TB, b interface{ Encode() ([]byte, error) }) []byte {
 		t.Fatal(err)
 	}
 	return enc
+}
+
+// switchLog is a log that starts at t0 with the genesis bundle issued at
+// t0, logs generation 2 of the user CA and adds it as next in bundle v2,
+// then logs one issue leaf of generation 1 issued at t0 plus 10 s for the
+// policy's user max_ttl_seconds, and returns the fixture, the v2 documents
+// and that certificate (03-12e).
+func switchLog(t *testing.T, t0 time.Time) (*fixture, docs, *ssh.Certificate) {
+	t.Helper()
+	return switchLogWith(t, t0, nil, "")
+}
+
+// switchLogWith is switchLog under root (nil: a new one) with a genesis
+// bundle that names installationID ("": none), so a revokeFixture can be
+// built on it and a fuzz seed verifies under another log's pins (03-12e).
+func switchLogWith(t testing.TB, t0 time.Time, root ssh.Signer, installationID string) (*fixture, docs, *ssh.Certificate) {
+	t.Helper()
+	f := newBareFixtureAt(t, "ed25519", t0)
+	if root != nil {
+		f.root = root
+	}
+	gb := f.genesis()
+	gb.IssuedAt = t0.UTC().Format(trust.TimeFormat)
+	gb.InstallationID = installationID
+	g := f.signDocs(gb, f.policy(), f.root)
+	f.addBundle(g)
+	k := newSigner(t, "ed25519")
+	f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, k.PublicKey()))
+	v2b := f.successor(g, func(b *trust.Bundle) {
+		e := trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(k.PublicKey()), Alg: k.PublicKey().Type(), Custody: "agent", State: "next", Generation: 2}
+		b.CAs = slices.Insert(slices.Clone(b.CAs), 1, e)
+	})
+	v2 := f.signDocs(v2b, f.policy(), f.root)
+	f.addBundle(v2)
+	var ttl uint64
+	for _, prof := range f.policy().CAProfiles {
+		if prof.Role == trust.RoleUser {
+			ttl = prof.MaxTTLSeconds
+		}
+	}
+	now := t0.Add(10 * time.Second)
+	f.serial = uint64(now.UnixMicro()) //nolint:gosec // G115: after 1970
+	f.micros = max(f.micros, f.serial)
+	f.request++
+	keyID := cert.KeyID{CA: "user", Subject: "u:alice", Request: strings.Repeat(hex.EncodeToString([]byte{f.request}), 16), Policy: 1, Serial: f.serial}
+	c, err := cert.Build(cert.Request{
+		Profile: cert.DefaultUserProfile(), Subject: newSigner(t, "ed25519").PublicKey(), Principals: []string{"alice"},
+		Now: now, ValidFor: time.Duration(ttl) * time.Second, KeyID: keyID, Serial: f.serial, //nolint:gosec // G115: a policy TTL
+	}, f.ca, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.add(tlog.KindIssue, issueBody(t, c, f.serial))
+	return f, v2, c
+}
+
+// switchBundle returns the successor of the bundle of d that makes the
+// user CA's next generation active and its active generation draining
+// until trustedUntil, in Unix seconds, under the policy of d (03-12e).
+func (f *fixture) switchBundle(d docs, trustedUntil uint64) docs {
+	f.t.Helper()
+	return f.switchBundleWith(d, trustedUntil, nil)
+}
+
+// switchBundleWith is switchBundle with edit (nil: none) applied to the
+// successor before it is signed (03-12e).
+func (f *fixture) switchBundleWith(d docs, trustedUntil uint64, edit func(*trust.Bundle)) docs {
+	f.t.Helper()
+	prev, err := trust.ParseBundle(d.bundle)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	pol, err := trust.ParsePolicy(d.policy)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	next := *prev
+	next.Version, next.Prev = d.version+1, trust.SHA256Hex(d.bundle)
+	next.CAs = slices.Clone(prev.CAs)
+	for i := range next.CAs {
+		switch ca := &next.CAs[i]; {
+		case ca.Role == trust.RoleUser && ca.State == "active":
+			ca.State = "draining"
+			ca.TrustedUntil = time.Unix(int64(trustedUntil), 0).UTC().Format(trust.TimeFormat) //nolint:gosec // G115: a test time
+		case ca.Role == trust.RoleUser && ca.State == "next":
+			ca.State = "active"
+		}
+	}
+	if edit != nil {
+		edit(&next)
+	}
+	return f.signDocs(&next, pol, f.root)
+}
+
+// addNext logs generation gen of the user CA (a new key) as a ca_generation
+// entry, then the successor of the bundle of d that adds it as next after
+// the role's last entry, under the policy of d, and returns that
+// successor's documents (03-12e).
+func (f *fixture) addNext(d docs, gen uint32) docs {
+	f.t.Helper()
+	k := newSigner(f.t, "ed25519")
+	f.add(tlog.KindCAGeneration, caGenBody(f.t, "user", gen, k.PublicKey()))
+	prev, err := trust.ParseBundle(d.bundle)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	pol, err := trust.ParsePolicy(d.policy)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	next := *prev
+	next.Version, next.Prev = d.version+1, trust.SHA256Hex(d.bundle)
+	last := 0
+	for i, ca := range prev.CAs {
+		if ca.Role == trust.RoleUser {
+			last = i
+		}
+	}
+	e := trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(k.PublicKey()), Alg: k.PublicKey().Type(), Custody: "agent", State: "next", Generation: gen}
+	next.CAs = slices.Insert(slices.Clone(prev.CAs), last+1, e)
+	nd := f.signDocs(&next, pol, f.root)
+	f.addBundle(nd)
+	return nd
+}
+
+// alignLeaf sets the fixture's leaf clock so that the next leaf's time is
+// the whole second secs, and returns it in microseconds (03-12e).
+func (f *fixture) alignLeaf(secs uint64) uint64 {
+	f.t.Helper()
+	if secs*1_000_000 <= f.micros {
+		f.t.Fatalf("alignLeaf(%d) is not after the leaf clock %d", secs, f.micros)
+	}
+	f.micros = secs*1_000_000 - 1
+	return secs * 1_000_000
+}
+
+// unixAt is the Unix seconds of a trust.TimeFormat time (03-12e).
+func unixAt(t testing.TB, s string) uint64 {
+	t.Helper()
+	at, err := time.Parse(trust.TimeFormat, s)
+	if err != nil || at.Unix() < 0 {
+		t.Fatalf("time %q: %v", s, err)
+	}
+	return uint64(at.Unix()) //nolint:gosec // G115: not before 1970, checked above
+}
+
+// TestDrainUpperBoundOverflow (03-12e): audit's copy of the signer's upper
+// bound refuses an overflow and never wraps, at the same edge as the
+// signer's copy (TestInstallUpperBound/overflow_refused): a maximum at
+// which the sum just fits gives 2^64 - 1, one more is an error. It is a
+// pure test because Verify cannot reach the overflow: a maximum that near
+// 2^64 makes the binding refuse first, and a leaf time cannot come near
+// it.
+func TestDrainUpperBoundOverflow(t *testing.T) {
+	const top, add = ^uint64(0), uint64(300 + 7*24*3600 + 300)
+	if got, err := drainUpperBound(1_800_000_000, 3600, 3600, top-add); err != nil || got != top {
+		t.Fatalf("drainUpperBound with maxVB %d = %d, %v; want %d", top-add, got, err, top)
+	}
+	for _, vb := range []uint64{top - add + 1, top} {
+		if got, err := drainUpperBound(1_800_000_000, 3600, 3600, vb); err == nil {
+			t.Fatalf("drainUpperBound with maxVB %d = %d, nil; want an overflow error", vb, got)
+		}
+	}
+	if got, err := drainUpperBound(top-100, 3600, 3600, 0); err == nil {
+		t.Fatalf("drainUpperBound with the leaf time near 2^64 = %d, nil; want an overflow error", got)
+	}
+}
+
+// TestVerifySwitchTracer (03-12e): audit re-derives the drain binding at a
+// switch's bundle_install from the leaves before it. A certificate of the
+// newly draining key valid until V leaves trust ending at V + 299 refused
+// with drain_window_too_short, and V + 300 verifies.
+func TestVerifySwitchTracer(t *testing.T) {
+	t0 := time.Now().UTC().Truncate(time.Second)
+	t.Run("binding_boundary", func(t *testing.T) {
+		f, v2, c := switchLog(t, t0)
+		f.addBundle(f.switchBundle(v2, c.ValidBefore+299))
+		if _, err := f.verify(join(f.lines()), nil); err == nil || !strings.Contains(err.Error(), "drain_window_too_short") {
+			t.Fatalf("Verify with trusted_until V + 299 = %v, want drain_window_too_short", err)
+		}
+		f, v2, c = switchLog(t, t0)
+		f.addBundle(f.switchBundle(v2, c.ValidBefore+300))
+		rep, err := f.verify(join(f.lines()), nil)
+		if err != nil {
+			t.Fatalf("Verify with trusted_until V + 300: %v", err)
+		}
+		if rep.BundleVersion != 3 {
+			t.Fatalf("the report names bundle version %d, want 3", rep.BundleVersion)
+		}
+	})
+}
+
+// TestVerifySwitch (03-12e): audit verify re-derives a switch from the
+// export alone. The key a switch activates must have been logged as next
+// (the shared chain rule, ErrVersionChain); the binding counts every leaf
+// kind that carries a certificate, carried ones included; the upper bound
+// is the signer's with the install leaf's time as its clock; a bundle with
+// a CA entry that is not active may not be issued after its install leaf's
+// time plus 300 s, which no log of active entries only is held to; and an
+// entry already draining is not bound again at a later install. The leaf
+// times of the clock cases are weeks in the past, so a verifier that reads
+// the wall clock instead of the leaf time fails them.
+func TestVerifySwitch(t *testing.T) {
+	past := time.Now().UTC().Add(-21 * 24 * time.Hour).Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second)
+	const userTTL = 43200 // the fixture policy's user max_ttl_seconds
+	const day = 24 * 3600 * 1_000_000
+	verified := func(t *testing.T, f *fixture, version uint64) {
+		t.Helper()
+		rep, err := f.verify(join(f.lines()), nil)
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		if rep.BundleVersion != version {
+			t.Fatalf("the report names bundle version %d, want %d", rep.BundleVersion, version)
+		}
+	}
+	// refusal requires Verify to refuse f's log with an error holding every
+	// one of want, and returns it; refusedWith drops it.
+	refusal := func(t *testing.T, f *fixture, want ...string) error {
+		t.Helper()
+		_, err := f.verify(join(f.lines()), nil)
+		if err == nil {
+			t.Fatalf("Verify accepted the log, want a refusal holding %q", want)
+		}
+		for _, w := range want {
+			if !strings.Contains(err.Error(), w) {
+				t.Fatalf("Verify: %v, want it to hold %q", err, w)
+			}
+		}
+		return err
+	}
+	refusedWith := func(t *testing.T, f *fixture, want ...string) {
+		t.Helper()
+		_ = refusal(t, f, want...)
+	}
+	t.Run("switch_activating_unlogged_key_refused", func(t *testing.T) {
+		f, g := initFixture(t, nil)
+		k := newSigner(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, k.PublicKey()))
+		issued := unixAt(t, mustBundle(t, g).IssuedAt)
+		// Generation 2 is logged but was never next: the switch skips the
+		// add-next step.
+		bad := f.successor(g, func(b *trust.Bundle) {
+			b.CAs = slices.Clone(b.CAs)
+			b.CAs[0].State = "draining"
+			b.CAs[0].TrustedUntil = time.Unix(int64(issued+userTTL+300), 0).UTC().Format(trust.TimeFormat) //nolint:gosec // G115: a test time
+			e := trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(k.PublicKey()), Alg: k.PublicKey().Type(), Custody: "agent", State: "active", Generation: 2}
+			b.CAs = slices.Insert(b.CAs, 1, e)
+		})
+		f.addBundle(f.signDocs(bad, f.policy(), f.root))
+		err := refusal(t, f, "CA user generation")
+		if !errors.Is(err, trust.ErrVersionChain) {
+			t.Fatalf("Verify: %v, want trust.ErrVersionChain from the shared chain rule", err)
+		}
+	})
+	t.Run("switch_activating_logged_key_ok", func(t *testing.T) {
+		f, v2, c := switchLog(t, now)
+		f.addBundle(f.switchBundle(v2, c.ValidBefore+300))
+		verified(t, f, 3)
+	})
+	t.Run("drain_binding_violated_refused", func(t *testing.T) {
+		f, v2, c := switchLog(t, now)
+		f.addBundle(f.switchBundle(v2, c.ValidBefore+299))
+		refusedWith(t, f, "drain_window_too_short", fmt.Sprintf("serial %d", c.Serial))
+	})
+	t.Run("carried_certificate_counts", func(t *testing.T) {
+		f, v2, c := switchLogWith(t, now, nil, auditInstallationID)
+		rf := &revokeFixture{fixture: f}
+		// A day later a recovery carries a lost certificate of generation 1,
+		// revoked, valid an hour past then: past every issue leaf's.
+		rf.micros += day
+		lost := rf.lostCert(rf.serial + 1000)
+		if lost.ValidBefore <= c.ValidBefore {
+			t.Fatalf("the carried certificate (valid before %d) does not outlive the logged one (%d)", lost.ValidBefore, c.ValidBefore)
+		}
+		rf.recover(nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: true}}, nil)
+		rf.publish(func(o *publishOpts) { o.bundle = 2 })
+		rf.addBundle(rf.switchBundle(v2, c.ValidBefore+300))
+		refusedWith(t, rf.fixture, "drain_window_too_short", fmt.Sprintf("serial %d", lost.Serial))
+	})
+	t.Run("login_certificate_counts", func(t *testing.T) {
+		lf := newLoginFixture(t, true)
+		lf.addDirectory(lf.directory(nil), nil)
+		k := newSigner(t, "ed25519")
+		lf.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, k.PublicKey()))
+		lf.installSuccessor(withNext(k.PublicKey(), 2))
+		// A day later a login_issue leaf records the only certificate of
+		// generation 1; the switch's floor is a day earlier.
+		lf.micros += day
+		lf.serial = lf.micros
+		l := lf.addLogin(nil, nil)
+		floor := unixAt(t, mustBundle(t, lf.docs).IssuedAt) + userTTL + 300
+		lf.addBundle(lf.switchBundle(lf.docs, floor))
+		refusedWith(t, lf.fixture, "drain_window_too_short", fmt.Sprintf("serial %d", l.serial))
+	})
+	// upperBound is a switch log in the past whose switch leaf is a day
+	// after its last leaf, on the whole second at, and the bound the signer
+	// computes there: at + the user max TTL (above the logged certificate's
+	// ValidBefore) + 300 + 7 d + 300.
+	upperBound := func(t *testing.T) (*fixture, docs, uint64) {
+		f, v2, c := switchLog(t, past)
+		at := f.micros/1_000_000 + 24*3600
+		f.alignLeaf(at)
+		if at+userTTL <= c.ValidBefore {
+			t.Fatal("the logged certificate sets the bound; the case needs the leaf time to")
+		}
+		return f, v2, at + userTTL + 300 + 7*24*3600 + 300
+	}
+	t.Run("upper_bound_violated_refused", func(t *testing.T) {
+		f, v2, bound := upperBound(t)
+		f.addBundle(f.switchBundle(v2, bound+1))
+		refusedWith(t, f, "drain_window_too_long", "above the latest acceptable "+time.Unix(int64(bound), 0).UTC().Format(trust.TimeFormat)) //nolint:gosec // G115: a test time
+	})
+	t.Run("upper_bound_at_limit_ok", func(t *testing.T) {
+		f, v2, bound := upperBound(t)
+		f.addBundle(f.switchBundle(v2, bound))
+		verified(t, f, 3)
+	})
+	// lateSwitch is a switch log in the past whose switch, issued at the
+	// switch leaf's whole-second time plus late seconds, ends trust at its
+	// floor; it returns the switch leaf's time.
+	lateSwitch := func(t *testing.T, late uint64) (*fixture, uint64) {
+		f, v2, _ := switchLog(t, past)
+		at := f.micros/1_000_000 + 10
+		us := f.alignLeaf(at)
+		issued := at + late
+		f.addBundle(f.switchBundleWith(v2, issued+userTTL+300, func(b *trust.Bundle) {
+			b.IssuedAt = time.Unix(int64(issued), 0).UTC().Format(trust.TimeFormat) //nolint:gosec // G115: a test time
+		}))
+		return f, us
+	}
+	t.Run("issued_at_after_install_leaf_refused", func(t *testing.T) {
+		f, us := lateSwitch(t, 301)
+		refusedWith(t, f, "issued_at_after_install_leaf", "trust bundle v3",
+			"after its install entry's time "+time.UnixMicro(int64(us)).UTC().Format(time.RFC3339Nano)+" plus 300 s") //nolint:gosec // G115: a test time
+		f, _ = lateSwitch(t, 300)
+		verified(t, f, 3)
+	})
+	t.Run("issued_at_rule_applies_to_next_bundles", func(t *testing.T) {
+		f := newBareFixtureAt(t, "ed25519", past)
+		gb := f.genesis()
+		gb.IssuedAt = past.Format(trust.TimeFormat)
+		g := f.signDocs(gb, f.policy(), f.root)
+		f.addBundle(g)
+		k := newSigner(t, "ed25519")
+		f.add(tlog.KindCAGeneration, caGenBody(t, "user", 2, k.PublicKey()))
+		at := f.micros/1_000_000 + 10
+		f.alignLeaf(at)
+		v2 := f.successor(g, func(b *trust.Bundle) {
+			withNext(k.PublicKey(), 2)(b)
+			b.IssuedAt = time.Unix(int64(at+301), 0).UTC().Format(trust.TimeFormat) //nolint:gosec // G115: a test time
+		})
+		f.addBundle(f.signDocs(v2, f.policy(), f.root))
+		refusedWith(t, f, "issued_at_after_install_leaf", "trust bundle v2")
+	})
+	t.Run("issued_at_rule_not_retroactive", func(t *testing.T) {
+		// A log of active entries only, from a ceremony machine whose clock
+		// ran a month ahead of the signer's.
+		f := newBareFixtureAt(t, "ed25519", past)
+		gb := f.genesis()
+		gb.IssuedAt = past.Add(30 * 24 * time.Hour).Format(trust.TimeFormat)
+		g := f.signDocs(gb, f.policy(), f.root)
+		f.addBundle(g)
+		f.addIssue()
+		v2 := f.successor(g, func(b *trust.Bundle) { b.IssuedAt = past.Add(31 * 24 * time.Hour).Format(trust.TimeFormat) })
+		f.addBundle(f.signDocs(v2, f.policy(), f.root))
+		f.addIssue()
+		verified(t, f, 2)
+	})
+	t.Run("issue_after_switch_by_draining_refused", func(t *testing.T) {
+		f, v2, c := switchLog(t, now)
+		f.addBundle(f.switchBundle(v2, c.ValidBefore+300))
+		f.addIssue() // signed by f.ca, generation 1, now draining
+		refusedWith(t, f, "not by the role's active CA")
+	})
+	t.Run("second_switch_while_draining_ok", func(t *testing.T) {
+		f, v2, c := switchLog(t, now)
+		v3 := f.switchBundle(v2, c.ValidBefore+300)
+		f.addBundle(v3)
+		v4 := f.addNext(v3, 3)
+		floor := unixAt(t, mustBundle(t, v4).IssuedAt) + userTTL + 300
+		f.addBundle(f.switchBundle(v4, floor))
+		verified(t, f, 5)
+	})
+	t.Run("second_switch_after_recovery_carried_certificate_ok", func(t *testing.T) {
+		f, v2, c := switchLogWith(t, now, nil, auditInstallationID)
+		rf := &revokeFixture{fixture: f}
+		end := c.ValidBefore + 300
+		v3 := rf.switchBundle(v2, end)
+		rf.addBundle(v3)
+		// After the switch a recovery carries a revoked certificate of the
+		// draining generation 1 that is valid past its trusted_until minus
+		// 300 s (RC-04).
+		rf.micros += day / 2
+		lost := rf.lostCert(rf.serial + 1000)
+		if lost.ValidBefore <= end-300 {
+			t.Fatalf("the carried certificate (valid before %d) does not outlive trusted_until %d minus 300 s", lost.ValidBefore, end)
+		}
+		rf.recover(nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: true}}, nil)
+		rf.publish(func(o *publishOpts) { o.bundle = 3 })
+		v4 := rf.addNext(v3, 3)
+		floor := unixAt(t, mustBundle(t, v4).IssuedAt) + userTTL + 300
+		rf.addBundle(rf.switchBundle(v4, floor))
+		verified(t, rf.fixture, 5)
+	})
+	t.Run("trusted_until_before_epoch_refused", func(t *testing.T) {
+		f, v2, _ := switchLog(t, now)
+		f.addBundle(f.switchBundleWith(v2, 0, func(b *trust.Bundle) {
+			for i := range b.CAs {
+				if b.CAs[i].State == "draining" {
+					b.CAs[i].TrustedUntil = "1969-12-31T23:59:59Z"
+				}
+			}
+		}))
+		err := refusal(t, f, "the switch floor cannot be computed")
+		if !errors.Is(err, trust.ErrVersionChain) {
+			t.Fatalf("Verify: %v, want trust.ErrVersionChain from the shared chain rule", err)
+		}
+	})
+	t.Run("install_without_leaf_time_fails_closed", func(t *testing.T) {
+		// install, which has no leaf time, must refuse a bundle that the
+		// leaf-time checks refuse at some leaf time: here a ceremony-1
+		// bundle with a next entry, issued now. The anchor holds the
+		// logged generation, so no other check can refuse it.
+		f := newBareFixtureAt(t, "ed25519", now)
+		g := f.signDocs(f.genesis(), f.policy(), f.root)
+		opts := Options{Pins: f.pins(), Threshold: 1}
+		var a anchor
+		if err := a.install(installBody(g), opts); err != nil {
+			t.Fatalf("install of the genesis bundle: %v", err)
+		}
+		k := newSigner(t, "ed25519")
+		gen, err := tlog.DecodeCAGenerationBody(caGenBody(t, "user", 2, k.PublicKey()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := a.addGeneration(gen); err != nil {
+			t.Fatal(err)
+		}
+		v2 := f.signDocs(f.successor(g, withNext(k.PublicKey(), 2)), f.policy(), f.root)
+		if err := a.install(installBody(v2), opts); err == nil || !strings.Contains(err.Error(), "issued_at_after_install_leaf") {
+			t.Fatalf("install of a next bundle without a leaf time: %v, want issued_at_after_install_leaf", err)
+		}
+	})
+}
+
+// mustBundle parses the bundle of d (03-12e).
+func mustBundle(t testing.TB, d docs) *trust.Bundle {
+	t.Helper()
+	b, err := trust.ParseBundle(d.bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// installBody is the bundle_install body of d (03-12e).
+func installBody(d docs) *tlog.BundleInstallBody {
+	return &tlog.BundleInstallBody{BundleVersion: d.version, Bundle: d.bundle, BundleSigs: d.bundleSigs, Policy: d.policy, PolicySigs: d.policySigs}
 }
