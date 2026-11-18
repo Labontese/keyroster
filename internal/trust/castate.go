@@ -177,8 +177,15 @@ func RoleMaxTTL(p *Policy, role string) (uint64, bool) {
 //   - one next entry becomes retired (an abort) with every other field
 //     unchanged;
 //   - the switch (03-12e): the role's next entry becomes active and its
-//     active entry becomes draining with a trusted_until, every other
-//     field of both unchanged, counted as one change.
+//     active entry becomes draining with a trusted_until at or above the
+//     switch floor, every other field of both unchanged, counted as one
+//     change. The floor is DrainFloor of next's issued_at and the larger
+//     of the role's max_ttl_seconds in prevPol and in nextPol: issued_at
+//     plus that TTL plus DrainMargin, which is the KRL prune margin, so a
+//     certificate issued at the ceremony's clock under either policy is
+//     dead on every host before the key it was signed by stops being
+//     trusted. An issued_at or a trusted_until before 1970 is refused (the
+//     floor cannot be computed), never converted to a wrapped value.
 //
 // Anything else is ErrVersionChain naming the role and the generation. The
 // count of a role's changes is checked before any addition's own
@@ -187,10 +194,9 @@ func RoleMaxTTL(p *Policy, role string) (uint64, bool) {
 // immutable and it never becomes retired or active again.
 // checkSuccessorChain runs it for the signer, every agent, audit, root
 // sign --prev and trust verify --prev; the client commands that only
-// verify a served bundle against the pins run no chain rule. 03-12e adds
-// the switch here; prevPol and nextPol are the previous and the new
-// policy, which its rule reads. Both bundles must already be structurally
-// valid.
+// verify a served bundle against the pins run no chain rule. prevPol and
+// nextPol are prev's and next's policies. Both bundles must already be
+// structurally valid.
 func checkCATransitions(prev, next *Bundle, prevPol, nextPol *Policy) error {
 	prevKeys := map[string]bool{}
 	addKey := func(where, key string) error {
@@ -228,7 +234,7 @@ func checkCATransitions(prev, next *Bundle, prevPol, nextPol *Policy) error {
 
 // checkRoleTransition applies checkCATransitions's rule to one role. added
 // collects the keys this successor adds, across roles.
-func checkRoleTransition(role string, prev, next *Bundle, _, _ *Policy, prevKeys, added map[string]bool) error {
+func checkRoleTransition(role string, prev, next *Bundle, prevPol, nextPol *Policy, prevKeys, added map[string]bool) error {
 	refuse := func(gen uint32, reason string) error {
 		return fmt.Errorf("%w: CA %s generation %d: %s", ErrVersionChain, role, gen, reason)
 	}
@@ -267,6 +273,9 @@ func checkRoleTransition(role string, prev, next *Bundle, _, _ *Policy, prevKeys
 			}
 		}
 		if jn >= 0 && ja >= 0 {
+			if reason := switchFloorReason(role, next.IssuedAt, after[ja].TrustedUntil, prevPol, nextPol); reason != "" {
+				return refuse(after[ja].Generation, reason)
+			}
 			used[jn], used[ja] = true, true
 			switched[pn], switched[pa] = true, true
 			changes = append(changes, prev.CAs[pa].Generation)
@@ -345,6 +354,49 @@ func checkRoleTransition(role string, prev, next *Bundle, _, _ *Policy, prevKeys
 		added[k] = true
 	}
 	return nil
+}
+
+// switchFloorReason is the reason a switch of role issued at issuedAt
+// whose draining entry ends at trustedUntil is refused, or "" (03-12e).
+func switchFloorReason(role, issuedAt, trustedUntil string, prevPol, nextPol *Policy) string {
+	const noFloor = "the switch floor cannot be computed: "
+	ttlPrev, okPrev := RoleMaxTTL(prevPol, role)
+	ttlNext, okNext := RoleMaxTTL(nextPol, role)
+	if !okPrev || !okNext {
+		return noFloor + "a policy has no " + role + " profile"
+	}
+	floor, err := DrainFloor(issuedAt, ttlPrev, ttlNext)
+	if err != nil {
+		return noFloor + err.Error()
+	}
+	end, err := time.Parse(TimeFormat, trustedUntil)
+	if err != nil {
+		return noFloor + fmt.Sprintf("trusted_until %q: %v", trustedUntil, err)
+	}
+	if end.Unix() < 0 {
+		return noFloor + "trusted_until " + trustedUntil + " is before 1970"
+	}
+	return switchFloorRefusal(floor, uint64(end.Unix())) //nolint:gosec // G115: not before 1970, checked above
+}
+
+// switchFloorRefusal is the pure rule of the switch floor (03-12e): ""
+// when trustedUntil is at or above floor, both Unix seconds, and the
+// refusal's reason otherwise.
+func switchFloorRefusal(floor, trustedUntil uint64) string {
+	if trustedUntil >= floor {
+		return ""
+	}
+	return fmt.Sprintf("trusted_until %s is before the switch floor %s (issued_at plus the larger max_ttl_seconds of the two policies plus 300 s)",
+		unixFormat(trustedUntil), unixFormat(floor))
+}
+
+// unixFormat renders Unix seconds u in TimeFormat, or as decimal seconds
+// when u is beyond what time.Unix takes (03-12e).
+func unixFormat(u uint64) string {
+	if u > math.MaxInt64 {
+		return fmt.Sprintf("%d s after 1970", u)
+	}
+	return time.Unix(int64(u), 0).UTC().Format(TimeFormat)
 }
 
 // roleEntry returns the index in cas of the first entry of role in state,

@@ -55,7 +55,10 @@ type CARef struct {
 // of o.CASwitch, first, the role's next entry becomes active and its
 // active entry draining until DrainFloor of o.IssuedAt and the role's
 // max_ttl_seconds in prevPolicy and in o.Policy, plus o.DrainAllowance
-// (the switch, 03-12e).
+// (the switch, 03-12e). The allowance must be a whole number of seconds
+// from 0 to MaxDrainAllowance, and a role of o.CASwitch must be user, host
+// or machine, named once and in no o.CANext entry or o.CARetire reference
+// (ErrInvalid).
 //
 // The result satisfies every rule of VerifySuccessor that does not involve
 // a signature (checkSuccessorChain, which the two share), and is refused
@@ -114,6 +117,21 @@ func BuildSuccessor(prev *Bundle, prevCanonical, prevPolicy []byte, o SuccessorO
 // and its active entry draining until the switch floor plus
 // o.DrainAllowance.
 func applySwitch(next *Bundle, prevPolicy []byte, o SuccessorOptions) error {
+	if o.DrainAllowance < 0 || o.DrainAllowance > MaxDrainAllowance || o.DrainAllowance%time.Second != 0 {
+		return fmt.Errorf("%w: the drain allowance %s must be a whole number of seconds from 0 to %s", ErrInvalid, o.DrainAllowance, MaxDrainAllowance)
+	}
+	for i, role := range o.CASwitch {
+		switch {
+		case !slices.Contains(caRoles, role):
+			return fmt.Errorf("%w: CA switch of role %q (want user, host or machine)", ErrInvalid, role)
+		case slices.Contains(o.CASwitch[:i], role):
+			return fmt.Errorf("%w: CA %s is switched twice", ErrInvalid, role)
+		case slices.ContainsFunc(o.CANext, func(e CAEntry) bool { return e.Role == role }):
+			return fmt.Errorf("%w: CA %s is switched and gains a next entry in one successor", ErrInvalid, role)
+		case slices.ContainsFunc(o.CARetire, func(r CARef) bool { return r.Role == role }):
+			return fmt.Errorf("%w: CA %s is switched and has an entry retired in one successor", ErrInvalid, role)
+		}
+	}
 	if len(o.CASwitch) == 0 {
 		return nil
 	}
@@ -125,7 +143,7 @@ func applySwitch(next *Bundle, prevPolicy []byte, o SuccessorOptions) error {
 	if err != nil {
 		return fmt.Errorf("policy: %w", err)
 	}
-	allowance := uint64(max(o.DrainAllowance, 0) / time.Second)
+	allowance := uint64(o.DrainAllowance / time.Second) //nolint:gosec // G115: not negative, checked above
 	for _, role := range o.CASwitch {
 		ni, ai := roleEntry(next.CAs, role, "next"), roleEntry(next.CAs, role, "active")
 		if ni < 0 {
