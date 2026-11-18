@@ -245,6 +245,13 @@ func checkSwitchInstall(lw *Signer, installed *trust.Bundle, _ *trust.Policy, b 
 	return notes, nil
 }
 
+// drainUpperBound is the latest trusted_until a switch install accepts
+// (03-12e): max(signerNow + the larger TTL, maxVB) + 300 +
+// MaxDrainAllowance + 300, an overflow being an error.
+func drainUpperBound(_, _, _, _ uint64) (uint64, error) {
+	return math.MaxUint64, nil
+}
+
 // newlyDraining returns the draining entries of b that installed (nil for
 // none) does not have as draining, by role and generation (03-12e).
 func newlyDraining(installed, b *trust.Bundle) []trust.CAEntry {

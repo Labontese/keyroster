@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -770,8 +773,8 @@ func drainRefusal(t *testing.T, err error, want ...string) {
 // IB-16 to IB-18 and IB-20 to IB-23 of the plan's fail-closed table.
 // Environments: drainEnv (admin issue leaves of the user and host roles,
 // and raw login_issue, issue, host_issue and revocation_recovery leaves),
-// hostEnv and machineEnv (host_issue and probe_issue under a lowered cap),
-// and rc04State (issue leaves and a recovery that carries a certificate).
+// hostEnv (host_issue, and probe_issue under a lowered machine cap), and
+// rc04State (issue leaves and a recovery that carries a certificate).
 func TestDrainBinding(t *testing.T) {
 	ctx := context.Background()
 	user := func(k *swKit) uint64 { return k.maxTTL(t, trust.RoleUser) }
@@ -1073,7 +1076,7 @@ func TestDrainBinding(t *testing.T) {
 
 // addNextDocs prepares one generation of each role, with the signer
 // stopped, and returns the successor issued at issuedAt that adds them as
-// next (ceremony 1, 03-12), unsigned by any install yet.
+// next (ceremony 1, 03-12), not yet installed.
 func (k *swKit) addNextDocs(t *testing.T, issuedAt time.Time, roles ...keystore.Role) [4][]byte {
 	t.Helper()
 	var d [4][]byte
@@ -1503,7 +1506,7 @@ func newDrainFuzzPool(t *testing.T) *drainFuzzPool {
 	return p
 }
 
-// drainFuzzLeaf builds the leaf of one fuzz op (kind, key, choice): kind
+// leaf builds the leaf of one fuzz op (kind, key, choice): kind
 // 0 issue, 1 login_issue, 2 host_issue, 3 machine_issue, 4 and 5
 // probe_issue (positive, negative), 6 a revocation_recovery that carries
 // two certificates, 7 refusal, 8 clock_regression; choice's low two bits
@@ -1629,4 +1632,381 @@ func FuzzDrainFeed(f *testing.F) {
 			}
 		}
 	})
+}
+
+// installPrev installs d at the clock with the signer stopped, behind the
+// checkpoint note previous (nil for none) (03-12e).
+func (k *swKit) installPrev(t *testing.T, d [4][]byte, previous []byte) ([]DrainNote, error) {
+	t.Helper()
+	var (
+		notes []DrainNote
+		err   error
+	)
+	k.stopped(t, func(db *signerdb.DB) {
+		_, notes, err = InstallBundleWithPrevious(context.Background(), db, k.gb, nil, 0, d[0], d[1], d[2], d[3], k.clk.Now, previous)
+	})
+	return notes, err
+}
+
+// checkpoint is the env's latest checkpoint note.
+func (k *swKit) checkpoint(t *testing.T) []byte {
+	t.Helper()
+	cp, _, err := k.e.db.LatestCheckpoint(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cp
+}
+
+// appendLeaves appends one clock_regression leaf per body seed to the
+// state database at path through a plain log writer, with no signer
+// running on it, and returns that database's latest checkpoint note.
+func (k *swKit) appendLeaves(t *testing.T, path string, seeds ...uint64) []byte {
+	t.Helper()
+	db, err := signerdb.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, s := range seeds {
+		body, err := (&tlog.ClockRegressionBody{NowMicros: s, HighWaterMicros: s + 1}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := appendRaw(db, k.e.fx, k.clk.Now, tlog.KindClockRegression, body); err != nil {
+			t.Fatalf("append a leaf: %v", err)
+		}
+	}
+	cp, _, err := db.LatestCheckpoint(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cp
+}
+
+// fork returns a checkpoint of a copy of the env's state that holds one
+// more leaf, after appending a different leaf to the env's own log: the
+// two logs have the same size and different roots (03-12e).
+func (k *swKit) fork(t *testing.T) []byte {
+	t.Helper()
+	var cp []byte
+	k.stopped(t, func(*signerdb.DB) {
+		cp = k.appendLeaves(t, copyState(t, k.e.dbPath), 7)
+		k.appendLeaves(t, k.e.dbPath, 9)
+	})
+	return cp
+}
+
+// handSwitch is the root-signed switch of role issued at issuedAt with
+// trusted_until tu, edited by hand (editedSuccessor), so that its end may
+// lie further beyond the floor than BuildSuccessor's MaxDrainAllowance.
+func (k *swKit) handSwitch(t *testing.T, issuedAt time.Time, role string, tu uint64) [4][]byte {
+	t.Helper()
+	return editedSuccessor(t, k.e.db, func(b *trust.Bundle) {
+		for i := range b.CAs {
+			switch ca := &b.CAs[i]; {
+			case ca.Role == role && ca.State == "next":
+				ca.State = "active"
+			case ca.Role == role && ca.State == "active":
+				ca.State, ca.TrustedUntil = "draining", unixTime(tu)
+			}
+		}
+		b.IssuedAt = issuedAt.UTC().Format(trust.TimeFormat)
+	}, nil, k.e.fx.Root)
+}
+
+// TestInstallUpperBound (03-12e, UB-01 to UB-04): the latest trusted_until
+// a switch install accepts is max(signer-now + the larger TTL, maxVB) +
+// 300 + MaxDrainAllowance + 300, it never falls below the binding, and an
+// overflow is refused. The table is drainUpperBound's; the leaves install
+// switches edited by hand, since BuildSuccessor caps the allowance.
+func TestInstallUpperBound(t *testing.T) {
+	const week = uint64(7 * 24 * 3600)
+	for _, r := range []struct {
+		name                     string
+		now, prev, next, vb, out uint64
+	}{
+		{"normal", 1_800_000_000, 3600, 7200, 1_800_000_100, 1_800_000_000 + 7200 + 300 + week + 300},
+		{"max_valid_before_above_now_plus_ttl", 1_800_000_000, 7200, 3600, 1_900_000_000, 1_900_000_000 + 300 + week + 300},
+		{"equality_at_the_limit", 1_800_000_000, 3600, 3600, 1_800_003_600, 1_800_003_600 + 600 + week},
+	} {
+		if got, err := drainUpperBound(r.now, r.prev, r.next, r.vb); err != nil || got != r.out {
+			t.Errorf("%s: drainUpperBound = %d, %v; want %d", r.name, got, err, r.out)
+		}
+	}
+	// bound is the upper bound of a user switch installed at now over
+	// drainEnv's log, whose user maximum is below now plus the TTL.
+	bound := func(k *swKit, now time.Time) uint64 {
+		return uint64(now.Unix()) + k.maxTTL(t, trust.RoleUser) + 600 + week //nolint:gosec // G115: after 1970
+	}
+	t.Run("drain_window_too_long_refused", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		b := bound(k, k.now())
+		done := k.unchanged(t)
+		_, err := k.install(t, k.handSwitch(t, at, trust.RoleUser, b+1), true)
+		if !errors.Is(err, ErrDrainWindowTooLong) || !strings.Contains(err.Error(), "the switch of CA user ends trust at "+unixTime(b+1)+", above the latest acceptable "+unixTime(b)) {
+			t.Fatalf("a switch one second above the bound: %v, want drain_window_too_long naming %s", err, unixTime(b))
+		}
+		done()
+	})
+	t.Run("upper_bound_at_limit_ok", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		if _, err := k.install(t, k.handSwitch(t, at, trust.RoleUser, bound(k, k.now())), true); err != nil {
+			t.Fatalf("a switch exactly at the bound: %v", err)
+		}
+	})
+	t.Run("upper_bound_never_below_binding", func(t *testing.T) {
+		// A logged certificate valid for 60 days, beyond signer-now plus
+		// the cap: the bound follows its ValidBefore, so the earliest
+		// trusted_until the binding accepts passes.
+		k, at := drainEnv(t)
+		k.at(t, at.Add(5*time.Second))
+		vb := uint64(at.Unix()) + 60*86400 //nolint:gosec // G115: after 1970
+		k.stopped(t, func(db *signerdb.DB) {
+			s := nextSerial(t, db)
+			blob := gen1Cert(t, k.e.fx, keystore.RoleUser, s, vb).Marshal()
+			enc, err := (&tlog.IssueBody{CARole: uint8(wire.CARoleUser), Serial: s, PolicyVersion: 1, Cert: blob, KeyID: "kid"}).Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			appendIssued(t, db, k.e.fx, k.clk.Now, tlog.KindIssue, enc, s, "user", blob)
+		})
+		k.at(t, at.Add(10*time.Second))
+		if vb+300 <= bound(k, k.now()) {
+			t.Fatal("the certificate does not outlive the clock-based bound; the case proves nothing")
+		}
+		if _, err := k.install(t, k.handSwitch(t, at, trust.RoleUser, vb+300), true); err != nil {
+			t.Fatalf("a switch at the certificate's ValidBefore plus 300 s: %v", err)
+		}
+	})
+	t.Run("overflow_refused", func(t *testing.T) {
+		// Pure: an install cannot reach the overflow, because a maximum
+		// near 2^64 makes the binding refuse first (no trusted_until in
+		// TimeFormat reaches it).
+		for _, vb := range []uint64{math.MaxUint64, math.MaxUint64 - 600 - week + 1} {
+			if got, err := drainUpperBound(1_800_000_000, 3600, 3600, vb); err == nil {
+				t.Fatalf("drainUpperBound with maxVB %d = %d, nil; want an overflow error", vb, got)
+			}
+		}
+		if _, err := drainUpperBound(math.MaxUint64-100, 3600, 3600, 0); err == nil {
+			t.Fatal("drainUpperBound with signer-now near 2^64 = nil error; want an overflow error")
+		}
+	})
+	t.Run("clock_far_ahead_raises_the_bound", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		normal := bound(k, k.now())
+		k.at(t, at.Add(30*24*time.Hour))
+		if _, err := k.install(t, k.handSwitch(t, at, trust.RoleUser, normal+86400), true); err != nil {
+			t.Fatalf("a switch a day above the bound of the earlier clock, installed 30 days later: %v", err)
+		}
+	})
+}
+
+// TestInstallPrevious (03-12e, PV-01 to PV-06 and IB-19): a switch
+// install needs --previous; whenever it is given it must be a checkpoint
+// of this log, signed by the log key, covering at least one entry, that
+// the log extends (no larger size, the same root at its size); a
+// non-switch install needs none.
+func TestInstallPrevious(t *testing.T) {
+	sw := func(k *swKit, at time.Time) [4][]byte { return k.switchDocs(t, at, 0, trust.RoleUser) }
+	t.Run("switch_without_previous_refused", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		done := k.unchanged(t)
+		if _, err := k.installPrev(t, sw(k, at), nil); !errors.Is(err, ErrInstallPreviousRequired) {
+			t.Fatalf("a switch without --previous: %v, want install_previous_required", err)
+		}
+		done()
+	})
+	t.Run("previous_invalid_refused", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		other, _ := drainEnv(t)
+		pub := k.e.fx.Roles[keystore.RoleLog].PublicKey()
+		ns, err := tlog.NewNoteSigner(tlog.Origin(pub), k.e.fx.Roles[keystore.RoleLog])
+		if err != nil {
+			t.Fatal(err)
+		}
+		empty := sha256.Sum256(nil)
+		zero, err := tlog.SignCheckpoint(tlog.Checkpoint{Origin: tlog.Origin(pub), Size: 0, Root: empty[:]}, ns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, cp := range map[string][]byte{"garbage": []byte("not a checkpoint"), "another log's key": other.checkpoint(t), "size 0": zero} {
+			done := k.unchanged(t)
+			if _, err := k.installPrev(t, sw(k, at), cp); !errors.Is(err, ErrInstallPreviousInvalid) {
+				t.Fatalf("%s: %v, want install_previous_invalid", name, err)
+			}
+			done()
+		}
+	})
+	t.Run("previous_larger_than_log_refused", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		var cp []byte
+		k.stopped(t, func(*signerdb.DB) { cp = k.appendLeaves(t, copyState(t, k.e.dbPath), 1, 3) })
+		done := k.unchanged(t)
+		if _, err := k.installPrev(t, sw(k, at), cp); !errors.Is(err, ErrInstallPreviousNotExtended) {
+			t.Fatalf("a checkpoint larger than the log: %v, want install_previous_not_extended", err)
+		}
+		done()
+	})
+	t.Run("previous_forked_refused", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		cp := k.fork(t)
+		done := k.unchanged(t)
+		if _, err := k.installPrev(t, sw(k, at), cp); !errors.Is(err, ErrInstallPreviousNotExtended) {
+			t.Fatalf("a checkpoint of a fork of the same size: %v, want install_previous_not_extended", err)
+		}
+		done()
+	})
+	t.Run("previous_ok", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		if _, err := k.installPrev(t, sw(k, at), k.checkpoint(t)); err != nil {
+			t.Fatalf("a switch behind the log's own checkpoint: %v", err)
+		}
+		k, at = drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		prefix := k.checkpoint(t)
+		k.stopped(t, func(*signerdb.DB) { k.appendLeaves(t, k.e.dbPath, 5) })
+		if _, err := k.installPrev(t, sw(k, at), prefix); err != nil {
+			t.Fatalf("a switch behind a checkpoint of a prefix of the log: %v", err)
+		}
+	})
+	t.Run("previous_checked_when_given", func(t *testing.T) {
+		k, at := drainEnv(t)
+		k.at(t, at.Add(10*time.Second))
+		prefix := k.checkpoint(t)
+		cp := k.fork(t)
+		done := k.unchanged(t)
+		if _, err := k.installPrev(t, k.policyDocs(t, at), cp); !errors.Is(err, ErrInstallPreviousNotExtended) {
+			t.Fatalf("a policy-only install behind a forked checkpoint: %v, want install_previous_not_extended", err)
+		}
+		done()
+		if _, err := k.installPrev(t, k.policyDocs(t, at), prefix); err != nil {
+			t.Fatalf("a policy-only install behind a prefix: %v", err)
+		}
+	})
+	t.Run("non_switch_needs_no_previous", func(t *testing.T) {
+		r := rc04State(t)
+		at2 := r.k.ceremonyTime(t)
+		if notes, err := r.k.installPrev(t, r.k.addNextDocs(t, at2, keystore.RoleUser), nil); err != nil || len(notes) != 0 {
+			t.Fatalf("an add-next on the RC-04 state with no --previous: %d notes, %v", len(notes), err)
+		}
+		at3 := r.k.ceremonyTime(t)
+		if notes, err := r.k.installPrev(t, r.k.policyDocs(t, at3), nil); err != nil || len(notes) != 0 {
+			t.Fatalf("a policy-only install on the RC-04 state with no --previous: %d notes, %v", len(notes), err)
+		}
+	})
+}
+
+// BenchmarkInstallBundleDrainScan (03-12e) times the scan a switch install
+// performs (rebuildLogFromWith with the drain option) over a log of n
+// certificate leaves: issue and login_issue leaves, each with its
+// issuance row, from a pool of certificates reused under fresh serials
+// and appended in batched transactions. It reports the heap in use after
+// a forced collection, which must not grow with n beyond the hash list.
+// It runs only with -bench; leaves=5000000 also needs
+// KEYROSTER_BENCH_LARGE=1.
+func BenchmarkInstallBundleDrainScan(b *testing.B) {
+	for _, n := range []int{100_000, 1_000_000, 5_000_000} {
+		b.Run(fmt.Sprintf("leaves=%d", n), func(b *testing.B) {
+			if n > 1_000_000 && os.Getenv("KEYROSTER_BENCH_LARGE") != "1" {
+				b.Skip("set KEYROSTER_BENCH_LARGE=1 to run leaves=5000000")
+			}
+			fx := NewFixture(b, 1, 1)
+			path := filepath.Join(b.TempDir(), "signer.db")
+			db, err := signerdb.Open(path)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			be := newMemBackend(fx)
+			fx.Bootstrap(b, db, be, nil)
+			logKey, err := be.Key(keystore.RoleLog, ssh.FingerprintSHA256(fx.Roles[keystore.RoleLog].PublicKey()))
+			if err != nil {
+				b.Fatal(err)
+			}
+			ctx := context.Background()
+			var pool [][]byte
+			ca := fx.Roles[keystore.RoleUser]
+			for i := range 64 {
+				// Signed by hand, as signTestCert does (a benchmark has no
+				// *testing.T for it).
+				c := &ssh.Certificate{Key: fx.Roles[keystore.RoleHost].PublicKey(), Serial: uint64(i + 1), CertType: ssh.UserCert, KeyId: "kid", //nolint:gosec // G115: a small index
+					ValidPrincipals: []string{"alice"}, ValidAfter: 1, ValidBefore: 1_900_000_000 + uint64(i), Nonce: make([]byte, 32), SignatureKey: ca.PublicKey()} //nolint:gosec // G115: a small index
+				out := c.Marshal()
+				sig, err := ca.Sign(rand.Reader, out[:len(out)-4])
+				if err != nil {
+					b.Fatal(err)
+				}
+				c.Signature = sig
+				pool = append(pool, c.Marshal())
+			}
+			serial, err := db.LastSerial(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for done := 0; done < n; {
+				lw, err := newLogWriter(ctx, db, logKey, time.Now)
+				if err != nil {
+					b.Fatal(err)
+				}
+				err = lw.logTx(ctx, func(tx *sql.Tx) error {
+					for j := 0; j < 5000 && done < n; j++ {
+						serial++
+						blob := pool[done%len(pool)]
+						kind := tlog.KindIssue
+						enc, err := (&tlog.IssueBody{CARole: uint8(wire.CARoleUser), Serial: serial, PolicyVersion: 1, Cert: blob, KeyID: "kid"}).Encode()
+						if done%2 == 1 {
+							kind = tlog.KindLoginIssue
+							enc, err = (&tlog.LoginIssueBody{Serial: serial, PolicyVersion: 1, DirectoryVersion: 1, Request: []byte("r"),
+								Evidence: []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: []byte("a")}}, Cert: blob, KeyID: "kid"}).Encode()
+						}
+						if err != nil {
+							return err
+						}
+						is := signerdb.Issuance{Serial: serial, CARole: "user", KeyID: "kid", Cert: blob, IssuedAt: time.Now()}
+						binary.BigEndian.PutUint64(is.RequestID[:8], serial)
+						if err := db.InsertIssuance(tx, is); err != nil {
+							return err
+						}
+						if err := db.SetLastSerial(tx, serial); err != nil {
+							return err
+						}
+						if _, err := lw.appendLocked(ctx, tx, tlog.Leaf{TimeMicros: micros(time.Now()), Kind: kind, Body: enc}); err != nil {
+							return err
+						}
+						done++
+					}
+					return nil
+				})
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			pub := fx.Roles[keystore.RoleLog].PublicKey()
+			v, err := tlog.NewNoteVerifier(tlog.Origin(pub), pub)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ResetTimer()
+			for range b.N {
+				_, _, inst, err := rebuildLogFromWith(ctx, db, v, rebuildOptions{drain: true})
+				if err != nil || inst.drain == nil {
+					b.Fatalf("the scan: %v", err)
+				}
+			}
+			b.StopTimer()
+			runtime.GC()
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			b.ReportMetric(float64(ms.HeapInuse), "heap-inuse-bytes")
+		})
+	}
 }

@@ -774,3 +774,124 @@ func writeSoftwareKeys(t *testing.T, stateDir, passphrase string) map[string]str
 	}
 	return fps
 }
+
+// switchFlagState is a state with ceremony 1 of the user CA installed
+// (03-12e): it returns the state, the genesis documents, the root-signed
+// switch successor that makes generation 2 active and generation 1
+// draining (allowance 0, issued a second after ceremony 1) and an
+// export-log file of the state as it is.
+func switchFlagState(t *testing.T) (*rotateState, genesisDocs, chainDocs, string) {
+	t.Helper()
+	st := newRotateState(t)
+	g := genesisFiles(t, st)
+	install(t, st, g)
+	_, pf := prepareNext(t, st, "user")
+	v2 := installNext(t, st, g, genesisChain(t, g), pf)
+	issued, err := time.Parse(trust.TimeFormat, v2.b.IssuedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := trust.BuildSuccessor(v2.b, v2.canon, v2.polDoc, trust.SuccessorOptions{
+		Roots: v2.b.Root.Keys, Threshold: 1, Policy: v2.polDoc,
+		IssuedAt: issued.Add(time.Second).Format(trust.TimeFormat), InstallationID: v2.b.InstallationID,
+		CASwitch: []string{trust.RoleUser},
+	})
+	if err != nil {
+		t.Fatalf("BuildSuccessor: %v", err)
+	}
+	canon, err := b.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	export := filepath.Join(t.TempDir(), "export.jsonl")
+	if code, msg := runSigner(t, "export-log", "--state-dir", st.dir, "--out", export); code != 0 {
+		t.Fatalf("export-log exited %d:\n%s", code, msg)
+	}
+	return st, g, chainDocs{b: b, canon: canon, p: v2.p, polDoc: v2.polDoc}, export
+}
+
+// installSwitch runs install-bundle on the switch c, signed by g's root,
+// with the extra arguments args.
+func installSwitch(t *testing.T, st *rotateState, g genesisDocs, c chainDocs, args ...string) (int, string) {
+	t.Helper()
+	bundle, policy := writeSignedDocs(t, c.b, c.p, g.root)
+	return runSigner(t, append([]string{"install-bundle", "--state-dir", st.dir, "--bundle", bundle, "--policy", policy}, args...)...)
+}
+
+// TestInstallBundlePreviousFlag (03-12e): install-bundle --previous reads
+// the checkpoint from the last line of an export-log file (at most its
+// last 1 MiB) and refuses a file without one; a switch without --previous
+// is refused; the state lock's restore gate comes first; a switch install
+// prints one drain line per newly draining entry.
+func TestInstallBundlePreviousFlag(t *testing.T) {
+	refused := func(t *testing.T, code int, out, want string) {
+		t.Helper()
+		if code == 0 || !strings.Contains(out, want) {
+			t.Fatalf("install-bundle exited %d, want a refusal holding %q:\n%s", code, want, out)
+		}
+	}
+	t.Run("export_file_last_line_is_the_checkpoint", func(t *testing.T) {
+		st, g, c, export := switchFlagState(t)
+		if code, out := installSwitch(t, st, g, c, "--previous", export); code != 0 || !strings.Contains(out, "installed bundle version 3") {
+			t.Fatalf("install-bundle --previous of the export exited %d:\n%s", code, out)
+		}
+	})
+	t.Run("no_checkpoint_line_refused", func(t *testing.T) {
+		st, g, c, export := switchFlagState(t)
+		data, err := os.ReadFile(export) //nolint:gosec // G304: the test's own export file
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.SplitAfter(strings.TrimRight(string(data), "\n"), "\n")
+		f := filepath.Join(t.TempDir(), "leaves-only.jsonl")
+		if err := os.WriteFile(f, []byte(strings.Join(lines[:len(lines)-1], "")), 0o600); err != nil { //nolint:gosec // G703: a fixed name in the test's temporary directory
+			t.Fatal(err)
+		}
+		code, out := installSwitch(t, st, g, c, "--previous", f)
+		refused(t, code, out, "install_previous_invalid")
+	})
+	t.Run("empty_file_refused", func(t *testing.T) {
+		st, g, c, _ := switchFlagState(t)
+		f := filepath.Join(t.TempDir(), "empty.jsonl")
+		if err := os.WriteFile(f, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, out := installSwitch(t, st, g, c, "--previous", f)
+		refused(t, code, out, "install_previous_invalid")
+	})
+	t.Run("oversize_last_line_refused", func(t *testing.T) {
+		st, g, c, _ := switchFlagState(t)
+		f := filepath.Join(t.TempDir(), "oversize.jsonl")
+		if err := os.WriteFile(f, []byte(`{"checkpoint":"`+strings.Repeat("a", 1<<20)+`"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, out := installSwitch(t, st, g, c, "--previous", f)
+		refused(t, code, out, "install_previous_invalid")
+	})
+	t.Run("refused_under_restore_marker", func(t *testing.T) {
+		st, g, c, export := switchFlagState(t)
+		if err := os.WriteFile(filepath.Join(st.dir, "restore-recovery-pending"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, out := installSwitch(t, st, g, c, "--previous", export)
+		refused(t, code, out, "restore_recovery_pending")
+	})
+	t.Run("drain_line_printed", func(t *testing.T) {
+		st, g, c, export := switchFlagState(t)
+		var tu string
+		for _, ca := range c.b.CAs {
+			if ca.Role == trust.RoleUser && ca.State == "draining" {
+				tu = ca.TrustedUntil
+			}
+		}
+		code, out := installSwitch(t, st, g, c, "--previous", export)
+		if want := "drain user generation 1 until " + tu + "; the last certificate the log records for it is valid until none recorded"; code != 0 || !strings.Contains(out, want) {
+			t.Fatalf("install-bundle exited %d; want the line %q:\n%s", code, want, out)
+		}
+	})
+	t.Run("switch_without_previous_refused_by_the_command", func(t *testing.T) {
+		st, g, c, _ := switchFlagState(t)
+		code, out := installSwitch(t, st, g, c)
+		refused(t, code, out, "install_previous_required")
+	})
+}
