@@ -418,7 +418,7 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		_, _ = fmt.Fprintln(stderr, "root sign: --ca-next, --ca-next-fingerprint and --ca-retire need --prev")
 		return errUsage
 	}
-	changes, err := parseCAChanges(caNext, caNextFP, caRetire)
+	changes, err := parseCAChanges(caNext, caNextFP, caRetire, nil)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "root sign: "+err.Error())
 		return errUsage
@@ -590,8 +590,9 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if prev != nil {
 		_, _ = io.WriteString(stdout, successorHeader(prev, prevBundle, b))
 		// What the successor does to the CA entries and the root set,
-		// before the summary (03-12b).
-		_, _ = io.WriteString(stdout, rootceremony.CAChanges(prev, b)+rootceremony.RootSetLine(prev, b))
+		// before the summary (03-12b), with the policy in force and the
+		// successor's (03-12e2).
+		_, _ = io.WriteString(stdout, rootceremony.CAChanges(prev, b, policyOrNil(prevPolicy), pol)+rootceremony.RootSetLine(prev, b))
 		if prev.Root.Threshold == 1 {
 			_, _ = io.WriteString(stderr, threshold1Warning)
 		}

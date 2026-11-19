@@ -184,8 +184,9 @@ func verifySuccessorBundle(stdout io.Writer, prevDir, prevSHA string, bundle, bu
 	}
 	_, _ = fmt.Fprintf(stdout, "Successor of trust bundle v%d, sha256 %s\n", prev.Version, trust.SHA256Hex(prevBundle))
 	// What the successor does to the CA entries and the root set, before
-	// the summary, as root sign prints it (03-12b).
-	_, _ = io.WriteString(stdout, rootceremony.CAChanges(prev, next)+rootceremony.RootSetLine(prev, next))
+	// the summary, as root sign prints it (03-12b), with both policies
+	// (03-12e2).
+	_, _ = io.WriteString(stdout, rootceremony.CAChanges(prev, next, policyOrNil(prevPolicy), p)+rootceremony.RootSetLine(prev, next))
 	_, _ = io.WriteString(stdout, rootceremony.Summary(next, p))
 	// root sign's installation line, after the summary and before the
 	// policy block (03-14c, render-05).
@@ -215,6 +216,19 @@ func verifySuccessorBundle(stdout io.Writer, prevDir, prevSHA string, bundle, bu
 	_, _ = fmt.Fprintf(stdout, "OK: successor of trust bundle v%d: previous roots %d of %d signed both documents (threshold %d); new roots %d of %d signed both documents (threshold %d, pinned)\n",
 		prev.Version, prevBoth, len(prevRoots), prev.Root.Threshold, newBoth, len(newRoots), next.Root.Threshold)
 	return nil
+}
+
+// policyOrNil parses a policy document for the CA-change section
+// (03-12e2): nil when it does not parse, so the section's advice reads
+// unknown and the section never refuses. Its callers pass the policy in
+// force, which BuildSuccessor (root sign) or VerifySuccessor (trust verify)
+// has already parsed.
+func policyOrNil(data []byte) *trust.Policy {
+	p, err := trust.ParsePolicy(data)
+	if err != nil {
+		return nil
+	}
+	return p
 }
 
 // rootKeyMap returns b's root keys by SHA256 fingerprint.

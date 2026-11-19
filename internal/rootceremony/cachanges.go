@@ -19,8 +19,9 @@ import (
 // where the fingerprint is the SHA256 fingerprint of the entry's key, old
 // is the state in prev or "none" for an added entry, and new is the state
 // in next or "removed" for an entry next lacks (which the chain rule
-// refuses, so only a direct call prints it).
-func CAChanges(prev, next *trust.Bundle) string {
+// refuses, so only a direct call prints it). The two policies are prev's
+// and next's (03-12e2).
+func CAChanges(prev, next *trust.Bundle, _, _ *trust.Policy) string {
 	type ref struct {
 		role int
 		gen  uint32

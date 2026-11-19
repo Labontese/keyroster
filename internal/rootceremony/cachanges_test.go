@@ -49,14 +49,14 @@ func seededCA(t *testing.T, role string, n byte, state string, gen uint32) (trus
 func TestCAChanges(t *testing.T) {
 	t.Run("unchanged", func(t *testing.T) {
 		prev, next := caPairs(t, nil)
-		if got := CAChanges(prev, next); got != "CA entries: unchanged\n" {
+		if got := CAChanges(prev, next, nil, nil); got != "CA entries: unchanged\n" {
 			t.Fatalf("CAChanges = %q", got)
 		}
 	})
 	t.Run("added_next", func(t *testing.T) {
 		add, fp := seededCA(t, trust.RoleUser, 40, "next", 2)
 		prev, next := caPairs(t, func(_, next *trust.Bundle) { next.CAs = slices.Insert(next.CAs, 1, add) })
-		if got, want := CAChanges(prev, next), "CA user gen 2 "+fp+": none -> next\n"; got != want {
+		if got, want := CAChanges(prev, next, nil, nil), "CA user gen 2 "+fp+": none -> next\n"; got != want {
 			t.Fatalf("CAChanges = %q, want %q", got, want)
 		}
 	})
@@ -67,7 +67,7 @@ func TestCAChanges(t *testing.T) {
 			e.State = "retired"
 			next.CAs = slices.Insert(next.CAs, 1, e)
 		})
-		if got, want := CAChanges(prev, next), "CA user gen 2 "+fp+": next -> retired\n"; got != want {
+		if got, want := CAChanges(prev, next, nil, nil), "CA user gen 2 "+fp+": next -> retired\n"; got != want {
 			t.Fatalf("CAChanges = %q, want %q", got, want)
 		}
 	})
@@ -79,14 +79,14 @@ func TestCAChanges(t *testing.T) {
 			next.CAs = slices.Insert(next.CAs, 1, u)
 		})
 		want := "CA user gen 2 " + ufp + ": none -> next\nCA host gen 2 " + hfp + ": none -> next\n"
-		if got := CAChanges(prev, next); got != want {
+		if got := CAChanges(prev, next, nil, nil); got != want {
 			t.Fatalf("CAChanges = %q, want %q", got, want)
 		}
 	})
 	t.Run("removed_shown", func(t *testing.T) {
 		e, fp := seededCA(t, trust.RoleUser, 40, "retired", 2)
 		prev, next := caPairs(t, func(prev, _ *trust.Bundle) { prev.CAs = slices.Insert(prev.CAs, 1, e) })
-		if got, want := CAChanges(prev, next), "CA user gen 2 "+fp+": retired -> removed\n"; got != want {
+		if got, want := CAChanges(prev, next, nil, nil), "CA user gen 2 "+fp+": retired -> removed\n"; got != want {
 			t.Fatalf("CAChanges = %q, want %q", got, want)
 		}
 	})
@@ -98,7 +98,7 @@ func TestCAChanges(t *testing.T) {
 		u2, u2fp := seededCA(t, trust.RoleUser, 44, "next", 2)
 		prev, next := caPairs(t, func(_, next *trust.Bundle) { next.CAs = append([]trust.CAEntry{m3, u5}, append(next.CAs, u2)...) })
 		want := "CA user gen 2 " + u2fp + ": none -> next\nCA user gen 5 " + u5fp + ": none -> next\nCA machine gen 3 " + mfp + ": none -> next\n"
-		if got := CAChanges(prev, next); got != want {
+		if got := CAChanges(prev, next, nil, nil); got != want {
 			t.Fatalf("CAChanges = %q, want %q", got, want)
 		}
 	})

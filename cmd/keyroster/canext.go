@@ -162,7 +162,7 @@ type caChanges struct {
 // the three flags (a repeated flag included), and a fingerprint for every
 // --ca-next role and for no other. A refusal is the text root sign prints
 // after "root sign: ".
-func parseCAChanges(next, fingerprint, retire []string) (*caChanges, error) {
+func parseCAChanges(next, fingerprint, retire, _ []string) (*caChanges, error) {
 	c := &caChanges{next: map[string]string{}, fingerprint: map[string]string{}}
 	named := map[string]int{}
 	var order []string
