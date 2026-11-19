@@ -14,7 +14,7 @@ requirements-completed: []
 actuals:
   tokens: 105000   # chars/4 over the realized diff against 034b1d9 (the tracking edits included) plus this SUMMARY
   tasks: 4         # Tasks 1 to 4; Task 5 is the owner's merge
-  commits: 9       # git rev-list --count 034b1d9..HEAD: S1, R1, T1, R2, W2, D7, G3, P4 and this SUMMARY's commit
+  commits: 13      # git rev-list --count 034b1d9..HEAD: S1, R1, T1, R2, W2, D7, G3, P4, the first SUMMARY commit, the three pre-merge review fix commits and the review's SUMMARY commit
 plan_head_before: 034b1d91f8362c3446e3a3ba7226c8642d92f651
 ---
 
@@ -33,7 +33,7 @@ plan file sha256: e179d8cad7dc2328a00daebe33c005ca8bda3047112e2d903c2ee5b30c3938
 - **Session 2 (2026-11-19):** the orchestrator's rulings on session 1 recorded under Deviations; before Task 3, one docs commit D7 a7688d0 (deviation 7) fixed the ceremony-2 advice bullet and the rollback residual of ca-rotation.md and the stale host-setup.md sentence (deviation 4). Task 3's precondition (stop guard and base values after `git fetch origin`, origin/main still 034b1d9) exited 0.
 - **Task 3 done in session 2:** G3 27d871a; local pre-check of both rotation tests on 9.5p1 and 10.5p1, gates and deviations 8 to 10 recorded below. The session stopped after G3 because G3's first verify command cannot pass as written (deviation 10).
 - **Session 3 (2026-11-19): Task 4 up to the green PR** (see "Task 4"), after the orchestrator's rulings on deviations 7 to 10 (under "Orchestrator rulings (session 3)"): P4 15fc2a4, the base re-measured and the delta and full gates, the push, PR #111, the first CI run, the tracking update and this SUMMARY.
-- **Next step:** the pre-merge review (the orchestrator's, on the green PR), then Task 5 (the owner's merge). Nothing of the review has run yet; its section below says so.
+- **Next step:** Task 5 (the owner's merge). The pre-merge review ran and its first fix round is recorded under "Pre-merge review" below (deviation 11).
 - **Open RED/mutant state:** none. No file is in a mutant state.
 
 ## Test time
@@ -175,6 +175,8 @@ Task 2's mutants, each applied to ca-rotation.md at W2 (e7104c2) and run with `g
 
 10. **G3's first verify command cannot pass as written (stopped for a ruling).** Its last leg, `test "$(MSYS_NO_PATHCONV=1 git show "$G3:$W" | grep -cF -- '-count=1 -timeout 20m -v')" -eq 1`, counts every line of e2e.yml that holds the string, and origin/main already has two: the main `e2e` job's run line (:65) and the `e2e-rotation` job's (:170). It reads 2 at G3^ and at G3, so it fails on any tree that keeps the main e2e job, which the same command's normalised diff requires. Evidence for the ruling, not a substitute gate: every other leg of the command passes, the normalised diff is empty (the timeouts, the job name and the matrix compared by value), and the rotation job's run line carries `-count=1 -timeout 20m -v` exactly once. e2e.yml was not edited to make the count read 1, G3 was not amended, and the plan file was not touched. Per the dispatch's stop rule the executor stopped after G3 and before P4.
 
+11. **Pre-merge review, fix round 1: the above-cap advice text is superseded (review item B, `d2d0dd2`).** The plan's "The output contract" fixes `install by unknown (advice: the allowance <a> is above the cap of 168h0m0s, so the signer refuses this switch)` for an allowance above `trust.MaxDrainAllowance`. The review showed that this claim is false: the signer's upper bound on `trusted_until` (`drainUpperBound` in internal/signer/drain.go, and the same derivation in the audit verifier) is measured from the install clock, so it accepts an allowance up to the cap plus 300 s plus the time between `issued_at` and the install, and host agents enforce no cap. Only a hand-built successor that already carries the roots' threshold of signatures can print the line, because `root sign` caps the flag. The text is now `install by unknown (advice: the allowance <a> is above the cap of 168h0m0s, which root sign never builds; do not install or distribute this bundle)`, in `rootceremony.installBy` (and its doc comment), its test and ca-rotation.md, which also says that the cap is the root holders' check. The plan file is the historical contract and is not edited; this entry supersedes its text for this line. The signer's code is unchanged.
+
 ### Orchestrator rulings (session 2)
 
 - Deviations 1, 2, 3 and 5 are accepted as recorded.
@@ -233,8 +235,8 @@ As the PR body lists it: the host drain, the machine CA and the host CA against 
 
 ## Open items for the pre-merge review
 
-- **The above-cap advice text.** `install by unknown (advice: the allowance <a> is above the cap of 168h0m0s, so the signer refuses this switch)` stays as "The output contract" fixes it (orchestrator, session 3); the review decides whether "so the signer refuses this switch" is right for every successor that can print it (the signer's own upper bound is `drain_window_too_long`, which depends on the signer's clock and the newest logged ValidBefore, not on the allowance alone).
-- **W2's staged diff** was not read again in full after its last edit (deviation 6, accepted); the review reads every committed file in full.
+- **The above-cap advice text.** Resolved by the pre-merge review: the text was wrong for a successor the signer would accept, and fix round 1 replaced it (deviation 11, `d2d0dd2`).
+- **W2's staged diff** was not read again in full after its last edit (deviation 6, accepted); the review read every committed file in full.
 
 ## Pre-existing issues (not this plan's)
 
@@ -242,9 +244,26 @@ As the PR body lists it: the host drain, the machine CA and the host CA against 
 
 ## Pre-merge review
 
-Not run yet. The orchestrator runs it on the green PR, before Task 5; its results, any fix rounds and their checks, and the IDs of the CI runs of the head it reviews are added here by its own docs commit. If the owner merges first, this section will say that the review ran after the merge or did not run.
+The review ran on the green PR #111 at head 52ba88b (base 034b1d9): two Opus lenses, a Codex reviewer at high effort, and Sonnet skeptics that tried to disprove each result. Four review items were confirmed by independent skeptics and fixed in round 1; the other results the skeptics refuted need no change.
+
+| Item | Severity | Fix commit | What changed |
+|------|----------|------------|--------------|
+| A | medium | `22b89c9` | ca-rotation.md: each export (after ceremony 1's install and after the switch's restart) is copied onto the transfer medium by the signer's user right after it is taken, chained with `&&`, its `/tmp` copy is removed, and the audit verify reads the copy on the medium. "Install the switch" no longer takes an export from the signer box: the switch's `previous.jsonl` copy reads `/media/transfer/export.jsonl` only, after `rm -f` of the old file, under `umask 077` and `set -C`, chained to `install-bundle`. The `install_previous_invalid` advice says never to take a fresh export from the box to get past it, and the second export says to move the earlier `export.jsonl` aside and keep it. Pinned by `exports_leave_the_box` in TestCARotationSwitchRunbook and by the source check of the `previous.jsonl` copy in TestCARotationInstallBlocks. No code changed. |
+| B | low | `d2d0dd2` | The above-cap advice text; see deviation 11. |
+| C | low | `cbda777` | TestRootSignSwitchFlags gains `successor_policy_lowers_the_user_max_ttl` and `successor_policy_raises_the_user_max_ttl`: the successor's `--policy` changes the user max_ttl in the same ceremony as `--ca-switch user`, and both root sign's display and `trust verify --prev` must print `trusted until` = issued_at + max(policy in force, successor) max_ttl + 300 s + allowance and `install by` = issued_at + allowance. |
+| D | low | `22b89c9` | ca-rotation.md, "Install the switch": after a refusal other than `install_previous_not_extended` (which goes to the restore section), destroy the refused files and start the signer with `systemctl start keyroster-signer.service`, which serves the bundle in force with the old key still active; repeat ceremony 2 later. Pinned by `refusal_restarts_the_signer`. |
+
+A and D share one commit because both edit the same section of the runbook and its test file.
+
+**Bite checks** (scratch edit, run, restore; the restored files were compared by sha256). A: the `previous.jsonl` copy reading `/tmp/ca-rotation.jsonl`, the cat to the medium dropped from ceremony 1's block, the removal of the second `/tmp` copy dropped, and the `&&` after the export copy in the switch's install block dropped each failed TestCARotationSwitchRunbook/`exports_leave_the_box` or TestCARotationInstallBlocks/`install_the_switch`. D: the sentence reworded, and the start block removed, each failed `refusal_restarts_the_signer`. C: passing the successor policy twice and passing the policy in force twice, at cmd/keyroster/root.go:623 and at cmd/keyroster/trust.go:189, one at a time, failed the lowered case and the raised case respectively (four runs, four failures); both files then matched the committed blobs (root.go aa148184..., trust.go c019329b...).
+
+**Gates on the fix head `cbda777`:** `go vet ./...`, gofmt, `go test -race` of internal/rootceremony and cmd/keyroster (on the tree before the last three one-line and prose edits; the final tree passed `go test -count=1` of both), golangci-lint `0 issues` under linux, windows and darwin, and the windows and darwin vet and build of cmd/keyroster and internal/rootceremony. One G115 lint hit in a new test line was fixed with a `nolint` comment before the push.
+
+**CI on `cbda777`** (pull_request runs): CI 44504001220, E2E 44504001053, E2E distro 44504001111, E2E PKCS#11 44504001003, E2E TPM 44504001208, PIV 44504001064, Systemd 44504001206, CodeQL 44504001324, PR title 44504001157, Workflow lint 44504000959. All 31 checks passed (the 30 required ones and CodeQL), no rerun needed.
+
+The plan text for review item B is superseded by this SUMMARY (deviation 11). Auto-merge was not enabled and nothing was merged or approved in this round.
 
 ## Self-Check: PASSED
 
-- The commits S1 5df3d76, R1 003efce, T1 e3fd9e7, R2 14123d4, W2 e7104c2, D7 a7688d0, G3 27d871a and P4 15fc2a4 are ancestors of HEAD.
+- The commits S1 5df3d76, R1 003efce, T1 e3fd9e7, R2 14123d4, W2 e7104c2, D7 a7688d0, G3 27d871a and P4 15fc2a4, and the review fix commits 22b89c9, d2d0dd2 and cbda777, are ancestors of HEAD.
 - The two goldens and this SUMMARY exist; the plan file's blob at P4 has the sha256 above.
