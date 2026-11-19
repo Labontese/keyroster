@@ -580,6 +580,26 @@ func TestCeremonyGolden(t *testing.T) {
 		})
 	})
 
+	t.Run("successor_ca_switch", func(t *testing.T) {
+		// Ceremony 2 (03-12e2): the user CA's next key becomes active and
+		// its active key drains, with the default allowance of 24h.
+		f := newGoldenFixture(t)
+		f.nextInForce(t, 40)
+		setCeremonyNow(t, "2026-10-07T00:00:00Z")
+		ca := []string{"--ca-switch", "user", "--drain-allowance", "24h"}
+		pol, out := filepath.Join(f.prev, "policy.json"), filepath.Join(f.dir, "out")
+		rs := f.display(t, pol, out, f.fpA, ca...)
+		f.signWith(t, pol, out, f.fpA, ca...)
+		f.signWith(t, pol, out, f.fpB, ca...)
+		tv := f.verifyPrev(t, out)
+		t.Run("root_sign", func(t *testing.T) {
+			checkCeremony(t, kindSuccessorRootSign, "successor_ca_switch.root_sign", rs, true)
+		})
+		t.Run("trust_verify", func(t *testing.T) {
+			checkCeremony(t, kindSuccessorTrustVerify, "successor_ca_switch.trust_verify", tv, true)
+		})
+	})
+
 	t.Run("genesis_pop", func(t *testing.T) {
 		f := newGoldenFixture(t)
 		setCeremonyNow(t, "2026-10-05T00:00:00Z")

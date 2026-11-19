@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -132,5 +134,43 @@ func FuzzParseCANextFile(f *testing.F) {
 		if err != nil || !bytes.Equal(re, data) {
 			t.Fatalf("accepted %q, which re-encodes to %q (%v)", data, re, err)
 		}
+	})
+}
+
+// TestParseCAChangesSwitch (03-12e2): --ca-switch names a role of user,
+// host and machine, and the one-change-per-role rule spans all four CA
+// flags. Each refusal is a usage error, which root sign turns into exit 2.
+func TestParseCAChangesSwitch(t *testing.T) {
+	const once = "at most one CA change per role: user is named more than once"
+	refused := func(t *testing.T, want string, next, fingerprint, retire, switchRoles []string) {
+		t.Helper()
+		c, err := parseCAChanges(next, fingerprint, retire, switchRoles)
+		var u usageError
+		if err == nil || !errors.As(err, &u) || err.Error() != want {
+			t.Fatalf("parseCAChanges(%q, %q, %q, %q) = %+v, %v; want the usage refusal %q", next, fingerprint, retire, switchRoles, c, err, want)
+		}
+	}
+	t.Run("switch_role_ok", func(t *testing.T) {
+		c, err := parseCAChanges(nil, nil, nil, []string{"user", "host"})
+		if err != nil || !slices.Equal(c.switchRoles, []string{"user", "host"}) {
+			t.Fatalf("--ca-switch user --ca-switch host: %+v, %v; want the switch roles user and host", c, err)
+		}
+		// A switch of one role beside a next entry of another.
+		c, err = parseCAChanges([]string{"host=host-g2.json"}, []string{"host=SHA256:x"}, nil, []string{"user"})
+		if err != nil || !slices.Equal(c.switchRoles, []string{"user"}) || c.next["host"] != "host-g2.json" {
+			t.Fatalf("--ca-switch user beside --ca-next host: %+v, %v", c, err)
+		}
+	})
+	t.Run("switch_and_next_same_role_refused", func(t *testing.T) {
+		refused(t, once, []string{"user=user-g2.json"}, []string{"user=SHA256:x"}, nil, []string{"user"})
+	})
+	t.Run("switch_and_retire_same_role_refused", func(t *testing.T) {
+		refused(t, once, nil, nil, []string{"user:2"}, []string{"user"})
+	})
+	t.Run("switch_twice_refused", func(t *testing.T) {
+		refused(t, once, nil, nil, nil, []string{"user", "user"})
+	})
+	t.Run("unknown_role_refused", func(t *testing.T) {
+		refused(t, "--ca-switch admin: the role is not one of user, host and machine", nil, nil, nil, []string{"admin"})
 	})
 }

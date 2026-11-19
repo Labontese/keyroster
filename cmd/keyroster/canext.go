@@ -150,11 +150,13 @@ func canonicalGeneration(s string) (uint32, bool) {
 }
 
 // caChanges are root sign's CA flags, checked for their usage (03-12b):
-// next and fingerprint by role, and the retire references.
+// next and fingerprint by role, the retire references, and the roles of
+// --ca-switch in the order given (03-12e2).
 type caChanges struct {
 	next        map[string]string // role -> prepare file
 	fingerprint map[string]string // role -> SHA256:...
 	retire      []trust.CARef
+	switchRoles []string
 }
 
 // parseCAChanges checks the three flags' values, in the output contract's
