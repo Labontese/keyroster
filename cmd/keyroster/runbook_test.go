@@ -252,11 +252,19 @@ func successorSigningSections() []*signingSection {
 			want: []string{"before each touch"}},
 		{id: "transcript_template", file: "ceremony-transcript-template.md", section: "Ceremony",
 			want: []string{"root rotation / policy change / re-sign", "Agreed policy change (the changed field names", "someone other than its proposer",
-				"checks every value", "next CA fingerprint as read from the signer console by"}},
+				"checks every value", "next CA fingerprint as read from the signer console by",
+				// The switch (03-12e2).
+				"CA switch: role, new active fingerprint, draining fingerprint, trusted until and install by as read by", "doctor's pre-switch line"}},
 		{id: "ca_next_sign", file: "ca-rotation.md", section: "Ceremony 1",
 			want: caChecks("none -> next", "fingerprint as read from the signer console")},
 		{id: "ca_abort_sign", file: "ca-rotation.md", section: "Abort",
 			want: caChecks("next -> retired")},
+		// Ceremony 2, the switch (03-12e2): the two CA-change lines, the
+		// advice and what it is, and the comparison with doctor's
+		// pre-switch line.
+		{id: "ca_switch_sign", file: "ca-rotation.md", section: "Ceremony 2",
+			want: caChecks("active -> draining, trusted until", "install by", "(advice)", "is advice and never a refusal", "next -> active",
+				"at or after the earliest", "stop issuing")},
 		{id: "host_setup_pop", file: "host-setup.md", section: "Registering a host in the directory",
 			want: []string{"successor_pop", "CHANGED"}},
 		{id: "machine_identities_pop", file: "machine-identities.md", section: "Renewal needs pop.machines",
@@ -350,6 +358,8 @@ var policyCheckPrefixes = []string{
 	"Policy in force: v", "Successor policy: unchanged, every field carried over", "WARNING: this successor changes",
 	"Previous root keys (threshold", "Root keys (threshold", "pop hosts=", "pop: none (", "webauthn rp_id ", "pop.hosts is one-way",
 	"Root set: ", "CA entries: unchanged", "none -> next", "next -> retired",
+	// The switch (03-12e2).
+	"active -> draining, trusted until", "install by ", "next -> active",
 }
 
 // TestRootCeremonyPolicyChecks (03-14b, F04, F14): every successor-signing
@@ -708,7 +718,10 @@ func TestCARotationRunbookLinkSafety(t *testing.T) {
 		if bad := append(signerDirLinkSafety(data), signerDirSpanSafety(data)...); len(bad) != 0 {
 			t.Fatalf("ca-rotation.md runs, as root, below the signer's state directory:\n%s", strings.Join(bad, "\n"))
 		}
-		for _, want := range []string{`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"'`, "runuser -u keyroster-signer -- rm -f"} {
+		for _, want := range []string{`runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"'`, "runuser -u keyroster-signer -- rm -f",
+			// The switch (03-12e2): the export comes in as the signer's
+			// user, and retire-key runs behind the pinned runuser form.
+			`"$S/incoming/previous.jsonl"`, switchRunuser + "keyroster-signer ca-rotate retire-key"} {
 			if !strings.Contains(data, want) {
 				t.Errorf("ca-rotation.md lacks %q", want)
 			}
@@ -1025,5 +1038,221 @@ func TestCARotationAbortSentence(t *testing.T) {
 		if !strings.Contains(flat, want) {
 			t.Errorf("the abort section lacks %q", want)
 		}
+	}
+}
+
+// caRotationRunbook reads docs/runbooks/ca-rotation.md (03-12e2).
+func caRotationRunbook(t *testing.T) string {
+	t.Helper()
+	return string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "ca-rotation.md")))
+}
+
+// caRotationWindow is the "## " section of ca-rotation.md whose heading
+// starts with section (03-12e2).
+func caRotationWindow(t *testing.T, data, section string) string {
+	t.Helper()
+	win, err := sectionWindow(data, &signingSection{id: section, file: "ca-rotation.md", section: section})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return win
+}
+
+// blockCommands are the commands of text's fenced blocks, continuations
+// joined and each line split at its control operators (03-12e2).
+func blockCommands(text string) []string {
+	var out []string
+	for _, b := range fencedBlocks(text) {
+		for _, l := range joinContinued(b) {
+			out = append(out, splitCommands(l)...)
+		}
+	}
+	return out
+}
+
+// commandPrefix strips the runuser, env and sudo prefixes a runbook puts
+// before a command (03-12e2).
+var commandPrefix = regexp.MustCompile(`^(?:(?:runuser(?: -[ugG] \S+)* --|env(?: [A-Za-z_][A-Za-z0-9_]*=\S*)*|sudo(?: -u \S+)?) )+`)
+
+// planNumber is a plan number of this project in prose, such as 03-12b
+// (03-12e2).
+var planNumber = regexp.MustCompile(`(?:^|[^0-9A-Za-z-])(0[0-9]-[0-9]{2}[a-z0-9]*)`)
+
+// retireFile is a file name that ca-rotate retire-key prints, with its
+// optional surrounding quotes (03-12e2).
+var retireFile = regexp.MustCompile(`"?[^\s"<>]*retire-[a-z]+-g[0-9]+(?:-cert\.pub)?"?`)
+
+// TestCARotationSwitchRunbook (03-12e2): ca-rotation.md describes the
+// whole rotation in its end state: the phrases of each step, no plan
+// number of this rotation outside a code span, both roots pinned on every
+// audit verify, and the files retire-key prints written by root only in a
+// private directory of its own.
+func TestCARotationSwitchRunbook(t *testing.T) {
+	data := caRotationRunbook(t)
+	t.Run("required_phrases", func(t *testing.T) {
+		flat := normalizeSpace(strings.ReplaceAll(data, "\\\n", " "))
+		for _, want := range []string{
+			"Before ceremony 2", "upgrade gate", "switch_floor", "live on", "keyroster host forget", "--previous",
+			"drain_window_too_short", "burned", "fresh output directory", "retire-key", "keyroster-agent check",
+			"trust_expired", "bundle_behind", "clients have refreshed", "every copy of a refused bundle", "UNVERIFIED", "residual",
+		} {
+			if !strings.Contains(flat, want) {
+				t.Errorf("ca-rotation.md lacks %q", want)
+			}
+		}
+	})
+	t.Run("no_plan_numbers", func(t *testing.T) {
+		var prose strings.Builder
+		inBlock := false
+		for _, l := range strings.Split(data, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(l), "```") {
+				inBlock = !inBlock
+				continue
+			}
+			if !inBlock {
+				prose.WriteString(l + "\n")
+			}
+		}
+		bare := inlineSpan.ReplaceAllString(prose.String(), "")
+		for _, m := range planNumber.FindAllStringSubmatch(bare, -1) {
+			if !slices.Contains([]string{"03-12f", "03-13", "03-16"}, m[1]) {
+				t.Errorf("ca-rotation.md names plan %s outside a code span; describe the rotation in its end state", m[1])
+			}
+		}
+	})
+	t.Run("audit_verify_pins_both_roots", func(t *testing.T) {
+		n := 0
+		for _, cmd := range blockCommands(data) {
+			if !strings.HasPrefix(commandPrefix.ReplaceAllString(cmd, ""), "keyroster audit verify") {
+				continue
+			}
+			n++
+			if c := strings.Count(cmd, "--pin SHA256:"); c != 2 {
+				t.Errorf("an audit verify of ca-rotation.md pins %d roots, want both: %s", c, cmd)
+			}
+		}
+		if n < 2 {
+			t.Errorf("ca-rotation.md has %d keyroster audit verify commands, want at least 2 (after ceremony 1's install and after the switch)", n)
+		}
+	})
+	t.Run("retire_files_in_a_private_directory", func(t *testing.T) {
+		cmds := blockCommands(caRotationWindow(t, data, "Remove the old key and restart"))
+		if !slices.Contains(cmds, "D=$(mktemp -d)") {
+			t.Fatalf("the retire section binds no root-owned D=$(mktemp -d):\n%s", strings.Join(cmds, "\n"))
+		}
+		files, adds := 0, 0
+		for _, cmd := range cmds {
+			for _, f := range retireFile.FindAllString(cmd, -1) {
+				files++
+				if !strings.HasPrefix(f, `"$D/retire-`) {
+					t.Errorf("the retire section names %s, not \"$D/retire-...\": %s", f, cmd)
+				}
+			}
+			if strings.Contains(cmd, "ssh-add") {
+				adds++
+				if !regexp.MustCompile(`^SSH_AUTH_SOCK=\S+ ssh-add -d "\$D/retire-[a-z]+-g[0-9]+(?:-cert\.pub)?"$`).MatchString(cmd) {
+					t.Errorf("an ssh-add of the retire section is not the printed form on a $D path: %s", cmd)
+				}
+			}
+		}
+		if files == 0 || adds == 0 {
+			t.Errorf("the retire section names %d retire- files and runs %d ssh-add commands; want both", files, adds)
+		}
+	})
+}
+
+// TestCARotationScopeIsCurrent (03-12e2): the Scope of ca-rotation.md
+// describes a complete rotation, not one that still waits for a switch.
+func TestCARotationScopeIsCurrent(t *testing.T) {
+	flat := normalizeSpace(caRotationWindow(t, caRotationRunbook(t), "Scope"))
+	for _, stale := range []string{"there is no switch", "no switch yet", "not a complete rotation", "ceremony 1 and abort only"} {
+		if strings.Contains(flat, stale) {
+			t.Errorf("the Scope still says %q", stale)
+		}
+	}
+	for _, want := range []string{"ceremony 2", "drain"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("the Scope lacks %q", want)
+		}
+	}
+}
+
+// installCopy is one copy line of an install block: the signer's user
+// writes target, below $S/incoming, from source, under umask 077 and
+// set -C (03-12e2).
+var installCopy = regexp.MustCompile(`^runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"\$1"' sh ("\$S/incoming/[^"/]+") <"[^"]+" &&$`)
+
+// TestCARotationInstallBlocks (03-12e2, the lesson of 03-12e's review of
+// signer-install.md): both install blocks of ca-rotation.md, ceremony 1's
+// and the switch's, remove every file they copy into incoming as the
+// signer's user first, copy each file under set -C as that user, and run
+// install-bundle behind the pinned runuser form on exactly the copied
+// files, every line before the install ending in && and the lines
+// consecutive, so that a stale file never meets the install and a failed
+// copy never reaches it.
+func TestCARotationInstallBlocks(t *testing.T) {
+	data := caRotationRunbook(t)
+	for _, c := range []struct {
+		section  string
+		files    []string
+		previous bool
+	}{
+		{"Install the successor", []string{"bundle.json", "bundle.json.sigs", "policy.json", "policy.json.sigs"}, false},
+		{"Install the switch", []string{"bundle.json", "bundle.json.sigs", "policy.json", "policy.json.sigs", "previous.jsonl"}, true},
+	} {
+		t.Run(strings.ReplaceAll(strings.ToLower(c.section), " ", "_"), func(t *testing.T) {
+			var blocks [][]string
+			for _, b := range fencedBlocks(caRotationWindow(t, data, c.section)) {
+				if slices.ContainsFunc(b, func(l string) bool { return strings.Contains(l, `"$S/incoming/`) && strings.Contains(l, "set -C") }) {
+					blocks = append(blocks, joinContinued(b))
+				}
+			}
+			if len(blocks) != 1 {
+				t.Fatalf("%d blocks copy into incoming under set -C, want exactly 1", len(blocks))
+			}
+			lines := blocks[0]
+			rm := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "runuser -u keyroster-signer -- rm -f ") })
+			if rm < 0 {
+				t.Fatalf("the block removes nothing as the signer's user first:\n%s", strings.Join(lines, "\n"))
+			}
+			want := make([]string, 0, len(c.files))
+			for _, f := range c.files {
+				want = append(want, `"$S/incoming/`+f+`"`)
+			}
+			removed := strings.Fields(strings.TrimSuffix(strings.TrimPrefix(lines[rm], "runuser -u keyroster-signer -- rm -f "), " &&"))
+			if !strings.HasSuffix(lines[rm], " &&") || !slices.Equal(slices.Sorted(slices.Values(removed)), slices.Sorted(slices.Values(want))) {
+				t.Fatalf("the rm line removes %q and must end in &&; want exactly %q: %q", removed, want, lines[rm])
+			}
+			var copied []string
+			i := rm + 1
+			for ; i < len(lines); i++ {
+				m := installCopy.FindStringSubmatch(lines[i])
+				if m == nil {
+					break
+				}
+				copied = append(copied, m[1])
+			}
+			if !slices.Equal(slices.Sorted(slices.Values(copied)), slices.Sorted(slices.Values(want))) {
+				t.Fatalf("the consecutive copy lines after the rm write %q, want %q (each a runuser copy under umask 077 and set -C ending in &&):\n%s", copied, want, strings.Join(lines, "\n"))
+			}
+			if i >= len(lines) || !strings.HasPrefix(lines[i], switchRunuser+"keyroster-signer install-bundle ") {
+				t.Fatalf("the line after the copies is not install-bundle behind %q:\n%s", switchRunuser, strings.Join(lines, "\n"))
+			}
+			args := strings.Fields(lines[i])
+			operand := func(flag string) string {
+				if j := slices.Index(args, flag); j >= 0 && j+1 < len(args) {
+					return args[j+1]
+				}
+				return ""
+			}
+			for flag, wantOp := range map[string]string{"--bundle": `"$S/incoming/bundle.json"`, "--policy": `"$S/incoming/policy.json"`} {
+				if got := operand(flag); got != wantOp {
+					t.Errorf("install-bundle %s %s, want %s", flag, got, wantOp)
+				}
+			}
+			if got := operand("--previous"); c.previous != (got != "") || (c.previous && got != `"$S/incoming/previous.jsonl"`) {
+				t.Errorf("install-bundle --previous %q; want %t for this block, on the copied export", got, c.previous)
+			}
+		})
 	}
 }
