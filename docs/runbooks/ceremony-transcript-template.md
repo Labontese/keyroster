@@ -20,6 +20,7 @@ transcript. Nothing below is secret, but the storage section is private.
 | Variant | software roots (D-10) / hardware roots (D-11) |
 | Agreed policy change (the changed field names, and a reference to the record that holds the agreed values; no hostname or other value is written here; agreed before the successor policy is written, and recorded by someone other than its proposer, or by the owner on a single-owner installation) | |
 | Purpose is a CA rotation: next CA fingerprint as read from the signer console by <name>, who did not run prepare | |
+| CA switch: role, new active fingerprint, draining fingerprint, trusted until and install by as read by <name> from `root sign`; and the earliest trusted_until on doctor's pre-switch line for the same key, which the trusted until must be at or after | |
 
 For a policy change, every custodian takes the changed field names from the
 `Agreed policy change` row and checks every value in the policy block of `root sign --prev`

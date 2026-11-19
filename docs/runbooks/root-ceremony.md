@@ -303,8 +303,9 @@ apply the same rule (`trust.VerifySuccessor`):
   `root sign --prev` prints a warning when the bundle in force has root
   threshold 1;
 - the ops and log keys are carried over unchanged, and so are the CA
-  entries unless the successor adds a `next` CA or aborts one
-  (docs/runbooks/ca-rotation.md);
+  entries unless the successor adds a `next` CA, aborts one, or switches
+  a role to its `next` CA, whose old key then drains until its
+  `trusted_until` (docs/runbooks/ca-rotation.md);
 - the policy is carried over unchanged, or advanced by exactly one version
   chained to the policy in force;
 - no policy admin is a root, new or retired. `root sign --prev` and
