@@ -89,6 +89,21 @@ func withGenesisMachineMaxTTL(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { genesisMachineMaxTTL = 0 })
 }
 
+// genesisUserMaxTTL is the genesis policy's user certificate cap for a
+// signer behind keyroster-server (root genesis-policy --user-max-ttl; zero
+// keeps the default), the pattern of genesisHostMaxTTL (03-12e2): the
+// switch floor of a CA rotation uses the policy's user max_ttl_seconds, so
+// TestCARotationNoFailedLogin sets 60 s.
+var genesisUserMaxTTL time.Duration
+
+// withGenesisUserMaxTTL makes every genesis policy signed until t ends
+// carry user cap d.
+func withGenesisUserMaxTTL(t *testing.T, d time.Duration) {
+	t.Helper()
+	genesisUserMaxTTL = d
+	t.Cleanup(func() { genesisUserMaxTTL = 0 })
+}
+
 // signerEnv is a running keyroster-signer under a root-signed genesis
 // bundle, and everything a test needs to use and check it.
 type signerEnv struct {
@@ -98,6 +113,11 @@ type signerEnv struct {
 	BundleDir string // bundle.json, policy.json and their .sigs
 
 	RootFingerprints []string
+	// RootAgent is the ssh-agent socket holding the genesis root key
+	// (RootFingerprints[0]), a generated one or bootstrapOpts'; its
+	// roots.pub is in BundleDir's parent. A root ceremony on a signer that
+	// startServerEnv built needs it (03-12e2).
+	RootAgent        string
 	AdminAgent       string   // ssh-agent socket holding the admin keys
 	AdminFingerprint string   // the first admin key
 	AdminFPs         []string // every admin key, AdminFingerprint first
@@ -247,6 +267,9 @@ func (e *signerEnv) signGenesis(t *testing.T, opts bootstrapOpts) {
 	if genesisMachineMaxTTL != 0 {
 		args = append(args, "--machine-max-ttl", genesisMachineMaxTTL.String())
 	}
+	if genesisUserMaxTTL != 0 {
+		args = append(args, "--user-max-ttl", genesisUserMaxTTL.String())
+	}
 	if code, out := keyrosterWithAgent(t, "", args...); code != 0 {
 		t.Fatalf("root genesis-policy exited %d:\n%s", code, out)
 	}
@@ -282,7 +305,7 @@ func (e *signerEnv) signGenesis(t *testing.T, opts bootstrapOpts) {
 	if err := os.WriteFile(roots, []byte(trust.FormatKey(rootPub)+" custody="+custody+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	e.RootFingerprints = []string{rootFP}
+	e.RootFingerprints, e.RootAgent = []string{rootFP}, rootSock
 
 	sign := []string{"root", "sign", "--ca-pubkeys", e.CAPubkeys, "--policy", policy, "--roots", roots,
 		"--threshold", "1", "--out-dir", e.BundleDir, "--agent-key", rootFP}
