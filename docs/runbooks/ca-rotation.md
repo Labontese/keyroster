@@ -146,15 +146,22 @@ systemctl start keyroster-signer.service
 runuser -u keyroster-signer -g keyroster-signer -G tss -- \
   keyroster-signer doctor --state-dir "$S"
 runuser -u keyroster-signer -g keyroster-signer -G tss -- \
-  keyroster-signer export-log --state-dir "$S" --out /tmp/ca-rotation.jsonl
-keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold <N> --installation-id <installation id> /tmp/ca-rotation.jsonl
+  keyroster-signer export-log --state-dir "$S" --out /tmp/ca-rotation.jsonl &&
+runuser -u keyroster-signer -- cat /tmp/ca-rotation.jsonl >/media/transfer/export.jsonl &&
+runuser -u keyroster-signer -- rm -f /tmp/ca-rotation.jsonl
+keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold <N> --installation-id <installation id> /media/transfer/export.jsonl
 ```
 
 `install-bundle` prints `installed bundle version <N>` and refuses a next
 entry that is not a stored generation. doctor's `OK generations` line
 lists the user CA `next g2` with the new fingerprint. The signer still
-signs with generation 1. Keep the export off the box: it is the
-`--previous` of ceremony 2's install, unless you take a newer one.
+signs with generation 1. The export is copied onto the transfer medium
+at once, as the signer's user, and its copy under `/tmp` is removed; the
+audit verify reads the copy on the medium. That copy stays off the signer
+box for good: it is the `--previous` of ceremony 2's install, unless you
+take a newer one the same way. It is the anchor with which the signer
+refuses a database rolled back after this install, so it is never
+rebuilt from files on the signer box later.
 
 ## Wait for the hosts
 
@@ -348,23 +355,23 @@ It prints the same two CA-change lines and `Root set: unchanged`.
 ## Install the switch
 
 **The export first.** The install needs `--previous`: an export-log file
-of this log kept off the box, the export that ceremony 1's install block
-took or a newer one taken right after the last install. The signer reads
-its last line, from at most its last 1 MiB, and requires that this log
-extends that checkpoint. Copy it to the medium as the signer's user, so
-that root opens nothing the signer's account could have replaced by a
-link:
-
-```
-runuser -u keyroster-signer -- cat /tmp/ca-rotation.jsonl >/media/transfer/export.jsonl
-```
+of this log kept off the box, `/media/transfer/export.jsonl`, the copy
+that ceremony 1's install block put on the medium or a newer one taken
+the same way right after the last install. The signer reads its last
+line, from at most its last 1 MiB, and requires that this log extends
+that checkpoint. Take no export now: one made from files on the signer
+box would come from the very database the install is meant to check, so
+it would always extend itself and the check could not fire. If the copy
+on the medium is missing or empty, do not rebuild it from the box: stop
+and escalate, because the signer then has no anchor outside itself.
 
 **The install**, on the signer, as the signer's user, before the
 `install by` time. The copy under `set -C` refuses to overwrite, so the
 export of an earlier switch and the files of an earlier successor are
 removed first, and the chain keeps the install from running against a
-stale or half-copied file. The signer is not started here: the old key
-must leave the backend first (next section).
+stale or half-copied file. The export is read from the medium, never from
+`/tmp` or any other path on the signer box. The signer is not started
+here: the old key must leave the backend first (next section).
 
 ```
 S=/var/lib/keyroster-signer
@@ -393,7 +400,10 @@ states them, each of which writes nothing:
 - `install_previous_required`: no `--previous`; run it again with the
   newest saved export.
 - `install_previous_invalid`: the file's last line is not a checkpoint of
-  this log; use the export-log file itself.
+  this log; use the export-log file itself, the copy that ceremony 1's
+  install block put on the medium. Never take a fresh export from the
+  signer box to get past this: it would extend itself, and the check
+  would prove nothing.
 - `install_previous_not_extended`: this log does not extend the export;
   the database was restored or changed after it. Stop and follow
   signer-install.md "Restore from before the last switch".
@@ -415,7 +425,20 @@ names. Hosts accept any root-signed successor, and refuse a re-made
 bundle of the same version until root clears it, so a refused bundle that
 reached a host would split that host from the signer. `root sign` in the
 same `--out-dir` would only rebuild the refused bundle with its stored
-issued_at; the repeat uses a fresh directory.
+issued_at; the repeat uses a fresh directory. The export on the medium is
+not part of the refused bundle: it stays.
+
+On any refusal except `install_previous_not_extended`, which goes to the
+restore section, destroy the refused files as stated above and then start
+the signer again, so that issuance is not left down:
+
+```
+systemctl start keyroster-signer.service
+```
+
+The signer serves the bundle in force, whose old key is still active, and
+a refusal wrote nothing. Repeat ceremony 2 later, from a fresh output
+directory.
 
 ## Remove the old key and restart
 
@@ -464,7 +487,10 @@ key after a switch" states it:
   03-12f.
 
 Start the signer only after retire-key exits 0. Then doctor, a fresh
-export, and the audit with both roots pinned:
+export, and the audit with both roots pinned. First move
+`/media/transfer/export.jsonl` aside under another name and keep it, as
+signer-install.md asks you to keep every export: the block writes the
+new export under the same name.
 
 ```
 S=/var/lib/keyroster-signer
@@ -472,12 +498,16 @@ systemctl start keyroster-signer.service
 runuser -u keyroster-signer -g keyroster-signer -G tss -- \
   keyroster-signer doctor --state-dir "$S"
 runuser -u keyroster-signer -g keyroster-signer -G tss -- \
-  keyroster-signer export-log --state-dir "$S" --out /tmp/ca-switch.jsonl
-keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold <N> --installation-id <installation id> /tmp/ca-switch.jsonl
+  keyroster-signer export-log --state-dir "$S" --out /tmp/ca-switch.jsonl &&
+runuser -u keyroster-signer -- cat /tmp/ca-switch.jsonl >/media/transfer/export.jsonl &&
+runuser -u keyroster-signer -- rm -f /tmp/ca-switch.jsonl
+keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold <N> --installation-id <installation id> /media/transfer/export.jsonl
 ```
 
 doctor prints no `draining_key_still_usable` line, and its
-`OK switch_floor` line now names generation 2. Keep the export off the
+`OK switch_floor` line now names generation 2. The export is copied onto
+the medium at once, as the signer's user, and its copy under `/tmp` is
+removed, as after ceremony 1's install. This copy stays off the signer
 box: it is the `--previous` of the next switch. From now on every
 certificate the signer issues is signed by generation 2.
 

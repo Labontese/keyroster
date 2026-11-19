@@ -1135,6 +1135,82 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 			t.Errorf("ca-rotation.md has %d keyroster audit verify commands, want at least 2 (after ceremony 1's install and after the switch)", n)
 		}
 	})
+	// Review item A: every export of the runbook is copied onto the transfer
+	// medium by the signer's user right after it is taken, its /tmp copy is
+	// removed, the audit verify reads the copy on the medium, and the
+	// switch install takes no export of its own.
+	t.Run("exports_leave_the_box", func(t *testing.T) {
+		copyLine := regexp.MustCompile(`^runuser -u keyroster-signer -- cat (/tmp/\S+) >(/media/transfer/\S+) &&$`)
+		n := 0
+		for _, b := range fencedBlocks(data) {
+			lines := joinContinued(b)
+			for i, l := range lines {
+				if !strings.Contains(l, "keyroster-signer export-log ") {
+					continue
+				}
+				n++
+				out := ""
+				if f := strings.Fields(l); slices.Contains(f, "--out") {
+					out = f[slices.Index(f, "--out")+1]
+				}
+				if !strings.HasSuffix(l, " &&") || i+3 >= len(lines) {
+					t.Errorf("the export-log line does not end in && before its copy and removal: %s", l)
+					continue
+				}
+				m := copyLine.FindStringSubmatch(lines[i+1])
+				if m == nil || m[1] != out {
+					t.Errorf("the line after export-log --out %s is not a runuser cat of it onto /media/transfer chained with &&: %s", out, lines[i+1])
+					continue
+				}
+				if lines[i+2] != "runuser -u keyroster-signer -- rm -f "+out {
+					t.Errorf("the copy of %s is not followed by its removal as the signer's user: %s", out, lines[i+2])
+				}
+				if !strings.HasPrefix(lines[i+3], "keyroster audit verify ") || !strings.HasSuffix(lines[i+3], " "+m[2]) {
+					t.Errorf("the audit verify after the export does not read the copy %s on the medium: %s", m[2], lines[i+3])
+				}
+			}
+		}
+		// The second export is written under the first one's name, so the
+		// text before it says to move the first aside and keep it.
+		if flat := normalizeSpace(caRotationWindow(t, data, "Remove the old key and restart")); !strings.Contains(flat, "First move `/media/transfer/export.jsonl` aside under another name and keep it") {
+			t.Errorf("the section that overwrites /media/transfer/export.jsonl does not say to move the earlier export aside first")
+		}
+		if n != 2 {
+			t.Errorf("%d export-log commands in ca-rotation.md, want 2 (after ceremony 1's install and after the switch)", n)
+		}
+		for _, b := range fencedBlocks(caRotationWindow(t, data, "Install the switch")) {
+			for _, l := range b {
+				if strings.Contains(l, "/tmp") || strings.Contains(l, "export-log") {
+					t.Errorf("the switch install block names the signer box's own export: %s", l)
+				}
+			}
+		}
+	})
+	// Review item D: a refused switch install leaves the signer stopped, so
+	// the runbook says how to start it again, and not after a restore case.
+	t.Run("refusal_restarts_the_signer", func(t *testing.T) {
+		win := caRotationWindow(t, data, "Install the switch")
+		flat := normalizeSpace(win)
+		for _, want := range []string{
+			"On any refusal except `install_previous_not_extended`, which goes to the restore section, destroy the refused files as stated above and then start the signer again, so that issuance is not left down",
+			"The signer serves the bundle in force, whose old key is still active",
+			"Repeat ceremony 2 later, from a fresh output directory.",
+		} {
+			if !strings.Contains(flat, want) {
+				t.Errorf("the Install the switch section lacks %q", want)
+			}
+		}
+		blocks := fencedBlocks(win)
+		if len(blocks) < 2 {
+			t.Fatalf("%d blocks in the Install the switch section, want the install and the start", len(blocks))
+		}
+		if last := blocks[len(blocks)-1]; len(last) != 1 || last[0] != "systemctl start keyroster-signer.service" {
+			t.Errorf("the last block of the Install the switch section is not the single start command: %q", last)
+		}
+		if strings.Index(win, "systemctl start keyroster-signer.service") < strings.Index(win, "install_previous_not_extended") {
+			t.Errorf("the start command comes before the refusal list")
+		}
+	})
 	t.Run("retire_files_in_a_private_directory", func(t *testing.T) {
 		cmds := blockCommands(caRotationWindow(t, data, "Remove the old key and restart"))
 		if !slices.Contains(cmds, "D=$(mktemp -d)") {
@@ -1180,7 +1256,7 @@ func TestCARotationScopeIsCurrent(t *testing.T) {
 // installCopy is one copy line of an install block: the signer's user
 // writes target, below $S/incoming, from source, under umask 077 and
 // set -C (03-12e2).
-var installCopy = regexp.MustCompile(`^runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"\$1"' sh ("\$S/incoming/[^"/]+") <"[^"]+" &&$`)
+var installCopy = regexp.MustCompile(`^runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"\$1"' sh ("\$S/incoming/[^"/]+") <"([^"]+)" &&$`)
 
 // TestCARotationInstallBlocks (03-12e2, the lesson of 03-12e's review of
 // signer-install.md): both install blocks of ca-rotation.md, ceremony 1's
@@ -1231,6 +1307,12 @@ func TestCARotationInstallBlocks(t *testing.T) {
 					break
 				}
 				copied = append(copied, m[1])
+				// The export is the anchor kept off the signer box: its copy
+				// into incoming reads the transfer medium, never a path
+				// below /tmp or anywhere else on the box (review item A).
+				if m[1] == `"$S/incoming/previous.jsonl"` && (strings.Contains(m[2], "/tmp") || !strings.HasPrefix(m[2], "/media/transfer/")) {
+					t.Errorf("the previous.jsonl copy reads %q, want a path on the transfer medium and never /tmp: %s", m[2], lines[i])
+				}
 			}
 			if !slices.Equal(slices.Sorted(slices.Values(copied)), slices.Sorted(slices.Values(want))) {
 				t.Fatalf("the consecutive copy lines after the rm write %q, want %q (each a runuser copy under umask 077 and set -C ending in &&):\n%s", copied, want, strings.Join(lines, "\n"))
