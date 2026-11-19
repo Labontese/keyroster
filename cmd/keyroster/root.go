@@ -397,6 +397,9 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	fset.Var(&caNext, "ca-next", "with --prev, repeatable: ROLE=FILE adds the CA key of the prepare file FILE (keyroster-signer ca-rotate prepare) as the role's next CA; ROLE is user, host or machine")
 	fset.Var(&caNextFP, "ca-next-fingerprint", "with --ca-next, repeatable: ROLE=SHA256:... is the next key's fingerprint as read from the signer console; required for every --ca-next role")
 	fset.Var(&caRetire, "ca-retire", "with --prev, repeatable: ROLE:GEN aborts the role's next CA entry of generation GEN (it becomes retired)")
+	var caSwitch repeated
+	fset.Var(&caSwitch, "ca-switch", "with --prev, repeatable: ROLE switches the role's CA (ceremony 2): its next entry becomes active and its active entry draining until the floor plus --drain-allowance. A switch bundle the signer refuses is burned: it never leaves the signer host, every copy is destroyed, and the ceremony is repeated in a fresh --out-dir")
+	drainAllowance := fset.Duration("drain-allowance", 24*time.Hour, "with --ca-switch: what the switch adds to the floor of the draining key's trusted_until, a whole number of seconds from 0 to 168h0m0s; the printed \"install by\" is the issued_at plus this, the time by which the signer must stop issuing with the old key (advice)")
 	if err := fset.Parse(args); err != nil {
 		return errUsage
 	}
@@ -418,7 +421,26 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		_, _ = fmt.Fprintln(stderr, "root sign: --ca-next, --ca-next-fingerprint and --ca-retire need --prev")
 		return errUsage
 	}
-	changes, err := parseCAChanges(caNext, caNextFP, caRetire, nil)
+	allowanceGiven := false
+	fset.Visit(func(f *flag.Flag) { allowanceGiven = allowanceGiven || f.Name == "drain-allowance" })
+	// The switch's flags (03-12e2): usage too, exit 2.
+	if !successor && len(caSwitch) != 0 {
+		_, _ = fmt.Fprintln(stderr, "root sign: --ca-switch needs --prev")
+		return errUsage
+	}
+	if allowanceGiven && len(caSwitch) == 0 {
+		_, _ = fmt.Fprintln(stderr, "root sign: --drain-allowance needs --ca-switch")
+		return errUsage
+	}
+	if *drainAllowance < 0 || *drainAllowance%time.Second != 0 {
+		_, _ = fmt.Fprintf(stderr, "root sign: --drain-allowance %s must be a whole number of seconds from 0 to %s\n", *drainAllowance, trust.MaxDrainAllowance)
+		return errUsage
+	}
+	if *drainAllowance > trust.MaxDrainAllowance {
+		_, _ = fmt.Fprintf(stderr, "root sign: --drain-allowance %s is above the cap of %s\n", *drainAllowance, trust.MaxDrainAllowance)
+		return errUsage
+	}
+	changes, err := parseCAChanges(caNext, caNextFP, caRetire, caSwitch)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "root sign: "+err.Error())
 		return errUsage
@@ -501,6 +523,11 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 			}
 			base.CANext = append(base.CANext, e)
 		}
+		// The switch (03-12e2). A role with no next entry is the
+		// builder's refusal, before anything is written.
+		if len(changes.switchRoles) != 0 {
+			base.CASwitch, base.DrainAllowance = changes.switchRoles, *drainAllowance
+		}
 		prev, prevBundle, prevPolicy, build, err = successorBuilder(*prevDir, *prevSHA, *outDir, base)
 		if err != nil {
 			return err
@@ -511,8 +538,9 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		}
 		// The CA flags are inputs of every successor, given or not: a
 		// co-signer who leaves them out builds another bundle (03-12b
-		// review).
-		inputs = "--prev, --roots, --threshold, --policy, --ca-next, --ca-next-fingerprint and --ca-retire"
+		// review). So are the switch's two: another allowance builds
+		// another bundle (03-12e2).
+		inputs = "--prev, --roots, --threshold, --policy, --ca-next, --ca-next-fingerprint, --ca-retire, --ca-switch and --drain-allowance"
 		rootSets = append(rootSets, prev.Root.Keys)
 		idRule = installationRule{fresh: *installID == "new", carry: prev.InstallationID}
 	} else {

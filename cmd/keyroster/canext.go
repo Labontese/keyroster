@@ -159,12 +159,13 @@ type caChanges struct {
 	switchRoles []string
 }
 
-// parseCAChanges checks the three flags' values, in the output contract's
+// parseCAChanges checks the CA flags' values, in the output contract's
 // order: each value's form and role, at most one change per role across
-// the three flags (a repeated flag included), and a fingerprint for every
-// --ca-next role and for no other. A refusal is the text root sign prints
-// after "root sign: ".
-func parseCAChanges(next, fingerprint, retire, _ []string) (*caChanges, error) {
+// --ca-next, --ca-retire and --ca-switch (a repeated flag included, 03-12e2
+// for the switch), and a fingerprint for every --ca-next role and for no
+// other. switchRoles are the --ca-switch values, each a role. A refusal is
+// the text root sign prints after "root sign: ".
+func parseCAChanges(next, fingerprint, retire, switchRoles []string) (*caChanges, error) {
 	c := &caChanges{next: map[string]string{}, fingerprint: map[string]string{}}
 	named := map[string]int{}
 	var order []string
@@ -198,6 +199,13 @@ func parseCAChanges(next, fingerprint, retire, _ []string) (*caChanges, error) {
 		}
 		note(f.role)
 		c.retire = append(c.retire, trust.CARef{Role: f.role, Generation: f.gen})
+	}
+	for _, role := range switchRoles {
+		if !slices.Contains(caChangeRoles, role) {
+			return nil, usagef("--ca-switch %s: the role is not one of user, host and machine", role)
+		}
+		note(role)
+		c.switchRoles = append(c.switchRoles, role)
 	}
 	for _, role := range order {
 		if named[role] > 1 {
