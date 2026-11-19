@@ -308,8 +308,15 @@ answer no to the prompt if anything differs:
   switch. `install by` is advice and never a refusal; the signer's install
   binding decides. An allowance near 0 needs the signer stopped before
   the ceremony. `install by unknown (advice)` means the tool could not
-  derive it (a policy without a profile for the role); an allowance above
-  the cap is refused by the signer.
+  derive it: a policy without a profile for the role, or a `trusted until`
+  that does not parse or lies below the floor. `root sign` refuses a
+  `--drain-allowance` above 168h itself, before it signs, with
+  `root sign: --drain-allowance <d> is above the cap of 168h0m0s`. Only a
+  successor built by other means can carry a larger allowance; for it the
+  advice reads
+  `install by unknown (advice: the allowance <a> is above the cap of 168h0m0s, so the signer refuses this switch)`.
+  The signer's own upper bound on `trusted_until` is its install refusal
+  `drain_window_too_long` (see "Install the switch").
 - **The root set.** `Root set: unchanged`. The `Root keys (threshold` line
   of the summary lists the roots of the bundle in force at the agreed
   threshold.
@@ -513,8 +520,11 @@ advised install time.
 The residuals, which the signer and audit do not cover:
 
 - a certificate signed with the old key outside the signer;
-- a certificate issued after the newest saved export, which an install
-  against an older `--previous` does not see;
+- a certificate issued after the export that `--previous` names, in a
+  log that was then rolled back to that export's point: the rolled-back
+  log still extends the export, and the install's binding reads only the
+  certificates the verified log records, so it never sees that
+  certificate;
 - a later recovery that carries a long-lived certificate;
 - consumers that do not re-evaluate a certificate after its CA drains;
 - KRL entries with no ValidBefore;

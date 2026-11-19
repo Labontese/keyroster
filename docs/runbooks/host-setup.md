@@ -2541,9 +2541,9 @@ Run in CI on a fake `sshd` and a fake clock (`TestDrainingDrop`,
 UNVERIFIED on a real host, against a real `sshd`, in a fleet (the 2-hour
 grace of `bundle_behind`) and on Windows OpenSSH, and so is the repair of
 the record from a backup.
-Nothing can put a draining CA key into a bundle yet: the second ceremony
-of a rotation comes with a later release, and its runbook carries these
-steps into the rotation.
+The second ceremony of a rotation puts a draining CA key into a bundle
+([ca-rotation.md](ca-rotation.md), "Ceremony 2: switch to the next CA
+key"), and that runbook carries these steps into the rotation.
 
 1. **The upgrade order, before the second ceremony of a rotation.**
    Upgrade the signer and the server first: the server checks heartbeats
