@@ -2409,6 +2409,44 @@ func TestRootSignSwitchFlags(t *testing.T) {
 			t.Fatal("a refused repeat wrote a signature")
 		}
 	})
+	// A successor that changes the role's max_ttl in the same ceremony: the
+	// end is the ceremony's issued_at plus the larger of the policy in
+	// force's and the successor's user max_ttl, 300 s and the allowance.
+	// root sign (root.go) and trust verify --prev (trust.go) each pass the
+	// two policies to CAChanges, so a lowered successor catches a successor
+	// passed twice and a raised one catches the policy in force passed
+	// twice (pre-merge review).
+	for _, c := range []struct {
+		name string
+		next time.Duration
+		ttl  time.Duration
+	}{
+		{"successor_policy_lowers_the_user_max_ttl", time.Hour, userTTL},
+		{"successor_policy_raises_the_user_max_ttl", 24 * time.Hour, 24 * time.Hour},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := switched(t)
+			base := readTestFile(t, filepath.Join(f.prev, "policy.json"))
+			next := diffSuccessor(t, base, func(p *trust.Policy) {
+				for i := range p.CAProfiles {
+					if p.CAProfiles[i].Role == "user" {
+						p.CAProfiles[i].MaxTTLSeconds = uint64(c.next / time.Second) //nolint:gosec // G115: a positive test constant
+					}
+				}
+			})
+			pol, out := filepath.Join(f.dir, "policy-next.json"), filepath.Join(f.dir, "out")
+			writeTestFile(t, pol, next)
+			ca := []string{"--ca-switch", "user", "--drain-allowance", "1h"}
+			rs := f.display(t, pol, out, f.fpA, ca...)
+			f.signWith(t, pol, out, f.fpA, ca...)
+			f.signWith(t, pol, out, f.fpB, ca...)
+			tv := f.verifyPrev(t, out)
+			want := switchLines(t, "user", 1, f.caFingerprint(t, "user", 1), f.caFingerprint(t, "user", 2), "2026-10-07T00:00:00Z", c.ttl, time.Hour)
+			both(t, rs, tv, want)
+			// The successor policy really is the one that changes.
+			both(t, rs, tv, "Successor policy: v2, sha256 "+trust.SHA256Hex(next))
+		})
+	}
 	t.Run("switch_signs_and_verifies", func(t *testing.T) {
 		f := switched(t)
 		want := switchLines(t, "user", 1, f.caFingerprint(t, "user", 1), f.caFingerprint(t, "user", 2), "2026-10-07T00:00:00Z", userTTL, 90*time.Second)
