@@ -321,9 +321,12 @@ answer no to the prompt if anything differs:
   `root sign: --drain-allowance <d> is above the cap of 168h0m0s`. Only a
   successor built by other means can carry a larger allowance; for it the
   advice reads
-  `install by unknown (advice: the allowance <a> is above the cap of 168h0m0s, so the signer refuses this switch)`.
-  The signer's own upper bound on `trusted_until` is its install refusal
-  `drain_window_too_long` (see "Install the switch").
+  `install by unknown (advice: the allowance <a> is above the cap of 168h0m0s, which root sign never builds; do not install or distribute this bundle)`.
+  Host agents enforce no upper bound on `trusted_until`, and the signer's
+  install refusal `drain_window_too_long` (see "Install the switch")
+  depends on the signer's install clock, so it may still accept such a
+  bundle: the cap is the root holders' check, and a bundle that prints
+  this line is not installed or distributed.
 - **The root set.** `Root set: unchanged`. The `Root keys (threshold` line
   of the summary lists the roots of the bundle in force at the agreed
   threshold.

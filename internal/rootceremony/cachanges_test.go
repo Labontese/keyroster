@@ -198,10 +198,13 @@ func TestCAChanges(t *testing.T) {
 	})
 	t.Run("allowance_above_cap_says_so", func(t *testing.T) {
 		// A hand-built successor: the chain rule bounds trusted_until
-		// only from below, so the section says that the signer refuses
-		// it, and still refuses nothing itself.
+		// only from below, so the section says that root sign never
+		// builds it and that it is not to be installed, and still
+		// refuses nothing itself. It does not claim that the signer
+		// refuses it: the signer's bound is measured from its install
+		// clock, and the host agents enforce no cap (pre-merge review).
 		prev, next, fp1, _ := switchPair(t, afterIssue(t, time.Hour+margin+trust.MaxDrainAllowance+time.Second))
-		want := "CA user gen 1 " + fp1 + ": active -> draining, trusted until 2026-10-14T01:05:01Z; install by unknown (advice: the allowance 168h0m1s is above the cap of 168h0m0s, so the signer refuses this switch)\n"
+		want := "CA user gen 1 " + fp1 + ": active -> draining, trusted until 2026-10-14T01:05:01Z; install by unknown (advice: the allowance 168h0m1s is above the cap of 168h0m0s, which root sign never builds; do not install or distribute this bundle)\n"
 		if got := CAChanges(prev, next, userPolicy(time.Hour), userPolicy(time.Hour)); !strings.HasPrefix(got, want) {
 			t.Fatalf("CAChanges above the cap = %q, want it to start with %q", got, want)
 		}

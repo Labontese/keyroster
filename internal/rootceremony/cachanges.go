@@ -102,9 +102,14 @@ func CAChanges(prev, next *trust.Bundle, prevPol, nextPol *trust.Policy) string 
 // the floor. A nil policy, a role with no profile in either policy, a
 // floor that cannot be computed, or a trusted_until that does not parse or
 // lies below the floor print "unknown (advice)"; an allowance above
-// trust.MaxDrainAllowance, which only a hand-built successor carries (the
-// chain rule bounds trusted_until from below only), says that the signer
-// refuses the switch. None of them is a refusal.
+// trust.MaxDrainAllowance, which only a hand-built successor carries (root
+// sign caps the flag, and the chain rule bounds trusted_until from below
+// only), says that root sign never builds it and that it is not to be
+// installed or distributed. It does not say that the signer refuses it:
+// the signer's upper bound is measured from its install clock, so it
+// accepts such an allowance up to the cap plus 300 s plus the time between
+// issued_at and the install, and the host agents enforce no cap at all, so
+// the cap is the root holders' check. None of them is a refusal.
 func installBy(issuedAt string, e trust.CAEntry, prevPol, nextPol *trust.Policy) string {
 	const unknown = "unknown (advice)"
 	ttlPrev, okPrev := trust.RoleMaxTTL(prevPol, e.Role)
@@ -122,7 +127,7 @@ func installBy(issuedAt string, e trust.CAEntry, prevPol, nextPol *trust.Policy)
 	}
 	allowance := uint64(until.Unix()) - floor //nolint:gosec // G115: not negative, checked above
 	if allowance > uint64(trust.MaxDrainAllowance/time.Second) {
-		return "unknown (advice: the allowance " + seconds(allowance) + " is above the cap of " + trust.MaxDrainAllowance.String() + ", so the signer refuses this switch)"
+		return "unknown (advice: the allowance " + seconds(allowance) + " is above the cap of " + trust.MaxDrainAllowance.String() + ", which root sign never builds; do not install or distribute this bundle)"
 	}
 	// DrainFloor parsed issuedAt, so the error is nil.
 	issued, _ := time.Parse(trust.TimeFormat, issuedAt)
