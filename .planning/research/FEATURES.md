@@ -55,7 +55,7 @@ Without these, a team evaluating the tool goes back to step-ca or Teleport.
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
 | **Agent manages `C:\ProgramData\ssh\sshd_config` + CA/KRL/principals files with correct ACLs** | Windows sshd refuses files with loose ACLs. That is the No. 1 Windows SSH support issue | MEDIUM | ACL = SYSTEM + Administrators only (same rule as `administrators_authorized_keys`). Restart via the `sshd` service. HIGH |
-| **Handle the `Match Group administrators` block** | Default Windows sshd_config redirects admins' `AuthorizedKeysFile` to `__PROGRAMDATA__/ssh/administrators_authorized_keys` | MEDIUM | Certificate auth via `TrustedUserCAKeys` is global and unaffected. **Inventory must read this file for admin accounts, not `~\.ssh\authorized_keys`.** Dogfooding environment (Daniel-PC) is exactly this case. HIGH |
+| **Handle the `Match Group administrators` block** | Default Windows sshd_config redirects admins' `AuthorizedKeysFile` to `__PROGRAMDATA__/ssh/administrators_authorized_keys` | MEDIUM | Certificate auth via `TrustedUserCAKeys` is global and unaffected. **Inventory must read this file for admin accounts, not `~\.ssh\authorized_keys`.** Dogfooding environment (the owner's workstation) is exactly this case. HIGH |
 | **Version awareness** | Inbox Windows OpenSSH lags upstream badly | LOW | **Verified locally:** Windows 11 build 26200 ships `OpenSSH_for_Windows_9.5p2`. Win32-OpenSSH GitHub is at 10.0p2-Preview. So features like multiple `RevokedKeys` files (10.3) are **not** available on Windows. Use one KRL file. The agent should report sshd version and gate features on it. HIGH |
 | **Principal naming for local vs domain accounts** | Domain users log in as `user@domain` / `DOMAIN\user`, and cert principals must match what sshd resolves | MEDIUM | Historic `AuthorizedPrincipalsFile` matching bug (#1224, fixed). Domain-account caveats before v7.7. Case-sensitivity of principal matching on Windows is **LOW confidence** and needs a spike. |
 | **Windows Event Log as auth log source** | Usage correlation (differentiator below) needs it | MEDIUM | `OpenSSH/Operational` channel. MEDIUM |
@@ -187,7 +187,7 @@ Online revocation via AuthorizedPrincipalsCommand ──conflicts──> CA-outa
 - **CA rotation needs convergence tracking.** You cannot safely drop the old CA without knowing every host trusts the new one. Heartbeats must report a hash of the trusted-CA set, the KRL version and the sshd version from the start.
 - **The approval engine is shared** by JIT access and two-person admin actions. Build it once and generically: (actor, action, params, approvers, expiry, single-use).
 - **"Unknown key" classification needs a user↔key registry.** Without knowing which keys belong to whom, every discovered key is "unknown". Record public-key fingerprints at cert issuance and allow users to register legacy keys.
-- **Windows support is a cross-cutting constraint, not a late phase.** File ACLs, the `administrators_authorized_keys` redirect, the 9.5p2 inbox version and Event Log parsing affect agent design. Dogfood on Daniel-PC early.
+- **Windows support is a cross-cutting constraint, not a late phase.** File ACLs, the `administrators_authorized_keys` redirect, the 9.5p2 inbox version and Event Log parsing affect agent design. Dogfood on the owner's workstation early.
 
 ---
 
@@ -364,7 +364,7 @@ Online revocation via AuthorizedPrincipalsCommand ──conflicts──> CA-outa
 - Win32-OpenSSH AuthorizedPrincipalsFile bug #1224 (fixed): https://github.com/PowerShell/Win32-OpenSSH/issues/1224 (MEDIUM)
 - Win32-OpenSSH verify-required issue #2156: https://github.com/PowerShell/Win32-OpenSSH/issues/2156 (MEDIUM)
 - Microsoft OpenSSH server configuration (administrators_authorized_keys): https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration (HIGH)
-- Local verification on Daniel-PC (Windows 11 build 26200): `sshd.exe -V` → `OpenSSH_for_Windows_9.5p2, LibreSSL 3.8.2` (HIGH, first-hand)
+- Local verification on the owner's workstation (Windows 11 build 26200): `sshd.exe -V` → `OpenSSH_for_Windows_9.5p2, LibreSSL 3.8.2` (HIGH, first-hand)
 
 ---
 *Feature research for: self-hosted SSH certificate authority & access manager*

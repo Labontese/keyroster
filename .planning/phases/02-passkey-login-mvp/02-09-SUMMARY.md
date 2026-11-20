@@ -258,7 +258,7 @@ status: complete
   - `go vet ./...`, `GOOS=linux go vet ./...`, `GOOS=darwin go vet ./...` and `go vet -tags e2e ./test/e2e/` are clean.
   - `go test -count=1 ./...` passed, all 21 packages with tests (internal/winagent included, 40 s).
   - `go test -count=1 -v -run TestDirectorySignConfirm ./cmd/keyroster/...` shows both PASS lines.
-- **WSL (scripts/linux.sh, script files under the scratchpad):**
+- **WSL (scripts/linux.sh, script files under the scratch directory):**
   - The targeted `-race -v -run "TestDirectoryMirror|TestDirectoryInstallBodyLimit|TestDirectoryInstallPending" ./internal/server/...` shows every required PASS line, with no DATA RACE and no timeout.
   - `go test -race -count=1 ./...` exited 0.
   - `go vet ./...` and the e2e vet are clean; `gofmt` (the GOROOT one) is empty.

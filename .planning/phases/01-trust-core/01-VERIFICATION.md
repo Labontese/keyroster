@@ -407,7 +407,7 @@ overrides:
     reason: "Real-device validation is tracked in issue #13 (needs-hardware) before the Phase 6 external security review; SoftHSM2, swtpm and fake-card coverage prove the code paths"
     accepted_by: "<owner>"
     accepted_at: "<ISO timestamp>"
-  - must_have: "Windows inbox OpenSSH_for_Windows_9.5p2 sshd on Daniel-PC accepts the homelab certificate and rejects an unlisted principal"
+  - must_have: "Windows inbox OpenSSH_for_Windows_9.5p2 sshd on the owner's workstation accepts the homelab certificate and rejects an unlisted principal"
     reason: "Ran on a lab Windows Server 2025 with the same inbox OpenSSH_for_Windows_9.5p2 (9.5.5.1); the host is incidental to CA-08"
     accepted_by: "<owner>"
     accepted_at: "<ISO timestamp>"

@@ -209,7 +209,7 @@ See `key-decisions` above.
 
 - **CI flake outside this plan's files:** the first `build-test` run on PR #9 failed in `internal/signer` `TestSignerRefusals/created_301s_future`. The test captures `now` once and checks the ±300 s skew bound with `now + 301`, so it fails whenever more than about a second passes before that subtest runs. The new scrypt-heavy tests running in parallel packages under `-race` make that more likely. A rerun of the failed job passed. It is logged in `deferred-items.md` with a proposed fix (a fixed test clock). It was not fixed here because `internal/signer/*` belongs to 01-07 (PR #8, open).
 - `go mod tidy` added `c2sp.org/CCTV/age` to go.sum (age's test-vector module). It is not compiled into any keyroster package.
-- Bash heredocs containing Go raw strings broke in the Git Bash tool, so multi-line edits ran as Python scripts in the scratchpad.
+- Bash heredocs containing Go raw strings broke in the Git Bash tool, so multi-line edits ran as Python scripts in the scratch directory.
 
 ## Known Stubs
 

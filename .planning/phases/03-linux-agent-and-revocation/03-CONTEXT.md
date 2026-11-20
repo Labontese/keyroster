@@ -31,7 +31,7 @@ All decisions below were made by the owner on 2026-10-23. Each is the option `03
 - **D-05: Two processes: an unprivileged network fetcher and a root applier without network access (OQ2).** The applier re-verifies everything the fetcher hands it and writes only an allowlist of paths. Only the applier may exec (`sshd -t/-T`, `ssh-keygen -Q`, the service manager), with fixed argv and absolute paths, under a narrow dependency-firewall allowlist with a test that pins every exec site. The fetcher gets no `os/exec`. — **Reversibility:** costly — merging or splitting processes later changes units, IPC and the threat model.
 - **D-06: Full self-test after every apply, with a probe account the runbook creates (OQ8).** After each change the agent checks that sshd answers with the right host certificate, that a probe certificate is accepted and that a revoked probe certificate is refused (proving the KRL is enforced); otherwise it rolls back. Probe certificates come from the machine CA, issued to each host by proof of possession (a new signer path). The local account `keyroster-probe` is created by the host-setup runbook and only checked by the agent; it has a nologin shell that exists and is executable and a password field of `*` (not `!`, not locked, no expiry), so sshd answers the probe but nobody can log in. Hosts whose `AllowUsers`/`AllowGroups`/`DenyUsers`/`DenyGroups` shut out the probe or break-glass account are detected with `sshd -T -C` and refused or reported. Whether probes count toward `PerSourcePenalties` is unknown and settled by a test.
 - **D-07: Unsupported or conflicting sshd configurations are refused with an explanation (OQ9, OQ10).** The agent never edits `sshd_config`; it works only through a drop-in. A host without `sshd_config.d` (RHEL 8) or one that already sets its own `TrustedUserCAKeys`, `RevokedKeys` or `AuthorizedPrincipalsFile` is refused and the report says what is in the way and how to fix it. The only exception is D-08.
-- **D-08: Hosts set up by hand in Phase 2 are taken over only when their layout is exactly the Phase 2 runbook's (OQ19).** Every file must match what the runbook wrote (`50-keyroster.conf`, `keyroster_user_ca.pub`, `/etc/ssh/principals/*`). The agent proves with `sshd -T -C` that its own settings win, self-tests, and only then removes the old files. Any other layout, including settings placed directly in `sshd_config`, is refused with instructions. The two dogfood hosts set up in 02-14 (the Proxmox test VM and zima-srv) are the test cases.
+- **D-08: Hosts set up by hand in Phase 2 are taken over only when their layout is exactly the Phase 2 runbook's (OQ19).** Every file must match what the runbook wrote (`50-keyroster.conf`, `keyroster_user_ca.pub`, `/etc/ssh/principals/*`). The agent proves with `sshd -T -C` that its own settings win, self-tests, and only then removes the old files. Any other layout, including settings placed directly in `sshd_config`, is refused with instructions. The two dogfood hosts set up in 02-14 (the Proxmox test VM and the homelab server) are the test cases.
 
 ### Revocation and timing
 
@@ -133,7 +133,7 @@ These pending todos are folded into Phase 3's plans (owner choice, 2026-10-23). 
 - keyroster-server: enrollment with join tokens, mTLS endpoints for agents, heartbeat storage, serving signed blobs (bundle, policy, directory, KRL manifest).
 - keyroster-signer: KRL signing with the ops key, revocation by subject from its own log, host and machine certificate issuance by proof of possession, probe certificates.
 - keyroster CLI: revoke commands, host approval, `@cert-authority` and revoked-host-keys management on the client (REVOKE-04).
-- Dogfood hosts: the laptop (Ubuntu 26.04, GNOME), the Proxmox test VM (Ubuntu 26.04, OpenSSH 10.2p1), zima-srv (Ubuntu 26.04.1, OpenSSH 10.2p1, seen 2026-10-23; often offline) and Proxmox itself (VE 9.2.18 on Debian 13, OpenSSH 10.0p2, read 2026-10-23).
+- Dogfood hosts: the laptop (Ubuntu 26.04, GNOME), the Proxmox test VM (Ubuntu 26.04, OpenSSH 10.2p1), the homelab server (Ubuntu 26.04.1, OpenSSH 10.2p1, seen 2026-10-23; often offline) and Proxmox itself (VE 9.2.18 on Debian 13, OpenSSH 10.0p2, read 2026-10-23).
 
 </code_context>
 
@@ -141,7 +141,7 @@ These pending todos are folded into Phase 3's plans (owner choice, 2026-10-23). 
 ## Specific Ideas
 
 - The owner accepted every recommendation in `03-DISCUSS-PREP.md`; when in doubt, the research's reasoning for that recommendation is the intent.
-- Owner-run steps (the permission classifier refuses them for agents): minting join tokens, `host approve` and other directory signing, the v4 and rotation ceremonies, and the dogfood steps on the hosts. Plans must hand these to the owner with exact commands, PowerShell syntax for Daniel-PC.
+- Owner-run steps (the permission classifier refuses them for agents): minting join tokens, `host approve` and other directory signing, the v4 and rotation ceremonies, and the dogfood steps on the hosts. Plans must hand these to the owner with exact commands, PowerShell syntax for the owner's workstation.
 - Token economy (owner preference, 2026-10-23): reviews are scaled by risk; security code keeps the full review.
 
 </specifics>

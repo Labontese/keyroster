@@ -402,7 +402,7 @@ See `key-decisions` in the frontmatter.
 
 ## Issues Encountered
 
-- **Shell heredocs.** In this session's Git Bash wrapper, long quoted heredocs failed with "unexpected EOF". Long test blocks were written to the session scratchpad and appended with `cat`.
+- **Shell heredocs.** In this session's Git Bash wrapper, long quoted heredocs failed with "unexpected EOF". Long test blocks were written to the session scratch directory and appended with `cat`.
 - **WSL command quoting.** As in 02-01, every WSL command with `$` or `$(...)` ran from a script file under `.git/` (never committed), so gofmt really ran in the gate.
 
 ## Not exercised (UNVERIFIED)

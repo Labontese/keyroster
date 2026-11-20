@@ -116,7 +116,7 @@ The owner delegated every gray area to Claude ("ta det som är bäst", 2026-10-1
   - On Windows the CLI uses `\\.\pipe\openssh-ssh-agent` through `github.com/Microsoft/go-winio`, a new dependency that is already in the locked stack. It is limited to Windows build tags, and the dependency-firewall and capslock baselines are updated in the same plan.
 - **D-16: Platform verification follows the no-unexercised-paths rule.**
   - CI builds and tests the CLI for Linux, macOS and Windows.
-  - Real logins run on the homelab: the Linux laptop, and Windows on Daniel-PC.
+  - Real logins run on the homelab: the Linux laptop, and Windows on the owner's workstation.
   - Any platform not exercised end to end (likely macOS) is labelled UNVERIFIED in docs and in the SUMMARY, and is put on the needs-hardware or needs-platform list. It is never shown as verified.
 
 ### Signer-side WebAuthn verification
@@ -205,7 +205,7 @@ The owner delegated every gray area to Claude ("ta det som är bäst", 2026-10-1
 
 ### Integration Points
 - `keyroster-server` is a new binary (`cmd/keyroster-server`). It runs on the signer host and reaches the signer over its Unix socket, as a member of the allowed group.
-- The homelab signer VM (`keyroster-signer-vm`, vTPM, bundle v2 under TEST roots C and D) is the dogfood target. The laptop (Linux) and Daniel-PC (Windows OpenSSH 9.5p2) are the real sshd and CLI targets.
+- The homelab signer VM (`keyroster-signer-vm`, vTPM, bundle v2 under TEST roots C and D) is the dogfood target. The laptop (Linux) and the owner's workstation (Windows OpenSSH 9.5p2) are the real sshd and CLI targets.
 
 </code_context>
 

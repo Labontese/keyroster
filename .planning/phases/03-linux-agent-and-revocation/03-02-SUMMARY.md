@@ -329,7 +329,7 @@ Each mutant was applied by hand, run, and restored. `git status` was checked to 
 
 - **WSL still does not resolve `keyroster.localhost`.**
   - A single `unshare --user --map-current-user --mount` could not bind-mount /etc/hosts ("must be superuser").
-  - Nested namespaces worked: an outer one with `--map-root-user --mount`, then an inner `--map-user=1000`. The script stayed in the session scratchpad and was not committed.
+  - Nested namespaces worked: an outer one with `--map-root-user --mount`, then an inner `--map-user=1000`. The script stayed in the session scratch directory and was not committed.
 - **The first two Task 3 commits had their contents swapped.** The staged todo renames landed in the restore commit. They were rebuilt locally with `git reset HEAD~2` (no `--hard`; the branch was not yet pushed), so each commit holds its own files.
 
 ## Known Stubs

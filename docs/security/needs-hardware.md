@@ -172,8 +172,8 @@ only in the signer's log and in the agent listings.
 
 | OS | Browser | Authenticator | Agent | SSH client → host | Result |
 |---|---|---|---|---|---|
-| Windows 11 (Daniel-PC) | Chrome | synced Chrome passkey, unlocked with Windows Hello | `keyroster agent` | inbox `OpenSSH_for_Windows_9.5p2` → stock OpenSSH 10.2p1 (Ubuntu 26.04 test VM) | verified, 2026-10-22: web sign-in and `/account`, `keyroster login`, certificate login, `--ttl 5m` certificate gone from the agent while the 8 h one stayed |
-| Ubuntu 26.04, GNOME (laptop) | Chrome | the same synced passkey, unlocked through Google Password Manager | GNOME `gcr-ssh-agent` | OpenSSH 10.2p1 → stock OpenSSH 10.2p1 (zima-srv) | verified, 2026-10-23: `keyroster login`, certificate login, `--ttl 5m` certificate gone from the agent 57 s after its expiry while the 8 h one stayed |
+| Windows 11 (the owner's workstation) | Chrome | synced Chrome passkey, unlocked with Windows Hello | `keyroster agent` | inbox `OpenSSH_for_Windows_9.5p2` → stock OpenSSH 10.2p1 (Ubuntu 26.04 test VM) | verified, 2026-10-22: web sign-in and `/account`, `keyroster login`, certificate login, `--ttl 5m` certificate gone from the agent while the 8 h one stayed |
+| Ubuntu 26.04, GNOME (laptop) | Chrome | the same synced passkey, unlocked through Google Password Manager | GNOME `gcr-ssh-agent` | OpenSSH 10.2p1 → stock OpenSSH 10.2p1 (the homelab server) | verified, 2026-10-23: `keyroster login`, certificate login, `--ttl 5m` certificate gone from the agent 57 s after its expiry while the 8 h one stayed |
 | macOS | any | any | OpenSSH `ssh-agent` | any | **UNVERIFIED**: no Mac in the homelab; the CLI flow runs in CI (`cli-macos`) |
 | Windows 11 | Edge, Firefox | any | `keyroster agent` | any | **UNVERIFIED**: not tried |
 
@@ -189,7 +189,7 @@ What these rows do not cover:
   `ssh-add -l` every 5 s. The key left the keyroster agent between 3.9 s
   before and 1.1 s after valid_before. The limits of that run:
   - the listing resolution was 5 s;
-  - the skew between Daniel-PC's clock and the server's clock was not
+  - the skew between the owner's workstation's clock and the server's clock was not
     measured;
   - only one key was in the agent, because it was cold-started: no 8 h key
     stayed alongside it in that run.
@@ -203,7 +203,7 @@ What these rows do not cover:
   unit-tested (`TestLoginFlowFakeServer/lifetime_recomputed_at_add`); it has
   not been re-timed on Windows, so its effect there is **UNVERIFIED**.
 - **The default key first.** On Linux, the first `ssh` after login
-  authenticated with the laptop's own plain key, because zima-srv also has
+  authenticated with the laptop's own plain key, because the homelab server also has
   it in `authorized_keys`. The certificate login was shown by a run with
   `-o PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com
   -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no`.
@@ -218,7 +218,7 @@ What these rows do not cover:
 - headless login (deferred, D-12);
 - Windows sshd as a certificate target (Phase 5).
 
-- **Windows: verified on Daniel-PC** (Windows 11, inbox
+- **Windows: verified on the owner's workstation** (Windows 11, inbox
   `OpenSSH_for_Windows_9.5p2`). Login keys go to `keyroster agent`, keyroster's
   own in-memory agent (owner decision D-15 option A), never to the inbox
   `ssh-agent` service, which refuses lifetime constraints and stores keys in the
@@ -243,16 +243,16 @@ What these rows do not cover:
   `low_integrity_squatter_refused`, `restricted_squatter_refused` and
   `deny_only_squatter_refused` run such a squatter (Low integrity; restricted
   token at Medium; user SID deny-only with no restricting SIDs, serving the
-  pipe with a DACL of its own that grants Authenticated Users) on Daniel-PC
+  pipe with a DACL of its own that grants Authenticated Users) on the owner's workstation
   and check that it gets no key. No AppContainer squatter was run. The pipe's DACL grants only that SID and denies network logons, and a second agent or
   another process cannot create the pipe while it exists. The SID comparison
   (`checkOwner` with LocalSystem) and the fail-closed path are unit-tested.
   `foreign_pipe_refused` runs `VerifyServerOwner` end to end on the EventLog
-  service's pipe. From a normal shell (Daniel-PC) the service process cannot
+  service's pipe. From a normal shell (the owner's workstation) the service process cannot
   be opened, so it exercises only the access-denied branch, which names the
   pipe's owner (`S-1-5-19`) as another account. The branch that reads a
   foreign server's token and refuses its SID runs only where that token is
-  readable. It is **UNVERIFIED**: it has not run on Daniel-PC, and a green
+  readable. It is **UNVERIFIED**: it has not run on the owner's workstation, and a green
   `cli-windows` run cannot show it either, because that job runs `go test`
   without `-v` and a passing test's "server token readable" log line is not
   printed (the elevated runner may also be denied that token).
@@ -283,7 +283,7 @@ What these rows do not cover:
   the pipe name first (it does not exit on its own). The mapping, and the
   refusal of a pipe whose DACL leaves the user out, are unit-tested, but the
   elevated case itself is **UNVERIFIED**: no agent was started from an
-  elevated shell on Daniel-PC.
+  elevated shell on the owner's workstation.
 - **GNOME gcr-ssh-agent (Ubuntu 26.04):** A3 passed in 02-14 (the Ubuntu
   26.04 packages gcr 3.41.2 and gcr4 4.4; the exact package versions are in
   the 02-14 evidence file). The probe from 02-02 added a key

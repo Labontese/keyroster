@@ -445,7 +445,7 @@ Each refusal case gets its own sshd instance or a reset, as already required by 
 | Debian 12 bookworm | 9.2p1 [VERIFIED sources.debian.org] | yes [CITED] | `ssh.service` (`Alias=sshd.service` only when enabled) | `ExecReload=sshd -t` then `kill -HUP` [VERIFIED salsa `ssh.service`] | |
 | Debian 13 trixie | 10.0p1 [VERIFIED] | yes [CITED] | as above | as above | `sshd-session` split (≥ 9.8) |
 | Ubuntu 24.04 noble | 9.6p1 [VERIFIED Launchpad] | yes [CITED] | **`ssh.socket` activation** (since 22.10) + `ssh.service` [CITED Ubuntu Discourse] | `ExecReload=sshd -t` + HUP [VERIFIED ubuntu/devel `ssh.service`] | `ssh.service` may be inactive until the first connection. A new connection starts it with `ExecStartPre=sshd -t`, so "reload" means: if inactive, do nothing; if active, reload. Never touch `Port`/`ListenAddress` (a generator rewrites the socket) |
-| Ubuntu 26.04 | 10.2p1 [VERIFIED Launchpad release pocket] | yes [ASSUMED] | as noble [ASSUMED] | as noble | the owner's laptop, and the Proxmox test VM that 02-14 used as its target host (OpenSSH 10.2p1) while the ZimaBoard was offline |
+| Ubuntu 26.04 | 10.2p1 [VERIFIED Launchpad release pocket] | yes [ASSUMED] | as noble [ASSUMED] | as noble | the owner's laptop, and the Proxmox test VM that 02-14 used as its target host (OpenSSH 10.2p1) while the homelab server was offline |
 | RHEL/Alma/Rocky 9 (c9s) | 9.9p1 [VERIFIED c9s spec] | yes [MEDIUM: only the changelog line "Move sshd_config include before any other definitions", spec line 1246; patch text unseen]; installs `50-redhat.conf` (spec line 655), and the `%post server` scriptlet creates `25-permitrootlogin.conf` (line 714) only when migrating an old anaconda setting [VERIFIED] | `sshd.service` | `kill -HUP`, **no `-t`** [VERIFIED c9s `sshd.service`] | crypto-policies may restrict `CASignatureAlgorithms`, and FIPS mode excludes Ed25519 [ASSUMED]; SELinux labels. `25-permitrootlogin.conf` sorts after `00-` and sets none of our keywords |
 | RHEL 8 (c8s) | 8.0p1 [VERIFIED c8s spec] | **no** `sshd_config.d` [VERIFIED] | `sshd.service` | HUP | Unsupported in Phase 3 unless the owner adds `Include` by hand (OQ9) |
 | Fedora | current | yes; the include was moved before all other definitions in 8.3p1-3 (2020) [VERIFIED spec changelog]; installs `40-redhat-crypto-policies.conf` and `50-redhat.conf` (Fedora spec lines 360-361) [VERIFIED] | `sshd.service` | HUP, no `-t` | `40-redhat-crypto-policies.conf` is Fedora only, not c9s |
@@ -729,7 +729,7 @@ The bundle already has generations and the states `active`, `next` and `retired`
 | Service-manager reload paths | systemd (`reload` with and without `-t`), OpenRC, Ubuntu socket activation | **UNVERIFIED in CI**: dogfood hosts only (systemd-in-container is possible but adds surface); each path labelled UNVERIFIED until run |
 | Signer | revoke, krl_publish, host_issue, machine_issue leaves; audit verify re-derives the revocation set and KRL hash; bundle with `next`/`draining` accepted; break-glass field | existing signer test harness |
 | End to end | signer + server + agent in one CI job: enroll → approve (test admin key) → apply → login → revoke → refused after the next poll → rotate CA (prepare/switch) with no failed login | CI e2e |
-| Dogfood | owner's Ubuntu 26.04 laptop, a Proxmox test VM (Ubuntu 26.04, OpenSSH 10.2p1, as used in 02-14), the ZimaBoard when it is online (distro to confirm), Proxmox itself; Phase 2 host migration (OQ19); break-glass drill; CA rotation drill; deliberate corrupt-KRL drill on one host | owner checkpoints |
+| Dogfood | owner's Ubuntu 26.04 laptop, a Proxmox test VM (Ubuntu 26.04, OpenSSH 10.2p1, as used in 02-14), the homelab server when it is online (distro to confirm), Proxmox itself; Phase 2 host migration (OQ19); break-glass drill; CA rotation drill; deliberate corrupt-KRL drill on one host | owner checkpoints |
 
 The containerised sshd tests extend the Phase 1 e2e harness (real sshd, `PerSourcePenalties` reset per refusal case, 01-04).
 
@@ -746,7 +746,7 @@ The matrix has two halves, and they test different things:
 | Docker on GitHub-hosted Ubuntu runners | preinstalled [CITED, GitHub runner images; not checked this session] |
 | systemd or OpenRC inside CI containers | not available by default, so the reload paths are UNVERIFIED in CI |
 | SELinux enforcing | not available in containers; needs an EL9 VM (dogfood or a later lane) |
-| Owner hosts | Ubuntu 26.04 laptop (OpenSSH 10.2p1 per Launchpad); a Proxmox test VM with Ubuntu 26.04 and OpenSSH 10.2p1, which 02-14 used as its target host because the ZimaBoard was offline; ZimaBoard **distro unconfirmed**; Proxmox **VE 8 or 9 unconfirmed** |
+| Owner hosts | Ubuntu 26.04 laptop (OpenSSH 10.2p1 per Launchpad); a Proxmox test VM with Ubuntu 26.04 and OpenSSH 10.2p1, which 02-14 used as its target host because the homelab server was offline; homelab server **distro unconfirmed**; Proxmox **VE 8 or 9 unconfirmed** |
 
 ---
 
@@ -884,7 +884,7 @@ The matrix has two halves, and they test different things:
 8. Machine identities (AUTH-06).
 9. CA rotation drill (prepare/switch) end to end in CI.
 10. Break-glass: offline signing command, agent `Match` block, runbook, drill.
-11. Dogfood and the ceremony checkpoint (OQ1): laptop, a Proxmox test VM, the ZimaBoard when online, Proxmox; Phase 2 host migration (OQ19); corrupt-KRL drill; rotation drill; owner-run admin steps.
+11. Dogfood and the ceremony checkpoint (OQ1): laptop, a Proxmox test VM, the homelab server when online, Proxmox; Phase 2 host migration (OQ19); corrupt-KRL drill; rotation drill; owner-run admin steps.
 
 ---
 

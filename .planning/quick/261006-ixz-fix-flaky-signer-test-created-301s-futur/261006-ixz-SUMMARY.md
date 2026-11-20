@@ -163,7 +163,7 @@ Every injected pause was reverted with `git checkout -- <file>`, and `git status
 
 **2. [Tooling] The RED evidence verb cannot parse Go test output**
 - `gsd-tools check tdd-red-evidence` parses only TAP and Surefire XML. On the persisted Go `-v` record it returns `INVALID_RED (zero_tests_discovered)`.
-- The RED is still valid. The package built, the named target subtest `TestEvidence/created_at_outside_skew_future` failed on its own assertion ("request issued, want the refusal request_time_skew"), and its sibling passed. The record is kept in the session scratchpad.
+- The RED is still valid. The package built, the named target subtest `TestEvidence/created_at_outside_skew_future` failed on its own assertion ("request issued, want the refusal request_time_skew"), and its sibling passed. The record is kept in the session scratch directory.
 - Task 2's RED is the injected, reverted pause on the unmodified test, as the plan specifies. It is not a separate committed failing test, so there is no `test(...)`-then-`feat(...)` pair. Both commits are `test(signer): ...`, because the plan is `type: execute` and the change is test-only.
 
 **Total deviations:** 2 (1 orchestrator-directed scope addition, 1 tooling limitation). **Impact:** none on the code. Production is unchanged.

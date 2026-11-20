@@ -67,7 +67,7 @@ Convenience. "The agent keeps sshd config in sync" turns into a generic config-p
 - **Vault CVE-2024-7594** (1.7.7 to 1.17.5): with neither `valid_principals` nor `default_user` set, an authenticated user could get a certificate with an **empty principals list** that authenticated as **any user** on the host. The fix added `allow_empty_principals=false` as the default.
 - Older SSH certificate semantics (the pre-draft PROTOCOL.certkeys) said a zero-length principals field means "valid for any principal". x/crypto/ssh's `CertChecker` historically followed that rule (`if len(cert.ValidPrincipals) > 0 { … }`).
 - **OpenSSH before 10.3** treated an empty-principals certificate as a wildcard when the CA was trusted via `authorized_keys cert-authority,principals="…"`. 10.3 (2026-04-02) changed this and also stopped treating wildcard characters in *user*-certificate principals as patterns. 10.3 additionally fixed comma-in-principal mis-matching on that same path. The `TrustedUserCAKeys` path was not affected.
-- **Windows inbox OpenSSH is 9.5p2** (checked on Daniel-PC), so it has none of the 10.3 fixes, and appliances lag further.
+- **Windows inbox OpenSSH is 9.5p2** (checked on the owner's workstation), so it has none of the 10.3 fixes, and appliances lag further.
 
 **Why it happens:**
 Zero-value structs. A Go `ssh.Certificate{}` has `ValidPrincipals == nil`, and Rust builders have similar defaults. Optional "principals" fields in the API also contribute.
@@ -169,8 +169,8 @@ Short-lived certificates make the CA a hard availability dependency. Agents rest
 ### Pitfall 8: Host certificate principals that don't match what clients type, plus agent-claimed hostnames
 
 **What goes wrong:**
-- `ssh` checks the host certificate against the **host name it actually connects to**: the `HostName` after `ssh_config` substitution, or `HostKeyAlias`. Users type `zima`, `zima.tailnet.ts.net`, `192.0.2.10` or a LAN IP. Any name missing from the certificate gets "Certificate invalid: name is not a listed principal". OpenSSH then **falls back to plain host-key checking (TOFU)** by default (9.8 added a way to disable the fallback via `HostKeyAlgorithms`), so users learn to click "yes".
-- **IP principals and DHCP**: the zima LAN address has already changed via DHCP. A long-lived host certificate for a reused IP lets the old machine impersonate whatever host now holds that IP.
+- `ssh` checks the host certificate against the **host name it actually connects to**: the `HostName` after `ssh_config` substitution, or `HostKeyAlias`. Users type `homelab-server`, `homelab-server.tailnet.ts.net`, `192.0.2.10` or a LAN IP. Any name missing from the certificate gets "Certificate invalid: name is not a listed principal". OpenSSH then **falls back to plain host-key checking (TOFU)** by default (9.8 added a way to disable the fallback via `HostKeyAlgorithms`), so users learn to click "yes".
+- **IP principals and DHCP**: the homelab server LAN address has already changed via DHCP. A long-lived host certificate for a reused IP lets the old machine impersonate whatever host now holds that IP.
 - **Agent-claimed names**: if the CA signs whatever hostname the agent reports, one compromised host can get a certificate for `db1.example.com` and impersonate any server.
 - `@cert-authority *` in clients' `known_hosts` trusts the host CA for **every** name. One mis-issued host certificate then compromises everything.
 
@@ -438,7 +438,7 @@ The web/API tier checks MFA and approvals, writes "approved" rows to the DB, and
 - **Inventory that edits.** Automatic removal or rotation of discovered keys removes break-glass keys and backup-job keys and causes outages. Keep v1 read-only, as already decided. Any future remediation needs per-host approval, a dry run and a rollback.
 - **A generic agent.** Each "while we're on the host, also do X" turns the agent into a config-management or RCE tool (Pitfall 2). The agent's capability list should be short enough to fit on one screen.
 - **Policy language creep.** A Turing-complete policy DSL is unauditable. Use declarative roles: principal sets, host labels, max TTL, approval requirement.
-- **Multi-platform too early.** Windows, macOS and appliances each have distinct config semantics. Get Linux right, including the drift and verification machinery, and treat each platform as a separate phase with its own test host. Daniel-PC (Windows 9.5p2), the Ubuntu laptop, zima and Proxmox are natural targets.
+- **Multi-platform too early.** Windows, macOS and appliances each have distinct config semantics. Get Linux right, including the drift and verification machinery, and treat each platform as a separate phase with its own test host. The owner's workstation (Windows 9.5p2), the Ubuntu laptop, the homelab server and Proxmox are natural targets.
 
 ## "Looks Done But Isn't" Checklist
 
@@ -491,7 +491,7 @@ The web/API tier checks MFA and approvals, writes "approved" rows to the DB, and
 | 15. Enrollment trust | P-Trust | Token single-use/TTL; admin approval before host cert |
 | 16. Hostile-file inventory | P-Inv | Symlink/oversize/malformed fixtures; no private key egress |
 | Supply chain / self-update | P-Rel (but design signing keys in P-Threat) | Reproducible rebuild; signed-update refusal test |
-| Windows specifics | P-Plat (Windows) | Daniel-PC dogfood: admin + non-admin cert login, ACL check |
+| Windows specifics | P-Plat (Windows) | The owner's workstation dogfood: admin + non-admin cert login, ACL check |
 
 **Ordering implications for the roadmap:**
 1. **P-Threat must come first and decide the trust architecture**: signer boundary, trust-root-signed bundles, break-glass CA, custody without chains. Pitfalls 1, 2, 6 and 10 can't be retrofitted cheaply.
@@ -512,7 +512,7 @@ The web/API tier checks MFA and approvals, writes "approved" rows to the DB, and
 - russh advisories via OSV API (crates.io)
 - Microsoft Learn, OpenSSH Server configuration for Windows (unsupported options, lowercase names, domain\user, administrators_authorized_keys ACL): https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_server_configuration
 - Win32-OpenSSH issues #2466 (Entra ID skips Match Group), #1055 (domain principals), Certificate Authentication wiki: https://github.com/PowerShell/Win32-OpenSSH/issues/2466 ; https://github.com/PowerShell/Win32-OpenSSH/wiki/Certificate-Authentication
-- Local verification: Daniel-PC inbox `OpenSSH_for_Windows_9.5p2`; Win32-OpenSSH latest release `10.0.0.0p2-Preview` (2025-10-27)
+- Local verification: the owner's workstation inbox `OpenSSH_for_Windows_9.5p2`; Win32-OpenSSH latest release `10.0.0.0p2-Preview` (2025-10-27)
 - *(LOW, from memory, verify in the relevant phase)*: OPNsense/pfSense sshd_config regeneration, macOS launchd/sshd_config.d behaviour, Dropbear certificate support, YubiKey 5.7 PIV Ed25519, HSM throughput figures, x/crypto `SignCert` RSA default history, tj-actions and Go-module-proxy typosquat incidents.
 
 ---

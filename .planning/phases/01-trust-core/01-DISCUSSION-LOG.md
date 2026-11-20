@@ -62,7 +62,7 @@
 | YubiHSM 2 | A real HSM | |
 | Only TPM | P-256, no backup | ✓ |
 
-**Note:** An attempt to probe TPM presence on zima and the laptop over ssh timed out, so this was not verified.
+**Note:** An attempt to probe TPM presence on the homelab server and the laptop over ssh timed out, so this was not verified.
 
 | Option | Description | Selected |
 |--------|-------------|----------|
@@ -72,7 +72,7 @@
 
 | Option | Description | Selected |
 |--------|-------------|----------|
-| zima (physical TPM, if present) | | |
+| Homelab server (physical TPM, if present) | | |
 | Proxmox VM with a vTPM | vTPM state lives on the Proxmox host | ✓ |
 | Decide in research | | |
 

@@ -133,5 +133,5 @@ These are owner-run because the permission classifier refuses them for agents:
 - minting join tokens;
 - `host approve` and other directory signing;
 - the root ceremony;
-- the dogfood steps on the laptop, a Proxmox test VM (Ubuntu 26.04, as used in 02-14), the ZimaBoard when it is online (please confirm its distro) and Proxmox itself (please confirm VE 8 or 9);
+- the dogfood steps on the laptop, a Proxmox test VM (Ubuntu 26.04, as used in 02-14), the homelab server when it is online (please confirm its distro) and Proxmox itself (please confirm VE 8 or 9);
 - approving the requirement rewordings in questions 20 and 21.

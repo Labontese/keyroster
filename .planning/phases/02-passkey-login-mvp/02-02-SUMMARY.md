@@ -71,7 +71,7 @@ coverage:
     requirement: AUTH-03
     verification:
       - kind: integration
-        ref: "internal/winagent/offer_windows_test.go#TestInboxSSHOffersAgentCert (Daniel-PC, KEYROSTER_REQUIRE_INBOX_SSH=1)"
+        ref: "internal/winagent/offer_windows_test.go#TestInboxSSHOffersAgentCert (the owner's workstation, KEYROSTER_REQUIRE_INBOX_SSH=1)"
         status: pass
       - kind: integration
         ref: "internal/winagent/winagent_windows_test.go#TestAgent/ensure_starts_real_agent"
@@ -100,7 +100,7 @@ coverage:
     description: "Admin SSHSIG signing on Windows reaches the inbox agent through go-winio"
     verification:
       - kind: manual_procedural
-        ref: "keyroster.exe ca issue --admin-key <ed25519 key in the inbox agent> on Daniel-PC: signed, then stopped only at the absent signer socket"
+        ref: "keyroster.exe ca issue --admin-key <ed25519 key in the inbox agent> on the owner's workstation: signed, then stopped only at the absent signer socket"
         status: pass
     human_judgment: false
   - id: D5
@@ -135,11 +135,11 @@ status: complete
 
 ## Probe evidence (Task 1)
 
-### A2: inbox ssh.exe and ssh-add.exe against a go-winio pipe agent (Daniel-PC)
+### A2: inbox ssh.exe and ssh-add.exe against a go-winio pipe agent (the owner's workstation)
 
-Throwaway module in the session scratchpad (go-winio v0.6.2, x/crypto v0.57.0). It served `agent.NewKeyring()` on `\\.\pipe\keyroster-probe-<8 hex>` with SDDL `D:P(D;;GA;;;NU)(A;;GA;;;<user SID>)`, plus an x/crypto/ssh server on 127.0.0.1 that recorded offers and refused them. Client: inbox `OpenSSH_for_Windows_9.5p2, LibreSSL 3.8.2`.
+Throwaway module in the session scratch directory (go-winio v0.6.2, x/crypto v0.57.0). It served `agent.NewKeyring()` on `\\.\pipe\keyroster-probe-<8 hex>` with SDDL `D:P(D;;GA;;;NU)(A;;GA;;;<user SID>)`, plus an x/crypto/ssh server on 127.0.0.1 that recorded offers and refused them. Client: inbox `OpenSSH_for_Windows_9.5p2, LibreSSL 3.8.2`.
 
-The first ssh-add run was refused with `UNPROTECTED PRIVATE KEY FILE`, because the scratchpad tree inherits an ACE for a local sandbox group. The second run gave the key files an owner-only protected DACL. Evidence from the second run (paths and fingerprints scrubbed):
+The first ssh-add run was refused with `UNPROTECTED PRIVATE KEY FILE`, because the scratch directory tree inherits an ACE for a local sandbox group. The second run gave the key files an owner-only protected DACL. Evidence from the second run (paths and fingerprints scrubbed):
 
 ```text
 $ SSH_AUTH_SOCK=\\.\pipe\keyroster-probe-45f10b8a ssh-add.exe -t 30 <scratch>/probe_key
@@ -175,11 +175,11 @@ $ SSH_AUTH_SOCK=\\.\pipe\keyroster-probe-45f10b8a ssh-add.exe -l
 The agent has no identities.
 ```
 
-**Result: A2 passed.** The working spelling is `//./pipe/<name>`. It works in `IdentityAgent`, both as `-o` and in a config file, and in `SSH_AUTH_SOCK`. `\\.\pipe\<name>` works in `SSH_AUTH_SOCK` but fails in `IdentityAgent`. `keyroster agent` printed `IdentityAgent //./pipe/keyroster-agent-<SID>` and `$env:SSH_AUTH_SOCK = '//./pipe/keyroster-agent-<SID>'`; superseded by the owner decision of 2026-10-17, after which it prints only a host-scoped `Host <your keyroster hosts>` block with the IdentityAgent line (see Pre-merge review fixes, round 2). The probe key files were overwritten and deleted, and the probe module and raw output were removed from the scratchpad.
+**Result: A2 passed.** The working spelling is `//./pipe/<name>`. It works in `IdentityAgent`, both as `-o` and in a config file, and in `SSH_AUTH_SOCK`. `\\.\pipe\<name>` works in `SSH_AUTH_SOCK` but fails in `IdentityAgent`. `keyroster agent` printed `IdentityAgent //./pipe/keyroster-agent-<SID>` and `$env:SSH_AUTH_SOCK = '//./pipe/keyroster-agent-<SID>'`; superseded by the owner decision of 2026-10-17, after which it prints only a host-scoped `Host <your keyroster hosts>` block with the IdentityAgent line (see Pre-merge review fixes, round 2). The probe key files were overwritten and deleted, and the probe module and raw output were removed from the scratch directory.
 
 ### A3: GNOME gcr-ssh-agent on the laptop
 
-The laptop could not be reached. `ssh ub-daniel` timed out on port 22, Tailscale reported the node offline (last seen 2 days earlier), and the LAN address timed out on ssh and ping. The gcr version and listings were therefore not collected. The probe script was written but not run, and it was deleted from the scratchpad. 02-14 Task 1 runs the same probe with the laptop on and the owner logged in.
+The laptop could not be reached. `ssh owner-laptop` timed out on port 22, Tailscale reported the node offline (last seen 2 days earlier), and the LAN address timed out on ssh and ping. The gcr version and listings were therefore not collected. The probe script was written but not run, and it was deleted from the scratch directory. 02-14 Task 1 runs the same probe with the laptop on and the owner logged in.
 
 A3: moved to 02-14
 
@@ -201,12 +201,12 @@ Consequence for 02-12: no gcr check ships. gcr-ssh-agent stays UNVERIFIED until 
   - `VerifyServerOwner` resolves the pipe server's PID, opens its process and token, and compares SIDs only in `checkOwner`. Access denied maps to `ErrOwnerUnverifiable` with the elevated-shell guidance. Since the pre-merge review fixes (below) it also requires Medium integrity or above and an unrestricted server token, and the guidance names another account's process as a second cause (naming the pipe's owner when it is neither the user nor Administrators).
   - `Ensure` dials or starts `keyroster agent` (detached), verifies the owner, and confirms the connection with one List. It retries once when the agent was closing, and never dials the inbox agent.
 - `keyroster agent` (Windows only) prints the pipe and the two ways to use it, in the proven spelling. The help covers per-SID agents for `runas` accounts and the elevated-shell refusal.
-- `dialAgent` is split per OS. On Windows, admin SSHSIG signing reaches the inbox agent through go-winio. This ran on Daniel-PC: `keyroster.exe ca issue --admin-key <ed25519 key in the inbox agent>` with SSH_AUTH_SOCK unset listed the agent, signed, and stopped only at the absent signer socket. With SSH_AUTH_SOCK set to a missing pipe, the error names the pipe.
+- `dialAgent` is split per OS. On Windows, admin SSHSIG signing reaches the inbox agent through go-winio. This ran on the owner's workstation: `keyroster.exe ca issue --admin-key <ed25519 key in the inbox agent>` with SSH_AUTH_SOCK unset listed the agent, signed, and stopped only at the absent signer socket. With SSH_AUTH_SOCK set to a missing pipe, the error names the pipe.
 - CI: `cli-windows` (windows-2025) and `cli-macos` (macos-15) run the CLI packages; neither is a required check. `KEYROSTER_REQUIRE_SSH_AGENT=1` is set in build-test and cli-macos. cli-windows set `KEYROSTER_REQUIRE_INBOX_SSH=1` only when the image had the inbox ssh.exe; since 5856a4e it sets it unconditionally.
 - `TestAgentLifetime` runs against real OpenSSH ssh-agent. In WSL it passed with the switch set; with `PATH=/nonexistent` it failed with "ssh-agent not found and KEYROSTER_REQUIRE_SSH_AGENT=1".
 - docs/security/needs-hardware.md has a new section, "Platform verification (D-16)".
 
-## Verification run on Daniel-PC and in WSL
+## Verification run on the owner's workstation and in WSL
 
 - `KEYROSTER_REQUIRE_INBOX_SSH=1 go test -count=1 -v ./internal/winagent/...` passed with no skips.
   - Passing tests: TestInboxSSHOffersAgentCert, plus TestAgent with lifetime_expiry_exit, idle_exit, second_serve_refused, verify_own_pipe, sddl_single_allow, openssh_spelling_dials, owner_mismatch_refused, owner_access_denied_names_elevation, ensure_fails_closed, exit_waits_for_open_connection, ensure_retries_once_on_closing_agent, add_races_expiry_exit and ensure_starts_real_agent.
@@ -236,7 +236,7 @@ Consequence for 02-12: no gcr check ships. gcr-ssh-agent stays UNVERIFIED until 
 
 ## Task Commits
 
-1. **Task 1: Gating probes A2/A3**: no commit (scratchpad only, by design)
+1. **Task 1: Gating probes A2/A3**: no commit (scratch directory only, by design)
 2. **Task 2: keyroster agent tracer**: `0a454a1` (feat)
 3. **Task 3: CI jobs, Unix lifetime test, platform record**: `c66306b` (ci); CI fix `a65e4dd` (fix)
 
@@ -288,7 +288,7 @@ See `key-decisions` in the frontmatter. The plan itself needed no owner decision
 
 **4. [Rule 3 - Blocking] Inbox OpenSSH refuses key files with inherited ACLs**
 - **Found during:** Task 1 (A2 probe)
-- **Issue:** `ssh-add.exe` rejected the key file as `UNPROTECTED PRIVATE KEY FILE`, because %TEMP% on Daniel-PC carries an inherited ACE for a local sandbox group.
+- **Issue:** `ssh-add.exe` rejected the key file as `UNPROTECTED PRIVATE KEY FILE`, because %TEMP% on the owner's workstation carries an inherited ACE for a local sandbox group.
 - **Fix:** The probe and TestInboxSSHOffersAgentCert give the key files an owner-only protected DACL.
 
 **5. [Rule 2 - Correctness] "A key was ever added" tracked at Add**
@@ -327,10 +327,10 @@ See `key-decisions` in the frontmatter. The plan itself needed no owner decision
 
 - GNOME gcr-ssh-agent lifetime and certificate handling: A3 moved to 02-14 (laptop offline).
 - A browser and passkey login on macOS: there is no Mac.
-- The mixed elevated case (agent started elevated, client in a normal shell): not run on Daniel-PC. The CI runner is elevated on both sides, which is a different case. Only the access-denied mapping is unit-tested.
+- The mixed elevated case (agent started elevated, client in a normal shell): not run on the owner's workstation. The CI runner is elevated on both sides, which is a different case. Only the access-denied mapping is unit-tested.
 - The t.Fatalf in the real-binary tests when a foreign agent already serves the account's pipe: no run arranged that (both answers of pipeInUse are asserted).
 - The 02-12 caller of Ensure does not exist yet. Ensure is exercised by ensure_starts_real_agent and the in-package cases.
-- The branch of `foreign_pipe_refused` that reads a foreign server's token and refuses its SID (pre-merge fix c3a0ca4): Daniel-PC runs only the access-denied branch, and cli-windows runs `go test` without `-v`, so a green run never prints which branch ran. A `checkOwner(me, me)` mutant is caught only where that branch runs.
+- The branch of `foreign_pipe_refused` that reads a foreign server's token and refuses its SID (pre-merge fix c3a0ca4): the owner's workstation runs only the access-denied branch, and cli-windows runs `go test` without `-v`, so a green run never prints which branch ran. A `checkOwner(me, me)` mutant is caught only where that branch runs.
 - An AppContainer squatter: not run. AppContainers are always Low integrity, which `low_integrity_squatter_refused` covers.
 
 ## Known Stubs
@@ -354,20 +354,20 @@ None. The new surface (a named pipe per user) is the subject of the plan's own t
 
 ## Pre-merge review fixes
 
-The PR #36 review confirmed 11 findings and split on 2. Findings that describe the same defect share a commit. The fixes are 9 commits, 094a015..16c0ae2, on top of 0bf097a (after `plan_head_after` and `commits: 4` above, which describe the plan's own run). Each test below failed before its fix and passes after it, on Daniel-PC (normal, non-elevated shell). `-race` was not run: it needs cgo, which this host does not have.
+The PR #36 review confirmed 11 items and split on 2. Items that describe the same defect share a commit. The fixes are 9 commits, 094a015..16c0ae2, on top of 0bf097a (after `plan_head_after` and `commits: 4` above, which describe the plan's own run). Each test below failed before its fix and passes after it, on the owner's workstation (normal, non-elevated shell). `-race` was not run: it needs cgo, which this host does not have.
 
-Final local run on Daniel-PC, on head 16c0ae2 plus this docs update (Go 1.27.1):
+Final local run on the owner's workstation, on head 16c0ae2 plus this docs update (Go 1.27.1):
 
 - gofmt reports no changed Go file; `go vet ./...` passes for GOOS=windows, linux and darwin.
 - `KEYROSTER_REQUIRE_INBOX_SSH=1 go test -count=1 -v ./internal/winagent/... ./cmd/keyroster/...` and `go test -count=1 ./...` pass.
-- golangci-lint v2.14.0 (a `go install` build in the session scratchpad, not the CI action's release binary) reports 0 issues with GOOS=windows, linux and darwin.
+- golangci-lint v2.14.0 (a `go install` build in the session scratch directory, not the CI action's release binary) reports 0 issues with GOOS=windows, linux and darwin.
 - govulncheck from tools/go.mod exits 0 with GOOS=windows, darwin and linux (no reachable vulnerability).
 
 Fixed:
 
 - **An access-denied dial was blamed only on an elevated agent of the user's own; another account squatting the pipe is a cause too** (findings "different-user pipe squatter ... mislabelled" and "fixed, publicly derivable pipe name ..." part a): 094a015. The guidance now names both causes, and the access-denied error stays in the chain (`%w`, errorlint). Test: `dial_access_denied_names_both_causes`, which dials a pipe whose DACL leaves the user out.
 - **VerifyServerOwner's refusal was never run end to end, and a foreign server got the elevation guidance** (finding "VerifyServerOwner's refusal path never runs in a test"): c3a0ca4. On access denied, the code now reads the pipe object's owner through the client handle; if that owner is neither the user nor Administrators, the error names it as another account. Test: `foreign_pipe_refused` on `\\.\pipe\eventlog`.
-  - On Daniel-PC this test runs only the access-denied branch, which names `S-1-5-19`.
+  - On the owner's workstation this test runs only the access-denied branch, which names `S-1-5-19`.
   - The branch that reads the token and refuses the SID runs only where the service token is readable, possibly on the elevated `cli-windows` runner. That is **UNVERIFIED**: the runner may be denied the token too, and cli-windows runs `go test` without `-v`, so a passing run never prints the "server token readable" line. A `checkOwner(me, me)` mutant is caught only where that branch runs, not locally. needs-hardware.md says the same.
 - **A same-user Low-integrity or restricted-token squatter passed the owner check and would have received the login key** (findings "Owner check accepts a pipe squatted by a low-integrity (sandboxed) process" and the split "VerifyServerOwner checks only the SID ... LOW-integrity / AppContainer / restricted"): a5a0bd6. The server token must now be at Medium integrity or above (Medium, not the caller's level, so an elevated login still accepts a normal agent) and must not be restricted.
   - Tests: `low_integrity_squatter_refused` (S-1-16-4096, with a Medium child as control) and `restricted_squatter_refused`. Both run the test binary as a squatter child under a lowered or restricted copy of the test's token.
@@ -407,7 +407,7 @@ Skipped:
 
 ### Round 2 (on eb6cc64, 2026-10-17)
 
-Four commits on eb6cc64, plus this docs update. Each test below failed before its change and passes after it on Daniel-PC (normal, non-elevated shell).
+Four commits on eb6cc64, plus this docs update. Each test below failed before its change and passes after it on the owner's workstation (normal, non-elevated shell).
 
 - **Owner decision: host-scoped IdentityAgent only** (DECIDED 2026-10-17, option 1 of the design item above): 1641013. `keyroster agent` help and printed output show a `Host <your keyroster hosts>` block with the `IdentityAgent` line (the printed one carries the real `//./pipe/` path), say in one sentence why it is host-scoped (the inbox `ssh.exe` and `ssh-add.exe` do not check who serves the pipe), keep the `ssh-add` / `AddKeysToAgent` warnings, and no longer mention `SSH_AUTH_SOCK`.
   - Tests: `TestAgentHelpWarnsAgainstSSHAdd` asserts the block and the absence of SSH_AUTH_SOCK; `TestInboxSSHOffersAgentCert` asserts the same on the real keyroster.exe output. Against the old output, the help test failed on both assertions and the offer test failed on the missing host-scoped block. The offer test still sets `SSH_AUTH_SOCK` for its own `ssh-add.exe` calls; only the printed advice changed.
@@ -418,10 +418,10 @@ Four commits on eb6cc64, plus this docs update. Each test below failed before it
 - **Docs: who can take the pipe name, and what the host-scoped block limits**: 63673a2. The help text and needs-hardware.md T-02-07 now say the name can be taken between agent runs by another local account's process or by a sandboxed process of the same user (Low integrity, or a restricted or deny-only token), and that the host-scoped IdentityAgent block limits the inbox clients' exposure to keyroster hosts. The pipe-squatting guard paragraph lists the deny-only check and test. `TestAgentHelpWarnsAgainstSSHAdd` failed on the old wording.
 - **A test comment stated an unverified CI branch as fact**: 8f97a8c. The `foreign_pipe_refused` comment now says the token branch is expected on the elevated CI runner but UNVERIFIED (cli-windows runs `go test` without `-v`).
 
-Local run on Daniel-PC, on head 8f97a8c plus this docs update (Go 1.27.1):
+Local run on the owner's workstation, on head 8f97a8c plus this docs update (Go 1.27.1):
 
 - gofmt reports no changed Go file; `go vet ./...` passes for GOOS=windows, linux and darwin.
 - `KEYROSTER_REQUIRE_INBOX_SSH=1 go test -count=1 -v ./internal/winagent/... ./cmd/keyroster/...` passes with no skips; `go test -count=1 ./...` passes.
-- golangci-lint v2.14.0 (the `go install` build in the session scratchpad, not the CI action's release binary) reports 0 issues with GOOS=windows, linux and darwin.
+- golangci-lint v2.14.0 (the `go install` build in the session scratch directory, not the CI action's release binary) reports 0 issues with GOOS=windows, linux and darwin.
 - `-race` was not run: it needs cgo, which this host does not have.
 - UNVERIFIED locally: whether `deny_only_squatter_refused` starts its child and passes in the cli-windows runner session. That is read from PR #36's checks.

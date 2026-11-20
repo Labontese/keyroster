@@ -12,7 +12,7 @@ files:
 
 docs/security/needs-hardware.md (the "Windows expiry timing" bullet near L185 and the Windows text near L274) still says the times of the Windows agent listings were not recorded.
 
-On 2026-10-23 the owner ran the timed `--ttl 5m` test from a cold start on Daniel-PC (02-VERIFICATION.md, "Owner decisions and resolution"):
+On 2026-10-23 the owner ran the timed `--ttl 5m` test from a cold start on the owner's workstation (02-VERIFICATION.md, "Owner decisions and resolution"):
 - The key left the keyroster agent between 3.9 s before and 1.1 s after valid_before.
 - The listing resolution was 5 s, and the clock skew was not measured.
 
