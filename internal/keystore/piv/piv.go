@@ -25,25 +25,52 @@
 // keyroster-signer exits with a status its systemd unit does not restart
 // on (D-CR-01).
 //
+// CA key generations (03-12f). Generation 1 of a role is the role's slot
+// above. Every later generation of every role (ops and log included) takes
+// a slot from the shared pool 0x87 to 0x95, 15 slots: the first one that no
+// generation row records, chosen by the rows and never by whether the slot
+// is empty. The row records the slot as its location, two lowercase hex
+// digits ("87" to "95", as piv-go's Slot.String writes it), and the slot is
+// never reused, even after its key is removed. When every slot is recorded,
+// prepare refuses piv_no_free_slot. A candidate slot that already holds a
+// key that no row records (a lost prepare, a restored signer.db, a key put
+// there by hand) is refused with ErrSlotOccupied and never overwritten, so
+// every later PIV prepare stops there until the slot is emptied
+// (docs/backends/piv.md). KeyAt, Holds and RemoveGeneration read only the
+// slot the row records, and Holds and RemoveGeneration compare the key in
+// it, never its occupancy. The backend never overwrites a slot, with one
+// exception: RemoveGeneration (retire-key) overwrites the draining
+// generation's own slot with a throwaway key generated on the card, on
+// every firmware, once the slot's key has the draining fingerprint. piv-go
+// v2.6.0 has no delete command, so the slot stays occupied by the
+// throwaway key.
+//
 // Options:
 //
 //	pin-file       file holding the PIV PIN (required)
-//	mgmt-key-file  file holding the PIV management key in hex (needed only
-//	               to provision keys)
+//	mgmt-key-file  file holding the PIV management key in hex, read only
+//	               when a key is generated or overwritten: by ca-init,
+//	               ca-rotate prepare and ca-rotate retire-key
 //	serial         serial number of the YubiKey to use (default: the only
 //	               attached YubiKey)
 //
 // Both secret files must be regular files with mode 0600 or stricter. The
-// default PIN and the default management key are refused, and so are keys
-// that were imported into the card rather than generated on it. Both the
-// card's identity (a reader name containing "yubikey") and a key's origin
-// are what the card reports; slot attestation is not checked, so custody
-// piv is card-reported, not proven (D-WR-04, docs/backends/piv.md).
+// PIN file is read when the backend opens. The management-key file is
+// read and checked at the start of each card write, used for that write and
+// not kept; every other command (serve, install-bundle, doctor) opens and
+// signs without it, so the file can stay off the host between ceremonies.
+// The default PIN and the default management key are refused, and so are
+// keys that were imported into the card rather than generated on it. Both
+// the card's identity (a reader name containing "yubikey") and a key's
+// origin are what the card reports; slot attestation is not checked, so
+// custody piv is card-reported, not proven (D-WR-04, docs/backends/piv.md).
 //
 // What CI verifies: everything in this file, through the card interface
-// with an in-memory fake card. What CI does not verify: yubikey.go (the
-// piv-go calls against a real card through pcscd) and piv-go's own signing
-// code. Those run first in the Phase 6 needs-hardware review
+// with an in-memory fake card (fake.go, compiled only with the pivfake
+// tag). What CI does not verify: yubikey.go (the piv-go calls against a
+// real card through pcscd) and piv-go's own signing code, and on a real
+// card the generation slots, an overwrite and its effect on the old key.
+// Those run first in the Phase 6 needs-hardware review
 // (docs/security/needs-hardware.md).
 package piv
 
@@ -71,8 +98,10 @@ var (
 	// ErrKeyNotPresent means the role's slot is empty or holds another key
 	// than the pinned one. The backend never falls back to another key.
 	ErrKeyNotPresent = errors.New("keystore piv: pinned CA key not present on the card")
-	// ErrSlotOccupied means Provision found a key in a target slot; it
-	// generates nothing and overwrites nothing.
+	// ErrSlotOccupied means Provision or ProvisionGeneration found a key in
+	// a target slot; it generates nothing and overwrites nothing. The one
+	// write over an occupied slot is RemoveGeneration's, of the draining
+	// generation's own slot after its key matched (03-12f).
 	ErrSlotOccupied = errors.New("keystore piv: slot already holds a key")
 	// ErrNoFreeSlot means every generation slot from 0x87 to 0x95 is
 	// recorded by a generation row: a later generation gets no slot, and
@@ -86,9 +115,13 @@ var (
 	ErrSlotHoldsAnotherKey = errors.New("keystore piv: the slot holds another key")
 )
 
-// errNotYet is what the generation methods return until they are
-// implemented.
-var errNotYet = errors.New("keystore piv: CA key generations are not implemented yet")
+// The backend's CA key generations (03-12f).
+var (
+	_ keystore.GenerationBackend     = (*backend)(nil)
+	_ keystore.GenerationProvisioner = (*backend)(nil)
+	_ keystore.GenerationHolder      = (*backend)(nil)
+	_ keystore.GenerationRemover     = (*backend)(nil)
+)
 
 // minPINRetries is the fewest PIN retries the card must have left before
 // the backend sends it the PIN. Below that it refuses without trying, so
@@ -105,6 +138,13 @@ var slots = map[keystore.Role]uint32{
 	keystore.RoleLog:     0x86,
 }
 
+// The pool of generation slots that every role's generations 2 and later
+// share (03-12f).
+const (
+	firstGenerationSlot = 0x87
+	lastGenerationSlot  = 0x95
+)
+
 func init() { keystore.Register("piv", open) }
 
 // openCard opens the card that open hands to the backend: a real YubiKey
@@ -115,9 +155,9 @@ var openCard = openYubiKey
 
 // config is the parsed and checked backend options.
 type config struct {
-	pin     string
-	mgmtKey []byte // nil: provisioning is not possible
-	serial  uint32 // 0: the only attached YubiKey
+	pin         string
+	mgmtKeyFile string // "": no card write is possible; read only at a card write
+	serial      uint32 // 0: the only attached YubiKey
 }
 
 type backend struct {
@@ -127,7 +167,7 @@ type backend struct {
 	ver  [3]int
 }
 
-// open checks the options and secret files before it touches the card.
+// open checks the options and the PIN file before it touches the card.
 func open(opts map[string]string) (keystore.Backend, error) {
 	cfg, err := parseOptions(opts)
 	if err != nil {
@@ -189,6 +229,8 @@ func newBackend(c card, cfg config) (*backend, error) {
 	return b, nil
 }
 
+// parseOptions checks the options and reads the PIN file. It keeps the
+// mgmt-key-file path only: the file is read at a card write (03-12f).
 func parseOptions(opts map[string]string) (config, error) {
 	var cfg config
 	if err := keystore.CheckOptions(opts, "serial", "pin-file", "mgmt-key-file"); err != nil {
@@ -209,25 +251,7 @@ func parseOptions(opts map[string]string) (config, error) {
 	case cfg.pin == ykpiv.DefaultPIN:
 		return cfg, errors.New("keystore piv: the card's default PIN is refused; change it first (docs/backends/piv.md)")
 	}
-	if f := opts["mgmt-key-file"]; f != "" {
-		raw, err := readSecretFile(f)
-		if err != nil {
-			return cfg, err
-		}
-		key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
-		if err != nil {
-			return cfg, fmt.Errorf("keystore piv: mgmt-key-file must hold the management key in hex: %w", err)
-		}
-		switch len(key) {
-		case 16, 24, 32:
-		default:
-			return cfg, fmt.Errorf("keystore piv: management key is %d bytes, want 16, 24 or 32", len(key))
-		}
-		if bytes.Equal(key, ykpiv.DefaultManagementKey) {
-			return cfg, errors.New("keystore piv: the card's default management key is refused; change it first (docs/backends/piv.md)")
-		}
-		cfg.mgmtKey = key
-	}
+	cfg.mgmtKeyFile = opts["mgmt-key-file"]
 	if s := opts["serial"]; s != "" {
 		n, err := strconv.ParseUint(s, 10, 32)
 		if err != nil || n == 0 {
@@ -236,6 +260,46 @@ func parseOptions(opts map[string]string) (config, error) {
 		cfg.serial = uint32(n)
 	}
 	return cfg, nil
+}
+
+// managementKey reads and checks the management key of the mgmt-key-file
+// option for one card write (03-12f). The caller uses it for that write
+// and does not keep it.
+func (b *backend) managementKey() ([]byte, error) {
+	return readManagementKey(b.cfg.mgmtKeyFile)
+}
+
+// readManagementKey reads the management key from path, with the checks a
+// secret file gets (a regular file, not a link, no group or other
+// permissions), and refuses a key that is not 16, 24 or 32 bytes of hex or
+// is the card's default. Every refusal reads "keystore piv: mgmt-key-file
+// <path>: <cause>".
+func readManagementKey(path string) ([]byte, error) {
+	key, err := checkManagementKey(path)
+	if err != nil {
+		return nil, fmt.Errorf("keystore piv: mgmt-key-file %s: %w", path, err)
+	}
+	return key, nil
+}
+
+func checkManagementKey(path string) ([]byte, error) {
+	raw, err := checkSecretFile(path)
+	if err != nil {
+		return nil, err
+	}
+	key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return nil, fmt.Errorf("must hold the management key in hex: %w", err)
+	}
+	switch len(key) {
+	case 16, 24, 32:
+	default:
+		return nil, fmt.Errorf("the management key is %d bytes, want 16, 24 or 32", len(key))
+	}
+	if bytes.Equal(key, ykpiv.DefaultManagementKey) {
+		return nil, errors.New("the card's default management key is refused; change it first (docs/backends/piv.md)")
+	}
+	return key, nil
 }
 
 func (b *backend) atLeast(major, minor, patch int) bool {
@@ -275,6 +339,49 @@ func slotFor(role keystore.Role) (ykpiv.Slot, error) {
 	return s, nil
 }
 
+// parseLocation returns the generation slot a location names: exactly one
+// of the 15 strings "87" to "95" (lowercase hex, as piv-go's Slot.String
+// writes the slot). Every other string, "0x87", "8A", " 87", "86" and "96"
+// among them, is ErrBadLocation.
+func parseLocation(location string) (ykpiv.Slot, error) {
+	for id := uint32(firstGenerationSlot); id <= lastGenerationSlot; id++ {
+		if location != fmt.Sprintf("%x", id) {
+			continue
+		}
+		s, ok := ykpiv.RetiredKeyManagementSlot(id)
+		if !ok {
+			return ykpiv.Slot{}, fmt.Errorf("keystore piv: no slot %#x", id)
+		}
+		return s, nil
+	}
+	return ykpiv.Slot{}, fmt.Errorf("%w (location %q)", ErrBadLocation, location)
+}
+
+// generationSlot resolves the slot of generation of role from the
+// generation row's location. Generation 1 is the role's own slot and takes
+// no location; generation 2 or later is the generation slot its location
+// names, never the role's slot. Anything else is ErrBadLocation.
+func generationSlot(role keystore.Role, generation uint32, location string) (ykpiv.Slot, error) {
+	own, err := slotFor(role)
+	if err != nil {
+		return ykpiv.Slot{}, err
+	}
+	switch generation {
+	case 0:
+		return ykpiv.Slot{}, fmt.Errorf("%w: role %s has no generation 0", ErrBadLocation, role)
+	case 1:
+		if location != "" {
+			return ykpiv.Slot{}, fmt.Errorf("%w: generation 1 of role %s is in slot %s and takes no location, got %q", ErrBadLocation, role, own, location)
+		}
+		return own, nil
+	}
+	s, err := parseLocation(location)
+	if err != nil {
+		return ykpiv.Slot{}, fmt.Errorf("generation %d of role %s: %w", generation, role, err)
+	}
+	return s, nil
+}
+
 // occupied reports whether slot holds a key. Only an error wrapping
 // ykpiv.ErrNotFound means empty; any other error is returned, so an
 // unreadable slot is never mistaken for an empty one.
@@ -290,6 +397,24 @@ func (b *backend) occupied(slot ykpiv.Slot) (bool, error) {
 	}
 }
 
+// slotKey returns the public key in slot, or nil for an empty slot. Only an
+// error wrapping ykpiv.ErrNotFound means empty; any other error is
+// returned. The caller holds mu.
+func (b *backend) slotKey(slot ykpiv.Slot) (ssh.PublicKey, error) {
+	info, err := b.card.KeyInfo(slot)
+	if errors.Is(err, ykpiv.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("keystore piv: read slot %s: %w", slot, err)
+	}
+	pub, err := ssh.NewPublicKey(info.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("keystore piv: slot %s: %w", slot, err)
+	}
+	return pub, nil
+}
+
 // Provision generates one key per role in the role's slot, with PIN policy
 // once and touch policy never. It checks every target slot first and
 // refuses, generating nothing, if any slot already holds a key or cannot be
@@ -300,8 +425,12 @@ func (b *backend) Provision(roles []keystore.Role) (map[keystore.Role]ssh.Public
 	if len(roles) == 0 {
 		return nil, errors.New("keystore piv: no roles to provision")
 	}
-	if b.cfg.mgmtKey == nil {
+	if b.cfg.mgmtKeyFile == "" {
 		return nil, errors.New("keystore piv: provisioning needs option mgmt-key-file")
+	}
+	mgmtKey, err := b.managementKey()
+	if err != nil {
+		return nil, err
 	}
 	targets := make(map[keystore.Role]ykpiv.Slot, len(roles))
 	for _, role := range roles {
@@ -329,7 +458,7 @@ func (b *backend) Provision(roles []keystore.Role) (map[keystore.Role]ssh.Public
 	}
 	pubs := make(map[keystore.Role]ssh.PublicKey, len(roles))
 	for _, role := range roles {
-		cpub, err := b.card.GenerateKey(b.cfg.mgmtKey, targets[role], ykpiv.Key{
+		cpub, err := b.card.GenerateKey(mgmtKey, targets[role], ykpiv.Key{
 			Algorithm:   alg,
 			PINPolicy:   ykpiv.PINPolicyOnce,
 			TouchPolicy: ykpiv.TouchPolicyNever,
@@ -349,9 +478,89 @@ func (b *backend) Provision(roles []keystore.Role) (map[keystore.Role]ssh.Public
 	return pubs, nil
 }
 
+// ProvisionGeneration generates the key of generation (2 or later) of role
+// in the first generation slot that no entry of used names (03-12f): used
+// holds the location of every stored generation row of every role, so the
+// slot is chosen by the rows, never by occupancy, and never reused. Every
+// entry of used must be a generation slot's location and none may repeat.
+// Before any card write it refuses: generation 1 or 0, a missing
+// mgmt-key-file option, a malformed or repeated entry of used, no free slot
+// (ErrNoFreeSlot), a candidate slot that already holds a key
+// (ErrSlotOccupied: a key that no row records is never skipped and never
+// overwritten) or cannot be read, and a management-key file it refuses. It
+// returns the slot as the location to record.
+func (b *backend) ProvisionGeneration(role keystore.Role, generation uint32, used []string) (ssh.PublicKey, string, error) {
+	if generation < 2 {
+		return nil, "", fmt.Errorf("keystore piv: generation %d of role %s is not a later generation (generation 1 is ca-init's)", generation, role)
+	}
+	if _, err := slotFor(role); err != nil {
+		return nil, "", err
+	}
+	if b.cfg.mgmtKeyFile == "" {
+		return nil, "", errors.New("keystore piv: creating a generation's key needs option mgmt-key-file (pass --backend-opt mgmt-key-file=FILE)")
+	}
+	recorded := make(map[uint32]bool, len(used))
+	for _, loc := range used {
+		s, err := parseLocation(loc)
+		if err == nil && recorded[s.Key] {
+			err = errors.New("two generation rows record it")
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("keystore piv: the generation rows' location %q is refused (edited rows?); nothing was generated: %w", loc, err)
+		}
+		recorded[s.Key] = true
+	}
+	var candidate uint32
+	for id := uint32(firstGenerationSlot); id <= lastGenerationSlot; id++ {
+		if !recorded[id] {
+			candidate = id
+			break
+		}
+	}
+	if candidate == 0 {
+		return nil, "", fmt.Errorf("%w: every generation slot from 0x87 to 0x95 is recorded by a generation row; nothing was generated", ErrNoFreeSlot)
+	}
+	slot, ok := ykpiv.RetiredKeyManagementSlot(candidate)
+	if !ok {
+		return nil, "", fmt.Errorf("keystore piv: no slot %#x", candidate)
+	}
+	alg, sshAlg := b.algorithm()
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	occ, err := b.occupied(slot)
+	if err != nil {
+		return nil, "", err
+	}
+	if occ {
+		return nil, "", fmt.Errorf("%w: slot %s (generation %d of role %s); nothing was generated; no generation row records the key in this slot, and every later PIV prepare stops here until the slot is emptied (docs/backends/piv.md)",
+			ErrSlotOccupied, slot, generation, role)
+	}
+	mgmtKey, err := b.managementKey()
+	if err != nil {
+		return nil, "", err
+	}
+	cpub, err := b.card.GenerateKey(mgmtKey, slot, ykpiv.Key{
+		Algorithm:   alg,
+		PINPolicy:   ykpiv.PINPolicyOnce,
+		TouchPolicy: ykpiv.TouchPolicyNever,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("keystore piv: generate the key of generation %d of role %s in slot %s: %w", generation, role, slot, err)
+	}
+	pub, err := ssh.NewPublicKey(cpub)
+	if err != nil {
+		return nil, "", fmt.Errorf("keystore piv: generation %d of role %s: %w", generation, role, err)
+	}
+	if pub.Type() != sshAlg {
+		return nil, "", fmt.Errorf("keystore piv: the card generated a %s key for generation %d of role %s, want %s", pub.Type(), generation, role, sshAlg)
+	}
+	return pub, slot.String(), nil
+}
+
 // Key reads the public key in role's slot, checks that it was generated on
 // the card and has the pinned fingerprint, and returns a CAKey that signs on
-// the card.
+// the card. It is generation 1 of role; KeyAt opens a later generation.
 func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, error) {
 	if fingerprint == "" {
 		return nil, fmt.Errorf("keystore piv: no pinned fingerprint for role %s", role)
@@ -360,6 +569,28 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 	if err != nil {
 		return nil, err
 	}
+	return b.keyInSlot(role, slot, fingerprint)
+}
+
+// KeyAt returns the key of generation of role with fingerprint, from the
+// slot the generation row's location names (03-12f): generation 1 with no
+// location is Key; a later generation opens only at its recorded slot and
+// never at the role's own slot.
+func (b *backend) KeyAt(role keystore.Role, generation uint32, fingerprint, location string) (keystore.CAKey, error) {
+	if fingerprint == "" {
+		return nil, fmt.Errorf("keystore piv: no pinned fingerprint for generation %d of role %s", generation, role)
+	}
+	slot, err := generationSlot(role, generation, location)
+	if err != nil {
+		return nil, err
+	}
+	return b.keyInSlot(role, slot, fingerprint)
+}
+
+// keyInSlot opens the key in slot for role: it checks that the card
+// generated it and that it has fingerprint, and returns a CAKey that signs
+// on the card.
+func (b *backend) keyInSlot(role keystore.Role, slot ykpiv.Slot, fingerprint string) (keystore.CAKey, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	info, err := b.card.KeyInfo(slot)
@@ -397,31 +628,75 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 	return &caKey{Signer: s, alg: pub.Type()}, nil
 }
 
-// KeyAt returns the key of generation of role (03-12f). Not implemented
-// yet: generation 1 without a location is Key.
-func (b *backend) KeyAt(role keystore.Role, generation uint32, fingerprint, location string) (keystore.CAKey, error) {
-	if generation == 1 && location == "" {
-		return b.Key(role, fingerprint)
+// Holds reports whether the slot that generation of role records still
+// holds the key with fingerprint (03-12f). It reads that slot only and
+// compares the key: an empty slot or another key (a throwaway after
+// RemoveGeneration) is not held. A location that does not resolve, or a
+// slot that cannot be read, is held, with the error: an unknown answer
+// never lets a draining key pass as removed.
+func (b *backend) Holds(role keystore.Role, generation uint32, fingerprint, location string) (bool, error) {
+	slot, err := generationSlot(role, generation, location)
+	if err != nil {
+		return true, err
 	}
-	return nil, errNotYet
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	pub, err := b.slotKey(slot)
+	if err != nil {
+		return true, err // could not tell: held
+	}
+	return pub != nil && ssh.FingerprintSHA256(pub) == fingerprint, nil
 }
 
-// ProvisionGeneration creates the key of a later generation (03-12f). Not
-// implemented yet.
-func (b *backend) ProvisionGeneration(_ keystore.Role, _ uint32, _ []string) (ssh.PublicKey, string, error) {
-	return nil, "", errNotYet
-}
-
-// Holds reports whether the backend still holds a generation's key
-// (03-12f). Not implemented yet: held, with an error.
-func (b *backend) Holds(_ keystore.Role, _ uint32, _, _ string) (bool, error) {
-	return true, errNotYet
-}
-
-// RemoveGeneration removes a generation's key (03-12f). Not implemented
-// yet.
-func (b *backend) RemoveGeneration(_ keystore.Role, _ uint32, _, _ string) error {
-	return errNotYet
+// RemoveGeneration removes the key of generation of role by overwriting
+// its recorded slot with a throwaway key generated on the card (03-12f;
+// piv-go v2.6.0 has no delete command, so this is done on every firmware).
+// This is the backend's only write over an occupied slot, and it happens
+// only after the slot's key has the draining fingerprint: an empty slot is
+// done with no write, and another key is refused with
+// ErrSlotHoldsAnotherKey and left alone. The management key is read only
+// then, right before the write. After the write the slot must hold another
+// key or none.
+func (b *backend) RemoveGeneration(role keystore.Role, generation uint32, fingerprint, location string) error {
+	slot, err := generationSlot(role, generation, location)
+	if err != nil {
+		return err
+	}
+	alg, _ := b.algorithm()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	pub, err := b.slotKey(slot)
+	if err != nil {
+		return err
+	}
+	if pub == nil {
+		return nil // the slot is empty: no key to remove, nothing written
+	}
+	if ssh.FingerprintSHA256(pub) != fingerprint {
+		return fmt.Errorf("%w: slot %s (generation %d of role %s)", ErrSlotHoldsAnotherKey, slot, generation, role)
+	}
+	if b.cfg.mgmtKeyFile == "" {
+		return errors.New("keystore piv: removing a generation's key needs option mgmt-key-file (pass --backend-opt mgmt-key-file=FILE)")
+	}
+	mgmtKey, err := b.managementKey()
+	if err != nil {
+		return err
+	}
+	if _, err := b.card.GenerateKey(mgmtKey, slot, ykpiv.Key{
+		Algorithm:   alg,
+		PINPolicy:   ykpiv.PINPolicyOnce,
+		TouchPolicy: ykpiv.TouchPolicyNever,
+	}); err != nil {
+		return fmt.Errorf("keystore piv: overwrite slot %s (generation %d of role %s) with a throwaway key: %w", slot, generation, role, err)
+	}
+	after, err := b.slotKey(slot)
+	if err != nil {
+		return fmt.Errorf("keystore piv: after the overwrite: %w", err)
+	}
+	if after != nil && ssh.FingerprintSHA256(after) == fingerprint {
+		return fmt.Errorf("keystore piv: slot %s still holds the key of generation %d of role %s after the overwrite", slot, generation, role)
+	}
+	return nil
 }
 
 func (b *backend) Close() error {
@@ -455,15 +730,25 @@ func (k *caKey) Algorithm() string { return k.alg }
 // readSecretFile reads a regular file (not a symlink) that has no group or
 // other permissions.
 func readSecretFile(path string) ([]byte, error) {
-	fi, err := os.Lstat(path)
+	data, err := checkSecretFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("keystore piv: %w", err)
 	}
+	return data, nil
+}
+
+// checkSecretFile is readSecretFile without the package prefix on its
+// errors, for a caller that names the option itself.
+func checkSecretFile(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
 	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("keystore piv: %s is not a regular file", path)
+		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
 	if fi.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("keystore piv: %s has mode %04o, want 0600 or stricter", path, fi.Mode().Perm())
+		return nil, fmt.Errorf("%s has mode %04o, want 0600 or stricter", path, fi.Mode().Perm())
 	}
 	return os.ReadFile(path) //nolint:gosec // G304: the operator names the secret file in the backend options
 }
