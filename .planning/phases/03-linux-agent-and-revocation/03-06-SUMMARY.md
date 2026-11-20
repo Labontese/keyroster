@@ -538,7 +538,7 @@ An independent narrow check of round 1's new code upheld ten problems (P1 to P10
 - **golangci-lint:** 0 issues in all four runs. One staticcheck S1003 was fixed before the commit.
 - **capslock-check:** agent 23 of 23 pairs, EXEC only through execsite (2 edges); signer 91 of 91. No new exec site.
 - **Other gates:** dep-firewall clean; testonly-firewall clean in 6 combinations; check-pinned-actions 47 of 47.
-- **Mutants:** 21 revert mutants, each applied to the WSL copy and restored (`scratchpad/r2probe/mutants.py`, with a guard that the pattern matched once). All 21 were killed. P6b (the backslash rule) first survived, because the test file also tripped the NAME=VALUE rule; the test now ends with a valid assignment, and the mutant is killed.
+- **Mutants:** 21 revert mutants, each applied to the WSL copy and restored (`<scratch>/r2probe/mutants.py`, with a guard that the pattern matched once). All 21 were killed. P6b (the backslash rule) first survived, because the test file also tripped the NAME=VALUE rule; the test now ends with a valid assignment, and the mutant is killed.
 
 ### UNVERIFIED (updated)
 

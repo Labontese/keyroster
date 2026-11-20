@@ -70,8 +70,8 @@ Certificates make access traceable and time-bounded, inventory surfaces access t
 
 - Competitive landscape: Teleport (powerful, but heavy and proxy-based, key features in enterprise tier), Smallstep step-ca (CA-focused), HashiCorp Vault SSH secrets engine (part of a large platform, BSL licence), Netflix BLESS (archived). Differentiation: **simplicity** (one binary, up in minutes, no proxy), **inventory** of existing keys, **minimal auditable attack surface**, and **fully open** with no paywalled security features.
 - Builds on native OpenSSH certificate support (`TrustedUserCAKeys`, `HostCertificate`, `@cert-authority`, `RevokedKeys`/KRL, `AuthorizedPrincipalsFile`).
-- Owner runs a homelab (Windows Daniel-PC with OpenSSH Server, Ubuntu laptop, ZimaBoard, Proxmox, all on Tailscale) — a natural dogfooding environment, including the Windows `administrators_authorized_keys` special case.
-- Research completed 2026-10-04 (`.planning/research/`): Go, pure-Go static binaries, SQLite, stdlib server-rendered UI; architecture "the server proposes, the signer disposes". No maintained Go KRL library exists — we own a fuzzed KRL encoder. Windows inbox OpenSSH is 9.5p2 (verified on Daniel-PC) and lacks 10.3 fixes.
+- Owner runs a homelab (the owner's Windows workstation with OpenSSH Server, Ubuntu laptop, the homelab server, Proxmox, all on Tailscale) — a natural dogfooding environment, including the Windows `administrators_authorized_keys` special case.
+- Research completed 2026-10-04 (`.planning/research/`): Go, pure-Go static binaries, SQLite, stdlib server-rendered UI; architecture "the server proposes, the signer disposes". No maintained Go KRL library exists — we own a fuzzed KRL encoder. Windows inbox OpenSSH is 9.5p2 (verified on the owner's workstation) and lacks 10.3 fixes.
 - Hosted on GitHub (account `Labontese`), developed with GitHub best practices from the first commit.
 
 ## Constraints

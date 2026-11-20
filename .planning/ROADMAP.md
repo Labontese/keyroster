@@ -142,7 +142,7 @@ Plans:
 - [x] 02-13-PLAN.md — Homelab: D-09 hostname checkpoint, bundle v3 with the RP (KEY-07 offline ceremony becomes v4), keyroster-server with tailscale cert, owner enrolled (D-04)
 
 **Wave 11** *(blocked on Wave 10 completion)*
-- [x] 02-14-PLAN.md — Homelab: real logins from Daniel-PC (Windows) and the laptop (Linux) to a stock OpenSSH host, corroborated by audit log and sshd journal; platform record (macOS UNVERIFIED); cli-macos required (cli-windows after the go-winio fix, owner decision D1)
+- [x] 02-14-PLAN.md — Homelab: real logins from the owner's workstation (Windows) and the laptop (Linux) to a stock OpenSSH host, corroborated by audit log and sshd journal; platform record (macOS UNVERIFIED); cli-macos required (cli-windows after the go-winio fix, owner decision D1)
 
 **UI hint**: yes
 **Research**: MEDIUM-HIGH. CLI WebAuthn transport (default: browser loopback with PKCE + state; libfido2 needs cgo), Windows webauthn.dll/CTAP for non-admin users, Windows ssh-agent named pipe, WebAuthn origin rules (hostname + TLS, IP-origin guard).
@@ -294,7 +294,7 @@ Plans:
 
 **UI hint**: no
 **Docs**: runbooks per plan as above; once the phase is verified, add the short README with a quickstart (documentation convention).
-**Research**: MEDIUM. KRL format and fuzzing for the in-house encoder (no maintained Go library), sshd `Include`/drop-in variance across distros, whether `RevokedKeys` is re-read without reload (settle with an integration test). Dogfood on the laptop, zima and Proxmox.
+**Research**: MEDIUM. KRL format and fuzzing for the in-house encoder (no maintained Go library), sshd `Include`/drop-in variance across distros, whether `RevokedKeys` is re-read without reload (settle with an integration test). Dogfood on the laptop, the homelab server and Proxmox.
 
 ### Phase 4: Insider Resistance and Web UI
 
@@ -325,7 +325,7 @@ Plans:
   2. Admin sees rogue CA trust flagged (`cert-authority` lines in authorized_keys, unknown keys in `TrustedUserCAKeys`, unexpected `AuthorizedKeysCommand`) and each host's sshd posture (password auth, root login, weak algorithms).
   3. A login with a certificate serial that is not in the issuance log raises an alert, and every break-glass login is recorded in the audit log and visible in reconciliation.
   4. One overview shows all certificates, keys, hosts, principals and expiry: who has access to what, now.
-  5. The agent's sync and inventory work on Windows OpenSSH 9.5p2+ (correct ACLs, config inserted before `Match Group administrators`, lowercase principals, admin key file; dogfooded on Daniel-PC), on macOS, and on FreeBSD, OpenBSD and NetBSD.
+  5. The agent's sync and inventory work on Windows OpenSSH 9.5p2+ (correct ACLs, config inserted before `Match Group administrators`, lowercase principals, admin key file; dogfooded on the owner's workstation), on macOS, and on FreeBSD, OpenBSD and NetBSD.
 
 **Plans**: TBD
 **UI hint**: yes

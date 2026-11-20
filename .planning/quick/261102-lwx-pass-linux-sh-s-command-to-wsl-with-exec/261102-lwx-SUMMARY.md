@@ -50,14 +50,14 @@ The scratch copy holds a `go.mod` and an unformatted `bad.go`, outside the repo.
 | Command | Before (`--`) | After (`--exec`) |
 |---|---|---|
 | scratch: `bash $L 'test -z "$(gofmt -l .)" && echo ok'` | prints `ok`, exit 0 (vacuous) | no output, exit 1 |
-| scratch: `bash $L 'echo "[$(command -v gofmt)]"'` | `[]` | `[/home/daniel/sdk/go1.27.1/bin/gofmt]` |
+| scratch: `bash $L 'echo "[$(command -v gofmt)]"'` | `[]` | `[/home/<user>/sdk/go1.27.1/bin/gofmt]` |
 | scratch: `bash $L 'gofmt -l .'` (no `$(...)`) | `bad.go` | `bad.go` |
 | scratch, after `gofmt -w bad.go`: the `test -z` check | n/a | `ok`, exit 0 |
-| repo: `bash scripts/linux.sh 'command -v gofmt'` | `/home/daniel/sdk/go1.27.1/bin/gofmt` | same |
+| repo: `bash scripts/linux.sh 'command -v gofmt'` | `/home/<user>/sdk/go1.27.1/bin/gofmt` | same |
 | repo: `bash scripts/linux.sh 'test -z "$(gofmt -l .)" && echo ok'` | n/a (vacuous) | `ok`, exit 0 |
 | repo: `bash scripts/linux.sh 'go version'` | `go version go1.27.3 linux/amd64` | same |
 | repo: `bash scripts/linux.sh 'exit 3'; echo $?` | 3 | 3 |
-| repo: `bash scripts/linux.sh 'echo "a b" "$HOME" '"'x y'"' \| cat; test -n "$HOME"'` | n/a | `a b /home/daniel x y`, exit 0 |
+| repo: `bash scripts/linux.sh 'echo "a b" "$HOME" '"'x y'"' \| cat; test -n "$HOME"'` | n/a | `a b /home/<user> x y`, exit 0 |
 
 Note: a bare `command -v gofmt` already worked before the change, because the string has nothing for the default shell to expand. The `$(command -v gofmt)` form is the one that failed before. `bash scripts/linux.sh 'gofmt -l .'` also worked before, so only the `$(...)` form was vacuous.
 

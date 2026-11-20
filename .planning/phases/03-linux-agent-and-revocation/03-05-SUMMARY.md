@@ -458,7 +458,7 @@ See `key-decisions` in the frontmatter. Also:
 
 - **A signer flake under load.** In the first full `go test -race ./...` in WSL, TestStartRefusedOnLogMismatch and TestSignerRestore failed. They passed alone and in a second full run. They do not touch agent code; the cause is likely the heavier parallel load the new apply tests add. Watch the CI build-test job.
 - **Heredoc backslashes again.** The Bash tool halves backslashes in heredocs, so some Python edits silently matched nothing. Edits switched to the Write and Edit tools; nothing broken was committed.
-- **WSL's /tmp is cleared** between some `linux.sh` calls, so logs were kept in the scratchpad instead.
+- **WSL's /tmp is cleared** between some `linux.sh` calls, so logs were kept in the scratch directory instead.
 
 ## Known Stubs
 

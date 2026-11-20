@@ -257,7 +257,7 @@ The plan's pinned lines (`install -d -m 0700 /root/recovery`, the `runuser ... c
 
 ## Issues Encountered
 
-- Bash heredocs that held Go or shell quoting were mangled by the tool's shell layer. Edits went through the Edit tool and Python script files in the scratchpad instead.
+- Bash heredocs that held Go or shell quoting were mangled by the tool's shell layer. Edits went through the Edit tool and Python script files in the scratch directory instead.
 - `scripts/linux.sh` and `wsl.exe bash -lc` expand `$VAR` in the outer shell (03-06b noted the same). The WSL checks ran from script files.
 
 ## Known Stubs

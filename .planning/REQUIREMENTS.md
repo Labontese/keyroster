@@ -184,7 +184,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | KEY-08 | Phase 3 | Pending |
 | AUTH-01 | Phase 2 | Complete |
 | AUTH-02 | Phase 2 | Complete |
-| AUTH-03 | Phase 2 | Pending: partially met. Linux and Windows verified end to end (02-14); Windows removal at expiry timed from a cold start on 2026-10-23 (key gone between 3.9 s before and 1.1 s after valid_before, 5 s resolution; Daniel-PC clock against server clock, skew unmeasured); macOS browser leg UNVERIFIED, phase 2 closed without it by owner decision 2026-10-23 (02-VERIFICATION.md override) |
+| AUTH-03 | Phase 2 | Pending: partially met. Linux and Windows verified end to end (02-14); Windows removal at expiry timed from a cold start on 2026-10-23 (key gone between 3.9 s before and 1.1 s after valid_before, 5 s resolution; the owner's workstation's clock against server clock, skew unmeasured); macOS browser leg UNVERIFIED, phase 2 closed without it by owner decision 2026-10-23 (02-VERIFICATION.md override) |
 | AUTH-04 | Phase 2 | Complete |
 | AUTH-05 | Phase 4 | Pending |
 | AUTH-06 | Phase 3 | Complete |

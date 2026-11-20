@@ -167,7 +167,7 @@ status: complete
 
 ## Task 1: owner dependency review (recorded)
 
-The orchestrator prepared the review exactly as Task 1's `<what-built>` prescribes, in a throwaway worktree of origin/main 52b99c4 in the session scratchpad, without touching the plan branch. Each added module was audited for identity, sumdb and tag integrity, licence, a code scan of the linked packages, OSV, vulndb and govulncheck, and maintenance.
+The orchestrator prepared the review exactly as Task 1's `<what-built>` prescribes, in a throwaway worktree of origin/main 52b99c4 in the session scratch directory, without touching the plan branch. Each added module was audited for identity, sumdb and tag integrity, licence, a code scan of the linked packages, OSV, vulndb and govulncheck, and maintenance.
 
 | Module | Version | Linked into keyroster-server | Licence | Audit verdict |
 |---|---|---|---|---|
@@ -187,7 +187,7 @@ Checks for every module (from the review): the go.sum h1 lines equal sum.golang.
 
 **Owner's reply (verbatim), 2026-10-21.** Question: "Godkänner du de 11 modulerna för 02-08, och ska planen härdas mot svagheterna ovan?" Reply: **"Godkänn + härdning (Rekommenderas)"**. The owner approved all 11 modules together with four hardening measures (H1-H4, below).
 
-**Task 1's automated checks, re-run on the plan branch before the first `go get`:** `git worktree list --porcelain` shows no scratchpad worktree (PASS); `git diff --quiet origin/main -- go.mod go.sum` exits 0 (PASS); the precondition `git cat-file -e origin/main:.planning/phases/02-passkey-login-mvp/02-07-SUMMARY.md` exits 0 (PASS).
+**Task 1's automated checks, re-run on the plan branch before the first `go get`:** `git worktree list --porcelain` shows no scratch-directory worktree (PASS); `git diff --quiet origin/main -- go.mod go.sum` exits 0 (PASS); the precondition `git cat-file -e origin/main:.planning/phases/02-passkey-login-mvp/02-07-SUMMARY.md` exits 0 (PASS).
 
 **After `go get` and `go mod tidy` (Task 2):** `go list -m all` is identical to the module set the owner reviewed (the review's `after-followup-list-m-all.txt`); go.mod gained 1 direct and 7 indirect requirement lines, as the review predicted; go.sum differs from the review's only by the h1 lines of testify, mock and yaml/v3, which equal the sum.golang.org values in the review's cross-check; `go mod verify` passes. **go-tpm check:** `go list -m github.com/google/go-tpm` printed `v0.9.9-0.20260124013517-8f8f42cba0de` before and after (RESEARCH A7). The signer's non-stdlib package list (`CGO_ENABLED=0 GOOS=linux go list -deps ./cmd/keyroster-signer`, 65 packages) is identical to the review's baseline.
 
@@ -245,7 +245,7 @@ The plan predicted crossOrigin true and topOrigin present in strictOnly. With th
 
 ## TDD record (Task 3; workflow.tdd_mode is false, so the gate sequence is advisory)
 
-- **RED, valid, for the new hardening behaviour** (`15dd014`, before any H1-H3 code). The GSD classifier was not run: it has no Go adapter. The semantic assessment below is from the go test output, kept in the scratchpad (`exec-0208/red-h2.txt`, `exec-0208/red-h1h3h4.txt`):
+- **RED, valid, for the new hardening behaviour** (`15dd014`, before any H1-H3 code). The GSD classifier was not run: it has no Go adapter. The semantic assessment below is from the go test output, kept in the scratch directory (`exec-0208/red-h2.txt`, `exec-0208/red-h1h3h4.txt`):
   - H2, `TestWebAuthnRSABounds`: exactly the H2 cases failed, each on its planned assertion (`ParsePublicKey = <nil>, want ErrPublicKey` for 4097, 8192 and 65536 bits, e=3, e=65539, e=2^31-1; `VerifyAssertion ... want ErrSignature wrapping ErrPublicKey` at login for 8192 and 65536 bits). 1024, 2047, 2048, 3072 and 4096 passed, as they should. Go's own x509 code refused none of the H2 cases: every bound is keyroster's. (The subtest times include generating an RSA-2048 key, so they are no measurement of the verification cost; the owner review's figures are.)
   - H1, `TestEnrollAttestationFormats`: all seven formats failed on the planned assertion (400 with "the passkey registration could not be verified" from go-webauthn's verifier path, want "unsupported attestation").
   - H3, `TestEnrollBodyLimits`: the four over-limit cases failed on the planned assertion (200, want 413); the at-limit cases passed.

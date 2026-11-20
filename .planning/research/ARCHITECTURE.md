@@ -543,7 +543,7 @@ Target: teams of 2–500 people, 10–5,000 hosts. A single node is fine.
 
 | Scale | Architecture adjustments |
 |-------|--------------------------|
-| Homelab, 1–10 users, <50 hosts | Single host; YubiKey PIV or software signer with a warning; quorum 1 with timelock; witness on a second machine (e.g. a laptop or ZimaBoard) |
+| Homelab, 1–10 users, <50 hosts | Single host; YubiKey PIV or software signer with a warning; quorum 1 with timelock; witness on a second machine (e.g. a laptop or the homelab server) |
 | 10–500 users, <5k hosts | YubiHSM 2; SQLite WAL; long-poll with ETag for KRL and bundles; inventory diffs, not full snapshots; agents' poll jitter |
 | 5k–50k hosts | Static KRL, bundles and tiles behind a cache or CDN-free mirror (signed content allows untrusted mirrors); optional Postgres; signer stays single (throughput is HSM-bound, still fine) |
 
@@ -655,7 +655,7 @@ identity (accounts, WebAuthn) ─► CLI login ─► policy v1 ─► quorum + 
 - **The real-sshd oracle harness comes first**, because the project's correctness is defined by stock OpenSSH behaviour across versions and platforms.
 - **Quorum (phase 5) comes after a working single-admin slice (3–4)**, but the policy *format* already carries `admin_quorum` and evidence fields from phase 2/3, so phase 5 changes values rather than formats.
 - **Inventory and reconciliation come after the agent and the log**, because both are inputs.
-- **Non-Linux agents come late** because they are the riskiest platform work and share all logic with the Linux agent. Windows is dogfoodable early on Daniel-PC if desired; a Windows CI runner can come during phase 4.
+- **Non-Linux agents come late** because they are the riskiest platform work and share all logic with the Linux agent. Windows is dogfoodable early on the owner's workstation if desired; a Windows CI runner can come during phase 4.
 
 ---
 

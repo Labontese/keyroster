@@ -279,7 +279,7 @@ advisory:
     category: other
     reason: "Resolved 2026-10-23: both truths accepted by owner override (below); the plan text itself is left as executed (editing it would stale covered_digest) and the correction is a pending todo"
     evidence_status: "deferred-items.md rows 02-13 and 02-14 (D1); todo 2026-10-23-correct-02-13-and-02-14-plan-text-drift.md"
-  - finding: "Committed files name the Windows desktop and the zima host by machine name (needs-hardware.md, 02-14-SUMMARY.md), outside the alias allow-list of the 02-13/02-14 hostname prohibition. The guard literals (6) match nothing at 391a49f"
+  - finding: "Committed files name the Windows desktop and the homelab server by machine name (needs-hardware.md, 02-14-SUMMARY.md), outside the alias allow-list of the 02-13/02-14 hostname prohibition. The guard literals (6) match nothing at 391a49f"
     category: security
     reason: "OPEN: no owner decision yet. Letter of the prohibition vs. the guard. Owner decides whether machine names count; if they do, replace them with the aliases"
     evidence_status: "git grep of the guard literals at 391a49f: 0 files"
@@ -321,7 +321,7 @@ overrides:
 **Verified:** 2026-10-23
 **Status:** passed (2026-10-23, after the owner's decisions). No code gap. The first end-to-end login is proven on Linux and Windows, and the timed Windows expiry run from a cold start was done. Four owner overrides were applied: the macOS real-browser leg closes as UNVERIFIED (no Mac), 02-13 truth 8 and 02-14 truth 9 are superseded, and SC5 is read through D-18. The owner accepted the evidence for the 9 flagged prohibitions; two negative tests are follow-ups. The original verifier status was human_needed; see "Owner decisions and resolution (2026-10-23)" at the end.
 **Re-verification:** No, initial verification.
-**Code under test:** `p02/close` at 5d406fc. Its code is identical to main `391a49f` (`git diff 391a49f HEAD -- . ':!.planning'` is empty). The clean clone `C:/Users/labon/kr-verify-02` is at 391a49f.
+**Code under test:** `p02/close` at 5d406fc. Its code is identical to main `391a49f` (`git diff 391a49f HEAD -- . ':!.planning'` is empty). The clean clone `~/kr-verify-02` is at 391a49f.
 
 ## Method and evidence base
 
@@ -445,7 +445,7 @@ No `scripts/*/tests/probe-*.sh` exists, and no PLAN declares one. Skipped.
 |---|---|---|
 | 02-01 … 02-12 | 126 | 126 VERIFIED. Each artifact passes, each key link is wired (two by hand), the named tests behind them pass in the local run or the CI e2e lanes, and the code was spot-read for the signer login path, directory, server routes, sign-in, CSP, banner, CLI login and Windows agent. |
 | 02-13 homelab RP and enrollment | 9 | 8 VERIFIED or attested. Bundle v3, policy v2 with the RP and directory installs are re-proven by my `audit verify`. **Truth 8** ("anchored on bundle v3") is **superseded**: the anchor is v2 by design (deferred-items.md). PASSED (override), accepted 2026-10-23. |
-| 02-14 homelab logins | 10 | 9 VERIFIED or attested. Truths 1-3 and 7 carry deviations 1-2: the Windows target was a Proxmox test VM, not zima. **Truth 4** (Windows key gone at expiry) was ⚠️ behavior-unverified at verification time (times not recorded) and is VERIFIED by the timed cold-start run of 2026-10-23. **Truth 9** (cli-windows green and required) is **superseded** by owner decision D1 and is false as written: cli-windows failed on main at 391a49f. PASSED (override), accepted 2026-10-23. |
+| 02-14 homelab logins | 10 | 9 VERIFIED or attested. Truths 1-3 and 7 carry deviations 1-2: the Windows target was a Proxmox test VM, not the homelab server. **Truth 4** (Windows key gone at expiry) was ⚠️ behavior-unverified at verification time (times not recorded) and is VERIFIED by the timed cold-start run of 2026-10-23. **Truth 9** (cli-windows green and required) is **superseded** by owner decision D1 and is false as written: cli-windows failed on main at 391a49f. PASSED (override), accepted 2026-10-23. |
 
 Totals after the owner's decisions: 143 verified or attested, 2 PASSED (override), 0 PRESENT_BEHAVIOR_UNVERIFIED. (At verification time: 142, 1 and 2 superseded.)
 
@@ -581,7 +581,7 @@ Evidence is in the owner's evidence directory, outside the repository (`windows-
 - **Procedure.** The owner stopped the keyroster agent (cold start; owner-run step, its output not captured), ran `keyroster.exe login --ttl 5m` with 02-13's Windows build, and listed the keyroster agent with the inbox `ssh-add -l` every 5 s with timestamps.
 - **Certificate.** Serial 1792752977539626, key `SHA256:rBi3Z86U...`, principals exactly `role:homelab-admin`, directory v6, policy v2. In the signer's export it is the login_issue at index 17: valid_after 12:51:17 and valid_before 13:01:17 CEST (server clock; issued 12:56:17, so the span is the 5 min TTL plus the 300 s backdating).
 - **Audit.** `keyroster audit verify --json` with the owner's root pins and threshold and `--previous homelab-after-linux.export`: ok, 18 entries, login_issue 5, refusals 0, bundle_version 3, policy_version 2, anchor_bundle_version 2. The orchestrator re-ran it, and the output was byte-identical to `verify-wincold.json`.
-- **Listings** (Daniel-PC clock):
+- **Listings** (the owner's workstation clock):
   - The key is listed from 12:56:41.393 onward. The last listing with the key was at 13:01:13.076.
   - The first `The agent has no identities.` came at 13:01:18.103.
   - From 13:01:23.131 on, `ssh-add` cannot connect (the pipe is gone): the agent exited after its last key expired.

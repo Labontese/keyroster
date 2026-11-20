@@ -20,7 +20,7 @@ model_sources:
 ## Plan-Revision Conflicts
 <!-- gsd:plan-revision-conflicts:end -->
 
-**Lanes.** `/gsd-review --phase 3 --all` on Daniel-PC. Claude was skipped as the host runtime.
+**Lanes.** `/gsd-review --phase 3 --all` on the owner's workstation. Claude was skipped as the host runtime.
 
 - **Codex** was prompt-fed with the full prompt (about 670 kB) and read the repository. Its citations point at real Go source (`internal/signer`, `internal/trust`, `internal/server`, `internal/audit`, `internal/wire`, `internal/directory`, `cmd/keyroster`). Absolute local paths in its links were rewritten as repo-relative.
 - **nemotron** and **gemma** are Ollama cloud models, called directly through `/api/chat` streaming. They had **no repository access** and got the prompt without RESEARCH.md, because the full prompt does not fit their context. Both are down-weighted below.
@@ -405,7 +405,7 @@ model_sources:
 - **HIGH** — Task 1 allows a `no_loopback_listener` preflight refusal to be recorded and handed to the owner, but Task 2 requires each enrolled host to apply state and pass self-tests. Under the chosen `loopback-only` decision, the refusal prevents those steps until the host’s sshd configuration is changed. Make this a blocking owner checkpoint before enrollment, not a note.
 - **HIGH** — The Proxmox host is included in the dogfood set, but its special cluster SSH files are a known constraint. The plan relies on tests proving paths are untouched; require preflight and a rollback/console-access plan before enabling the unit there.
 - **MEDIUM** — The corrupt-file drill directly overwrites the target of `current/revoked.krl`. Because generation directories are supposed to be immutable, this is an exceptional tampering simulation; restore and verify the exact prior bytes even if the apply does not create a new generation.
-- **MEDIUM** — All hosts are described as reachable prerequisites in the automated checks, while the plan says offline hosts are skipped. The check should derive the expected host list from recorded availability rather than hard-code zima and the Proxmox nodes.
+- **MEDIUM** — All hosts are described as reachable prerequisites in the automated checks, while the plan says offline hosts are skipped. The check should derive the expected host list from recorded availability rather than hard-code the homelab server and the Proxmox nodes.
 
 **Suggestions**
 
@@ -564,7 +564,7 @@ This plan builds the agent's apply engine — the component that writes sshd con
 
 #### Concerns
 - **HIGH — Owner decision checkpoint is blocking**: If the owner chooses anything other than `loopback-only`, Tasks 2-4 stop and the plan must be revised. The plan explicitly says "for any other answer, stop before Task 2... return `## CHECKPOINT REACHED`". This is correct process but means the plan cannot be executed until the owner responds. *Open question: Has the owner already provided the answer, or is this a future blocker?*
-- **HIGH — Self-test dials loopback only**: The `loopback-only` answer means a host whose sshd listens *only* on a tailnet address (no `ListenAddress 127.0.0.1`) is refused with `no_loopback_listener`. The plan says "its owner must add `ListenAddress 127.0.0.1` to sshd_config by hand, because the agent never edits it (D-07)". *Open question: Do any of the dogfood hosts (laptop, zima, Proxmox test VM, Proxmox host) have sshd listening only on tailnet? The 02-14 SUMMARY and host-setup.md contain no ListenAddress; 03-16's preflight will show it.*
+- **HIGH — Self-test dials loopback only**: The `loopback-only` answer means a host whose sshd listens *only* on a tailnet address (no `ListenAddress 127.0.0.1`) is refused with `no_loopback_listener`. The plan says "its owner must add `ListenAddress 127.0.0.1` to sshd_config by hand, because the agent never edits it (D-07)". *Open question: Do any of the dogfood hosts (laptop, the homelab server, Proxmox test VM, Proxmox host) have sshd listening only on tailnet? The 02-14 SUMMARY and host-setup.md contain no ListenAddress; 03-16's preflight will show it.*
 - **MEDIUM — `sshd -T` parsing for listen addresses**: The self-test gets listen addresses from `sshd -T`. If sshd has `ListenAddress 100.64.0.5` (tailnet) and no loopback, the agent refuses. But what if sshd has `ListenAddress 0.0.0.0` (wildcard)? The plan says "loopback 127.0.0.1 and ::1 when sshd listens on a wildcard; a configured loopback address as is". This assumes the wildcard includes loopback, which is true for OpenSSH. *Open question: Is this tested on all seven distro images?*
 - **MEDIUM — Drop-in content is fixed**: Three lines (`TrustedUserCAKeys`, `RevokedKeys`, `AuthorizedPrincipalsFile`) with a header comment. The agent never writes `/etc/ssh/sshd_config`. This is correct per D-07, but what if a distro's sshd_config.d include order places another drop-in *after* 00-keyroster.conf that overrides these keywords? The plan says "after writing the drop-in, `sshd -T` does not show our three values; the drop-in is removed again before any reload" — this is the `no_dropin_dir` refusal in 03-06. Good.
 - **LOW — Generation cleanup**: "Older generations beyond the newest 5 are removed." What if a rollback needs generation N-6? The plan says "a generation that `current` or `last-good` names is never deleted", so rollback always has at least those two. But if `last-good` points to N-6 and `current` to N-5, and a new apply creates N+1, then N-6 could be deleted while `last-good` still points to it. *Open question: Does the cleanup logic check `last-good` before deleting?*
@@ -595,7 +595,7 @@ This plan makes the apply engine safe across distributions: detects sshd binary/
 - **HIGH — RHEL 8 and FIPS exclusion (D-18)**: The plan documents these as unsupported. RHEL 8 lacks sshd_config.d; FIPS mode rejects Ed25519 CAs. This is an owner-approved scope reduction. *Open question: Is there a clear migration path for RHEL 8 users (upgrade to 9) or is this a permanent exclusion? The plan says "both exclusions are documented" — but does the documentation explain *why* and *what to do*?*
 - **HIGH — `account_excluded` is report-only**: The plan says "an account they exclude is reported in the preflight and check output, never edited". But if `AllowUsers alice` excludes the managed account `bob`, the agent will still write a principals file for `bob` that sshd ignores. The user `bob` cannot log in via certificate, but the agent reports success. *Open question: Should `account_excluded` be a refusal (preflight fails) rather than a report? The plan says "report only" — but this could silently break access.*
 - **MEDIUM — Drift check uses loopback client addresses**: `sshd -T -C user=<account>,host=127.0.0.1,addr=127.0.0.1,laddr=<l>,lport=<p>`. A `Match Address 100.64.0.0/10` block (tailnet) that overrides trust settings for remote clients would not be detected. The plan flags this as an assumption (AGENT-05 unclassified, unresolved). *Open question: Is there a plan to support per-host client address lists for drift checks in a later phase?*
-- **MEDIUM — Systemd/OpenRC reload paths UNVERIFIED**: The container matrix exercises the `signal` strategy only. The systemd smoke test (03-08) runs on ubuntu-24.04 runner; OpenRC and other distros' service managers stay UNVERIFIED until 03-16 dogfood. *Open question: Will the Proxmox host (Debian 13, systemd) and zima (Ubuntu 26.04, systemd) cover the systemd path in 03-16?*
+- **MEDIUM — Systemd/OpenRC reload paths UNVERIFIED**: The container matrix exercises the `signal` strategy only. The systemd smoke test (03-08) runs on ubuntu-24.04 runner; OpenRC and other distros' service managers stay UNVERIFIED until 03-16 dogfood. *Open question: Will the Proxmox host (Debian 13, systemd) and the homelab server (Ubuntu 26.04, systemd) cover the systemd path in 03-16?*
 - **LOW — `TestDistroFacts` records `casignaturealgorithms`**: This is for assumption A5 (FIPS). The plan says "alma:9's `sshd -T` casignaturealgorithms is recorded in the SUMMARY". Good, but *open question: Is this value used to adjust the CA key algorithm choice, or just documented?*
 
 #### Suggestions
@@ -848,13 +848,13 @@ This plan moves the homelab onto real offline roots in one ceremony (D-01): the 
 - **Owner approval by hash**: "After the owner approves the install by bundle hash, the homelab signer runs bundle v4." The install is one-way; hash approval prevents substitution.
 - **Directory rebind**: Owner signs directory v7 with `keyroster directory rebind` so installed directory carries the installation ID agents will pin. Logins keep working through the change (03-01 transition rule: lenient for random-128).
 - **TEST roots destruction**: Owner destroys C and D after passing audit; post-destruction audit passes with new pins only. KEY-07 complete.
-- **Guard literals**: No homelab hostnames/FQDNs/addresses in committed files; aliases only (`keyroster-signer-vm`, `zima`, `ub-daniel`). Guard list checked on every added line.
+- **Guard literals**: No homelab hostnames/FQDNs/addresses in committed files; alias only (`keyroster-signer-vm`) and the placeholders (`owner-laptop`, `homelab-server`). Guard list checked on every added line.
 
 #### Concerns
 - **HIGH — Owner-run ceremony steps**: The owner must execute `keyroster root init` ×N, `breakglass init`, `root successor-policy`, `ca-rotate prepare` (if next CA), `root sign` with multiple flags, `trust verify`, copy v4 to signer VM, store break-glass key/passphrase/sudo password offline, re-initialize CLIs, `directory rebind`, destroy C/D. *Open question: Is the command list in the runbook complete and tested by the rehearsal? The plan says "the runbook's command list is the one the rehearsal executes" — good.*
 - **HIGH — Next CA optional**: If owner chooses `any-no-next`, the rotation drill stays CI-only (UNVERIFIED on homelab). *Open question: Does the owner have three FIDO keys for the recommended `fido-2of3-next` option?*
 - **MEDIUM — Evidence files outside repo**: `$HOME/keyroster-ceremony/phase3/kr.env` holds non-secret values (KR_ROOTS, KR_THRESHOLD, KR_ROOT_CUSTODY, KR_BG_CUSTODY, KR_NEXT_CA, KR_V4_SHA16, KR_INSTALLATION_ID, KR_NEW_PINS, KR_SERVER, KR_TLS_ROOT_PEM). *Open question: Is this directory backed up? If the owner's machine fails, the ceremony evidence is lost (though the signed documents are in the repo).*
-- **LOW — Phase 2 hosts (Proxmox test VM, zima-srv) adoption**: They are taken over in 03-16, not here. This plan only installs the new bundle and rebinds the directory.
+- **LOW — Phase 2 hosts (Proxmox test VM, the homelab server) adoption**: They are taken over in 03-16, not here. This plan only installs the new bundle and rebinds the directory.
 
 #### Suggestions
 1. Add a "ceremony checklist" to the runbook that the owner can tick off step by step, with the exact commands and expected outputs (summary lines, hash prefixes).
@@ -869,30 +869,30 @@ This is a one-time operational ceremony with irreversible steps (root key creati
 ### 03-16 — Homelab Dogfood: Enrollment, Drills, Platform Record
 
 #### Summary
-This plan dogfoods the entire phase on the owner's real hosts: enroll laptop (ub-daniel), Proxmox test VM, zima-srv (when online), Proxmox host (Debian 13); take over the two Phase 2 hosts (02-14) via exact layout adoption; run drills (revocation timing, no-TOFU from Daniel-PC and laptop, corrupt file, break-glass with server down, machine identity, rotation if chosen); corroborate every claim with signer log (audit verify) + host sshd journals (serials, key IDs); label runbook steps run/UNVERIFIED honestly; write platform record in `needs-hardware.md`. README quickstart follows on `p03/close` after verification.
+This plan dogfoods the entire phase on the owner's real hosts: enroll laptop (owner-laptop), Proxmox test VM, homelab-server (when online), Proxmox host (Debian 13); take over the two Phase 2 hosts (02-14) via exact layout adoption; run drills (revocation timing, no-TOFU from the owner's workstation and laptop, corrupt file, break-glass with server down, machine identity, rotation if chosen); corroborate every claim with signer log (audit verify) + host sshd journals (serials, key IDs); label runbook steps run/UNVERIFIED honestly; write platform record in `needs-hardware.md`. README quickstart follows on `p03/close` after verification.
 
 #### Strengths
-- **Real-host validation**: All success criteria tested on actual hardware (Ubuntu 26.04, Debian 13, OpenSSH 9.5p2/10.2p1/10.0p2), including Windows inbox OpenSSH 9.5p2 on Daniel-PC for no-TOFU.
+- **Real-host validation**: All success criteria tested on actual hardware (Ubuntu 26.04, Debian 13, OpenSSH 9.5p2/10.2p1/10.0p2), including Windows inbox OpenSSH 9.5p2 on the owner's workstation for no-TOFU.
 - **Two independent records for every claim**: Signer's exported log (audit verify with new pins) + host sshd journals (serials, kr2/kr3/kbg1 key IDs). No claim without both.
-- **Honest labeling**: Runbook steps changed from UNVERIFIED to "run on <alias>, <date>" only for steps that actually ran. `needs-hardware.md` records what's UNVERIFIED (OpenRC, SELinux EL9, Arch/Alpine/RHEL real hosts, zima if offline, Windows client if not run, rotation if not chosen).
+- **Honest labeling**: Runbook steps changed from UNVERIFIED to "run on <alias>, <date>" only for steps that actually ran. `needs-hardware.md` records what's UNVERIFIED (OpenRC, SELinux EL9, Arch/Alpine/RHEL real hosts, the homelab server if offline, Windows client if not run, rotation if not chosen).
 - **Corrupt-file drill**: Local corruption of `current/revoked.krl` → `check` reports file drift, break-glass unaffected, next apply restores signed KRL.
 - **Break-glass drill with server stopped**: Proves offline capability.
 - **Guard literal check**: No homelab names/addresses in committed files; IPv4 regex check on diff.
 
 #### Concerns
-- **HIGH — zima-srv often offline**: The plan says "zima-srv when online... a host that was offline is listed as not exercised". If zima is offline during 03-16, its enrollment, drills, and platform record are missing. *Open question: Is there a fallback (e.g., run drills on the Proxmox test VM twice) or is zima's absence accepted as a gap?*
-- **HIGH — Windows client no-TOFU**: Daniel-PC runs Windows inbox OpenSSH 9.5p2. The plan says "the Windows result is recorded either way, replacing the earlier UNVERIFIED label only if it ran". *Open question: Does the Windows `keyroster login` + `known-hosts sync` work on 9.5p2? Phase 2 verification noted Windows removal at expiry was timed but macOS browser leg was UNVERIFIED. The Windows ssh client behavior with `@cert-authority` and `RevokedHostKeys` may differ.*
+- **HIGH — the homelab server often offline**: The plan says "the homelab server when online... a host that was offline is listed as not exercised". If the homelab server is offline during 03-16, its enrollment, drills, and platform record are missing. *Open question: Is there a fallback (e.g., run drills on the Proxmox test VM twice) or is the homelab server's absence accepted as a gap?*
+- **HIGH — Windows client no-TOFU**: The owner's workstation runs Windows inbox OpenSSH 9.5p2. The plan says "the Windows result is recorded either way, replacing the earlier UNVERIFIED label only if it ran". *Open question: Does the Windows `keyroster login` + `known-hosts sync` work on 9.5p2? Phase 2 verification noted Windows removal at expiry was timed but macOS browser leg was UNVERIFIED. The Windows ssh client behavior with `@cert-authority` and `RevokedHostKeys` may differ.*
 - **MEDIUM — Proxmox cluster SSH**: "Never touch root's authorized_keys, /etc/pve or cluster known_hosts (research Pitfall 14)." The agent's preflight on the Proxmox host must not mistake cluster-managed SSH config for foreign trust settings. *Open question: Does the preflight correctly distinguish Proxmox's cluster SSH config from a conflicting local config?*
 - **MEDIUM — Revocation timing measurement**: "Time from CLI's answer to first refused attempt on each host is recorded and is within the D-10 bound of about one minute plus jitter." The poll is 60s ±10s. *Open question: Is the measurement done from the CLI's timestamp or the server's KRL publish timestamp? The plan says "from the CLI's answer" — this includes network latency to the server.*
 - **LOW — README quickstart on p03/close**: Not in this plan. The SUMMARY must include the hand-off line.
 
 #### Suggestions
-1. If zima-srv is offline, document it clearly in the platform record and run the break-glass/machine drills on the Proxmox test VM instead (which is Ubuntu 26.04 like zima).
+1. If the homelab server is offline, document it clearly in the platform record and run the break-glass/machine drills on the Proxmox test VM instead (which is Ubuntu 26.04 like the homelab server).
 2. For Windows no-TOFU, test `ssh -o StrictHostKeyChecking=yes` with the generated `keyroster_ssh_config` Include line. Verify the `@cert-authority` line works with Windows OpenSSH 9.5p2 (known to have some cert-authority bugs fixed in 10.3).
 3. In the revocation timing drill, record both the CLI answer time (client-side) and the server's KRL publish time (from the log) to separate network latency from poll interval.
 
 #### Risk Assessment: MEDIUM
-This is the ultimate validation of Phase 3. The drills are comprehensive and corroborated. The main risks are environmental (zima offline, Windows 9.5p2 quirks, Proxmox cluster config) and are acknowledged with honest UNVERIFIED labels. The platform record will accurately reflect what was actually exercised.
+This is the ultimate validation of Phase 3. The drills are comprehensive and corroborated. The main risks are environmental (the homelab server offline, Windows 9.5p2 quirks, Proxmox cluster config) and are acknowledged with honest UNVERIFIED labels. The platform record will accurately reflect what was actually exercised.
 
 ---
 
@@ -957,7 +957,7 @@ These are correctly scoped to later phases per ROADMAP.
 - **Owner decisions recorded**: Three architectural checkpoints resolved before code, with verbatim owner wording in SUMMARYs.
 - **Security-first design**: Fetcher/applier split, mTLS with self-signed certs, no inbound ports, closed operation sets, strict parsing, audit log with Merkle proofs.
 - **Known gaps are documented**: UNVERIFIED labels, flagged assumptions in edge coverage, deferred items in ROADMAP.
-- **Residual risks**: Clock skew, Windows 9.5p2 client behavior, Proxmox cluster SSH, zima-srv availability, PIV slot exhaustion, TPM algorithm mismatch. These are operational/environmental, not design flaws.
+- **Residual risks**: Clock skew, Windows 9.5p2 client behavior, Proxmox cluster SSH, homelab server availability, PIV slot exhaustion, TPM algorithm mismatch. These are operational/environmental, not design flaws.
 
 The phase is well-structured, appropriately scoped, and the plans provide sufficient detail for implementation with clear verification criteria. The main execution risk is the owner-dependent checkpoints (03-01, 03-05, 03-09, 03-15) which require timely owner responses.
 ---

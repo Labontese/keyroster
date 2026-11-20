@@ -335,7 +335,7 @@ The review ran at head `449cbd1` against base `98e9e5c` in security mode. Daniel
 
 ### Fixes
 
-The evidence is in the scratchpad's `fix76-1/`. Every RED ran on the parent commit, in a `git archive` copy with only the new test file copied in. Every mutant ran in its own copy of the fix's tree, with -run filters and without -race.
+The evidence is in `<scratch>/fix76-1/`. Every RED ran on the parent commit, in a `git archive` copy with only the new test file copied in. Every mutant ran in its own copy of the fix's tree, with -run filters and without -race.
 
 | Fix | Commit | Test | RED and mutants |
 |---|---|---|---|

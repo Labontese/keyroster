@@ -161,7 +161,7 @@ Every command below ran under go1.27.3. All WSL commands went through `bash scri
 
 The ignore rule `/bin/` (.gitignore:2) covered `bin/kr-govulncheck`. It was deleted after the final verify.
 
-**gofmt caveat:** WSL's PATH gofmt is `/home/daniel/sdk/go1.27.1/bin/gofmt`, not go1.27.3's. The commit changes no .go file. CI's gofmt under go1.27.3 stays authoritative.
+**gofmt caveat:** WSL's PATH gofmt is `/home/<user>/sdk/go1.27.1/bin/gofmt`, not go1.27.3's. The commit changes no .go file. CI's gofmt under go1.27.3 stays authoritative.
 
 Task 2's `<verify>` string ran verbatim after the commit and exited 0. It checks:
 - a single-file commit;

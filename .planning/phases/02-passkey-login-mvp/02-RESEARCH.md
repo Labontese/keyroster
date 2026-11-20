@@ -94,7 +94,7 @@ The owner delegated every gray area to Claude ("ta det som är bäst", 2026-10-1
   - On Windows the CLI uses `\\.\pipe\openssh-ssh-agent` through `github.com/Microsoft/go-winio`, a new dependency that is already in the locked stack. It is limited to Windows build tags, and the dependency-firewall and capslock baselines are updated in the same plan.
 - **D-16: Platform verification follows the no-unexercised-paths rule.**
   - CI builds and tests the CLI for Linux, macOS and Windows.
-  - Real logins run on the homelab: the Linux laptop, and Windows on Daniel-PC.
+  - Real logins run on the homelab: the Linux laptop, and Windows on the owner's workstation.
   - Any platform not exercised end to end (likely macOS) is labelled UNVERIFIED in docs and in the SUMMARY, and is put on the needs-hardware or needs-platform list. It is never shown as verified.
 
 #### Signer-side WebAuthn verification
@@ -172,7 +172,7 @@ The research settles the open questions in CONTEXT.md:
 - **D-17 (algorithms):** accept ES256, EdDSA and RS256, because Windows Hello needs RS256. Store each credential in the directory as SPKI DER, so the signer needs **no CBOR at all**. go-webauthn handles the CBOR once, at registration on the server (Resolved Q3).
 - **Policy RP fields:** add them as an `omitempty` pointer field. Installed v1 policies then still round-trip byte-for-byte, as tested this session (Resolved Q4).
 
-The largest new finding is about Windows. The Win32-OpenSSH agent **refuses** any add-identity request with a lifetime constraint (`SSH_ERR_FEATURE_UNSUPPORTED`, so the CLI gets `SSH_AGENT_FAILURE`). This was reproduced on Daniel-PC's inbox 9.5p2: `agent refused operation`. It also **stores every added private key DPAPI-encrypted in the registry**, where it survives reboots. Both break D-15 and success criterion 2 on Windows, so the owner decided at a checkpoint: option A (Resolved Q5; Open Questions Q2, 2026-10-10).
+The largest new item is about Windows. The Win32-OpenSSH agent **refuses** any add-identity request with a lifetime constraint (`SSH_ERR_FEATURE_UNSUPPORTED`, so the CLI gets `SSH_AGENT_FAILURE`). This was reproduced on the inbox 9.5p2 of the owner's workstation: `agent refused operation`. It also **stores every added private key DPAPI-encrypted in the registry**, where it survives reboots. Both break D-15 and success criterion 2 on Windows, so the owner decided at a checkpoint: option A (Resolved Q5; Open Questions Q2, 2026-10-10).
 
 Two scope items are easy to miss. First, KEY-06 needs a whole new software keystore backend: `CustodySoftware` is only a constant today. Second, the signer protocol has one message type today. Phase 2 needs at least directory install, directory fetch and a status/custody message, and directory installs must work **online**: the current install-bundle pattern requires a signer restart.
 
@@ -326,11 +326,11 @@ Hence:
 
 ### Q5: Windows ssh-agent (D-15)
 
-**Finding (source read, and the refusal reproduced on Daniel-PC):**
+**Result (source read, and the refusal reproduced on the owner's workstation):**
 - In upstream Win32-OpenSSH (`PowerShell/openssh-portable`, branch `latestw_all`, file last changed 2025-04-08), `parse_key_constraints` accepts only `SSH_AGENT_CONSTRAIN_EXTENSION`. Any other constraint (lifetime, confirm) hits `default: error("Unknown constraint %d", ctype); return SSH_ERR_FEATURE_UNSUPPORTED;`. `process_add_identity` then answers `SSH_AGENT_FAILURE` [VERIFIED: raw `contrib/win32/win32compat/ssh-agent/keyagent-request.c` lines 264-317, read this session].
 - On success it encrypts the private key blob with DPAPI (`convert_blob(...)`) and writes it with `RegSetValueExW` under `SSH_KEYS_ROOT` [VERIFIED: same file lines 319-331], where it persists across reboots [CITED: Win32-OpenSSH issue #1056, open, "keeps added keys across reboots"].
 - **Inbox 9.5p2 refuses the lifetime constraint.**
-  - Daniel-PC runs `OpenSSH_for_Windows_9.5p2` with the `ssh-agent` service running.
+  - The owner's workstation runs `OpenSSH_for_Windows_9.5p2` with the `ssh-agent` service running.
   - A throwaway Ed25519 key made with `C:\Windows\System32\OpenSSH\ssh-keygen.exe` was added with the inbox `ssh-add.exe -t 60`. `SSH_AUTH_SOCK` was unset, so the default pipe `\\.\pipe\openssh-ssh-agent` was used.
   - Output: `Could not add identity "probe": agent refused operation`, exit status 1. `ssh-add -l` then listed 0 entries with the key's comment, so nothing was added.
   - The key files were deleted afterwards. [VERIFIED: probe run this session.]
@@ -344,7 +344,7 @@ Hence:
 
 | Option | Meets D-15 / SC2 | Cost |
 |--------|------------------|------|
-| A. **keyroster's own in-memory agent on Windows.**<br>`keyroster login` hands the key to a small agent process it starts.<br>That process serves `x/crypto/ssh/agent.NewKeyring()` on a per-user named pipe (go-winio `ListenPipe`, SDDL limited to the user's SID) and exits when its last key expires.<br>The user points `ssh` at it (`IdentityAgent` in `~/.ssh/config` or `SSH_AUTH_SOCK`). | Yes. The x/crypto keyring honours `LifetimeSecs` (`expireKeysLocked`) [VERIFIED: x/crypto v0.57.0 `ssh/agent/keyring.go` lines 116-188], and keys stay in memory. | More code (detached process, pipe ACL). Win32-OpenSSH honouring `IdentityAgent`/`SSH_AUTH_SOCK` with a pipe path is [ASSUMED]: verify on Daniel-PC |
+| A. **keyroster's own in-memory agent on Windows.**<br>`keyroster login` hands the key to a small agent process it starts.<br>That process serves `x/crypto/ssh/agent.NewKeyring()` on a per-user named pipe (go-winio `ListenPipe`, SDDL limited to the user's SID) and exits when its last key expires.<br>The user points `ssh` at it (`IdentityAgent` in `~/.ssh/config` or `SSH_AUTH_SOCK`). | Yes. The x/crypto keyring honours `LifetimeSecs` (`expireKeysLocked`) [VERIFIED: x/crypto v0.57.0 `ssh/agent/keyring.go` lines 116-188], and keys stay in memory. | More code (detached process, pipe ACL). Win32-OpenSSH honouring `IdentityAgent`/`SSH_AUTH_SOCK` with a pipe path is [ASSUMED]: verify on the owner's workstation |
 | B. Inbox agent, no constraint, plus cleanup of expired keyroster entries on each run and a `keyroster logout` | No (registry persistence; the key outlives the certificate) | Owner override of D-15 on Windows; must be documented as a residual. Stale entries cause `Too many authentication failures` if not cleaned |
 | C. Refuse on Windows unless a lifetime-capable agent answers | Fails closed | AUTH-03 Windows unmet in Phase 2 |
 
@@ -713,7 +713,7 @@ Proposed:
 
 ### Pitfall 5: Chrome Local Network Access
 **What goes wrong:** since Chrome 142, requests from public origins to local or loopback addresses need user permission. This covers "requests initiated using the JavaScript fetch() API, subresource loading, and subframe navigation" [CITED: developer.chrome.com/blog/local-network-access, update 2025-09-29]. Top-level navigation is not listed, and Chrome "plan[s] to extend these protections".
-**How to avoid:** never `fetch()` or iframe the loopback. Use a top-level navigation only. The CLI also prints the URL. Label every browser not exercised end to end UNVERIFIED (Chrome and Edge exist on Daniel-PC; Firefox is not installed there).
+**How to avoid:** never `fetch()` or iframe the loopback. Use a top-level navigation only. The CLI also prints the URL. Label every browser not exercised end to end UNVERIFIED (Chrome and Edge exist on the owner's workstation; Firefox is not installed there).
 
 ### Pitfall 6: RP ID is the full hostname, forever
 **What goes wrong:** `ts.net` is on the Public Suffix List (`ts.net` and `*.c.ts.net`) [VERIFIED: publicsuffix.org list this session], so the registrable domain is `<tailnet>.ts.net`. Using the tailnet domain as the RP ID would let **any** tailnet machine with `tailscale cert` act as RP for these passkeys. Renaming the machine or the tailnet invalidates every passkey. The machine name is published in CT logs [CITED: tailscale.com/kb/1153].
@@ -921,7 +921,7 @@ These were the owner checkpoints. The owner decided Q1 and Q2 during plan-phase 
    - What we knew: RP ID = the exact FQDN; `ts.net` is a public suffix; renaming invalidates passkeys; the name is visible in CT logs.
 2. **Windows agent (D-15)** — RESOLVED: option A. keyroster runs its own in-memory agent on a per-user named pipe, and the inbox agent is never used for login keys.
    - Assumption A2 (the inbox `ssh` honours a pipe in `IdentityAgent` / `SSH_AUTH_SOCK`) is probed first, in 02-02 Task 1. If the probe fails, the owner decides at a blocking-human checkpoint, with no silent fallback.
-   - What we knew: the inbox 9.5p2 agent on Daniel-PC refused `ssh-add -t 60` with "agent refused operation" (probe this session). Upstream source also shows DPAPI registry persistence.
+   - What we knew: the inbox 9.5p2 agent on the owner's workstation refused `ssh-add -t 60` with "agent refused operation" (probe this session). Upstream source also shows DPAPI registry persistence.
 3. **Login request format (D-08 role subset vs D-17 lock)** — RESOLVED without touching the lock: a separate `LoginIssueRequest` message with its own domain (Pattern 4), built in 02-01 Task 1. No owner action was needed.
 4. **D-12 shape** — RESOLVED: the server-held assertion plus code plus PKCE, as locked, with minting at redemption (Resolved Q2). Built in 02-12 Task 1; the loopback-assertion alternative is not pursued.
 5. **macOS** — RESOLVED as UNVERIFIED (D-16): there is no Mac in the homelab.
@@ -939,13 +939,13 @@ Owner checkpoints that stay inside the plans (decided at execution, not open res
 | Dependency | Required By | Available | Version | Fallback |
 |------------|------------|-----------|---------|----------|
 | Go toolchain | all | ✓ (Windows and WSL) | go1.27.1 | — |
-| WSL Ubuntu (scripts/linux.sh) | Linux tests from Daniel-PC | ✓ | Ubuntu, WSL 2 | CI |
+| WSL Ubuntu (scripts/linux.sh) | Linux tests from the owner's workstation | ✓ | Ubuntu, WSL 2 | CI |
 | OpenSSH client (Windows inbox) | Windows login target | ✓ | OpenSSH_for_Windows_9.5p2 | — |
 | Windows ssh-agent service | Windows CLI (D-15) | ✓ Running | 9.5p2 | Option A agent |
 | Windows sshd | real Windows login target | ✓ Running | 9.5p2 | — |
 | OpenSSH in WSL | Linux tooling | ✓ | OpenSSH_9.6p1 (sshd not in PATH) | CI builds sshd (scripts/build-openssh.sh) |
-| Chrome, Edge | browser dogfood on Daniel-PC | ✓ | installed | — |
-| Firefox | browser coverage | ✗ on Daniel-PC | — | Laptop (Ubuntu) or label UNVERIFIED |
+| Chrome, Edge | browser dogfood on the owner's workstation | ✓ | installed | — |
+| Firefox | browser coverage | ✗ on the owner's workstation | — | Laptop (Ubuntu) or label UNVERIFIED |
 | macOS machine | D-16 macOS login | ✗ | — | UNVERIFIED label, CI build and test only |
 | Homelab signer VM, laptop | dogfood | not probed this session (remote) | — | — |
 | `gh` | PR flow | ✓ | 2.87.3 | — |
@@ -1026,7 +1026,7 @@ Skipped: `"nyquist_validation": false` [VERIFIED: .planning/config.json:24]. Tes
     - homelab policy successor (bundle v3, TEST root C or D);
     - server install, `tailscale cert` timer;
     - enroll the owner as the first admin-user (D-04);
-    - log in from the laptop (Linux) and Daniel-PC (Windows) with Chrome, Edge and Firefox, using whatever authenticators the owner has (any one suffices; hardware optional);
+    - log in from the laptop (Linux) and the owner's workstation (Windows) with Chrome, Edge and Firefox, using whatever authenticators the owner has (any one suffices; hardware optional);
     - UNVERIFIED list for the rest.
 
 ## Sources

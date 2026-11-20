@@ -55,7 +55,7 @@ Also locked (CONTEXT.md §Phase Boundary): Go with `CGO_ENABLED=0`, SQLite with 
 | CA-05 | User certs default to `permit-pty` only | Per-CA extension profile in the genesis policy; x/crypto sorts extensions (verified) |
 | CA-06 | Signer signs only client-generated public keys | The signer API takes an SSH public-key blob only and has no subject-keygen path; it refuses cert-type and weak subject keys |
 | CA-07 | Signer refuses certificate-type keys as CA keys | x/crypto `SignCert` already refuses (verified at certs.go:475-480); add our own check at `ca init`/load plus filtering of agent signers |
-| CA-08 | Accepted/rejected by real sshd on 9.5p2 (Windows inbox) and latest | **No upstream 9.5p2 exists.** Build portable 9.5p1 and 10.5p1 from verified tarballs; Windows 9.5p2 is checked manually on Daniel-PC, with an optional Win32-OpenSSH job (Pitfall 1) |
+| CA-08 | Accepted/rejected by real sshd on 9.5p2 (Windows inbox) and latest | **No upstream 9.5p2 exists.** Build portable 9.5p1 and 10.5p1 from verified tarballs; Windows 9.5p2 is checked manually on the owner's workstation, with an optional Win32-OpenSSH job (Pitfall 1) |
 | KEY-01 | CA keys in a separate network-less signer behind a `Signer` interface | `keyroster-signer` over a UDS with an `SO_PEERCRED` allowlist; systemd `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`; a CI dependency firewall (Patterns 6-7) |
 | KEY-03 | CA keys in a PKCS#11 HSM via ssh-agent | ssh-agent backend via `x/crypto/ssh/agent`; SoftHSM2 in CI with P-256 (Ed25519 over PKCS#11 needs OpenSSH ≥ 10.1) (Pattern 1) |
 | KEY-04 | CA keys in a TPM 2.0 | go-tpm + go-tpm-keyfiles `NewLoadableKey(…, TPMAlgECC, 256, …)`; swtpm in CI (transport spike) (Pattern 1) |
@@ -67,7 +67,7 @@ Also locked (CONTEXT.md §Phase Boundary): Go with `CGO_ENABLED=0`, SQLite with 
 
 ## Project Constraints (from CLAUDE.md)
 
-These come from `./.claude/CLAUDE.md` (the project file) and `C:\Users\labon\CLAUDE.md` (the user workflow file). They carry the same weight as locked decisions.
+These come from `./.claude/CLAUDE.md` (the project file) and `~/CLAUDE.md` (the user workflow file). They carry the same weight as locked decisions.
 
 - **Security first**: above convenience and speed. The threat model covers a compromised CA server, stolen client keys, a malicious insider/admin, and supply-chain attacks.
 - **Simplicity**: small, auditable codebase, one binary per role, every feature is attack surface. The stack expects about 6-10 direct dependencies.
@@ -78,7 +78,7 @@ These come from `./.claude/CLAUDE.md` (the project file) and `C:\Users\labon\CLA
 - **What NOT to use** (CLAUDE.md): `stripe/krl`; `mattn/go-sqlite3`; `go-tpm-tools/simulator` in the main module (cgo; use swtpm); vendor PKCS#11 `.so` linked into the CA (use ssh-agent + `ssh-pkcs11-helper`); RSA or SHA-1 CA keys; X.509-style intermediates; `math/rand`; JWT; shelling out to `ssh-keygen` to sign in production (it is a test oracle only).
 - **Dev tools**: govulncheck v1.8.0, golangci-lint v2.14.0 (enable gosec, staticcheck, bodyclose, errorlint, forbidigo), capslock v0.3.3, native Go fuzzing (mandatory for every parser), and `ssh-keygen`/`sshd` as the integration oracle. GitHub Actions are pinned by commit SHA; never set `GONOSUMDB` or `GOFLAGS=-insecure`.
 - **GSD workflow**: file changes go through GSD commands (`/gsd-execute-phase`).
-- **User workflow** (`C:\Users\labon\CLAUDE.md`): plan before non-trivial work; verify before done (run tests and show proof); seek root causes, not temporary fixes; keep changes minimal. Lessons go in memory or `tasks/lessons.md`.
+- **User workflow** (`~/CLAUDE.md`): plan before non-trivial work; verify before done (run tests and show proof); seek root causes, not temporary fixes; keep changes minimal. Lessons go in memory or `tasks/lessons.md`.
 - **Language**: Daniel writes Swedish. Artifacts like this one are English, per the orchestrator.
 
 ## Summary
@@ -86,12 +86,12 @@ These come from `./.claude/CLAUDE.md` (the project file) and `C:\Users\labon\CLA
 Phase 1 builds the part of keyroster that cannot be retrofitted: a small `keyroster-signer` process. It holds the CA keys behind one keystore interface, validates every certificate field itself, allocates serials, and appends a signed Merkle-log entry before any certificate leaves the process. Around it sit an offline root that signs only typed documents (the trust bundle and genesis policy), and a repository that enforces signed, reviewed, CI-gated changes from the first commit. The locked stack held up under source inspection. `x/crypto/ssh` v0.57.0 already refuses certificate authorities in `SignCert` and sorts extensions. `go-tpm-keyfiles` returns ASN.1 ECDSA signatures that plug directly into `ssh.NewSignerFromSigner`. `sumdb/note` exposes `Signer`/`Verifier` interfaces, so a P-256 log key works with C2SP signature type 0x02. `transparency-dev/merkle` provides `rfc6962.DefaultHasher`, `compact.Range` and the proof verifiers.
 
 Four findings change the plan.
-1. **There is no upstream OpenSSH 9.5p2.** Windows' `OpenSSH_for_Windows_9.5p2` is Microsoft's build. CI must use portable **9.5p1** as the proxy and add a manual check on Daniel-PC (optionally a Win32-OpenSSH job).
+1. **There is no upstream OpenSSH 9.5p2.** Windows' `OpenSSH_for_Windows_9.5p2` is Microsoft's build. CI must use portable **9.5p1** as the proxy and add a manual check on the owner's workstation (optionally a Win32-OpenSSH job).
 2. **The ssh-agent backend is the thinnest real keystore.** A plain key loaded with `ssh-add` exercises the exact code path that PKCS#11/SoftHSM2 (KEY-03), and later YubiHSM 2 and PIV-via-ykcs11, use. The walking skeleton therefore needs no separate software keystore.
 3. **Root signatures should be SSHSIG, not signed notes.** Hardware root keys (`sk-ssh-ed25519`, PIV via PKCS#11) produce SSH signatures that `sumdb/note` cannot express, while SSHSIG verifies all of them with stock `ssh-keygen -Y verify`. Signed notes stay for log checkpoints.
 4. **A restore-safe serial needs no external state.** A clock-floor high-water mark (`serial = max(last+1, now_µs)`, never ahead of the clock) gives monotonic, never-reused serials after any rollback of signer state, provided the wall clock does not also roll back. That residual risk is detected later by witnesses (Phase 4).
 
-The environment is the main execution risk. Go is not installed on Daniel-PC or in its WSL Ubuntu 24.04. Docker Desktop is installed but stopped. sshd, SoftHSM2 and swtpm e2e tests are realistic only in Linux CI or WSL. Nothing exists on GitHub yet: no `Labontese/keyroster` repo, no SSH signing keys registered, and git is not configured to sign. The existing local commits are unsigned.
+The environment is the main execution risk. Go is not installed on the owner's workstation or in its WSL Ubuntu 24.04. Docker Desktop is installed but stopped. sshd, SoftHSM2 and swtpm e2e tests are realistic only in Linux CI or WSL. Nothing exists on GitHub yet: no `Labontese/keyroster` repo, no SSH signing keys registered, and git is not configured to sign. The existing local commits are unsigned.
 
 **Primary recommendation:** Build a walking skeleton first. It consists of repo bootstrap and minimal pinned CI; a strict cert builder; `keyroster-signer` over a UDS using the **ssh-agent keystore**; clock-floor serials; a SQLite Merkle log with a signed checkpoint per append; `keyroster ca issue`; minimal `keyroster audit verify`; and an e2e job proving that real sshd 9.5p1 and 10.5p1 accept the certificate and reject bad variants. Then expand in this order: root ceremony and trust bundle (SSHSIG + age); SoftHSM2 PKCS#11; TPM (swtpm); build-tagged PIV; audit export and tamper suite; full GitHub hygiene; systemd sandbox; `doctor`.
 
@@ -107,7 +107,7 @@ The environment is the main execution risk. Go is not installed on Daniel-PC or 
 | Root key custody and root signing | Offline machine (CLI `keyroster root …`) | USB media (age files) | KEY-07: never online, never on the CA host |
 | Trust-bundle and genesis-policy verification | Signer (refuses to operate without a valid bundle) | CLI (`audit verify`, `doctor`) | Agents (Phase 3) will be a third verifier, so the format is fixed now |
 | Admin requests to the signer (Phase 1 has no server) | CLI on the signer host over the UDS | — | The server arrives in Phase 2; the UDS peer-cred allowlist names the admin group now and the server uid later |
-| Real-sshd acceptance oracle | CI (Linux runner, OpenSSH built from source) | Manual check on Daniel-PC (Windows 9.5p2) | CA-08 |
+| Real-sshd acceptance oracle | CI (Linux runner, OpenSSH built from source) | Manual check on the owner's workstation (Windows 9.5p2) | CA-08 |
 | Branch protection, scanning, reporting | GitHub (rulesets, security features) | CI workflows | REPO-01..04 |
 
 ## Standard Stack
@@ -257,7 +257,7 @@ deploy/systemd/           # keyroster-signer.service (+ keyroster-signer-agent.s
 4. **`keyroster ca issue`** returns a cert. **`keyroster audit verify`** recomputes the root and checks the checkpoint.
 5. **The e2e job** builds OpenSSH 9.5p1 and 10.5p1, loads a CA key into ssh-agent, issues through the signer, logs in to a real sshd, and runs the negative cases.
 
-**Expansion waves after the skeleton:** (a) trust bundle, genesis policy and root ceremony (age + SSHSIG; sk-dummy stand-in); (b) SoftHSM2 via ssh-agent/PKCS#11; (c) TPM backend + swtpm + homelab vTPM dogfood; (d) PIV build tag; (e) audit export, tamper/removal test suite, fuzz targets for every decoder; (f) CodeQL, Scorecard, Dependabot, secret scanning, private vulnerability reporting, community files, CODEOWNERS, templates; (g) systemd unit and sandbox + `doctor` (software-root and vTPM warnings); (h) the manual Windows 9.5p2 check on Daniel-PC.
+**Expansion waves after the skeleton:** (a) trust bundle, genesis policy and root ceremony (age + SSHSIG; sk-dummy stand-in); (b) SoftHSM2 via ssh-agent/PKCS#11; (c) TPM backend + swtpm + homelab vTPM dogfood; (d) PIV build tag; (e) audit export, tamper/removal test suite, fuzz targets for every decoder; (f) CodeQL, Scorecard, Dependabot, secret scanning, private vulnerability reporting, community files, CODEOWNERS, templates; (g) systemd unit and sandbox + `doctor` (software-root and vTPM warnings); (h) the manual Windows 9.5p2 check on the owner's workstation.
 
 ### Pattern 1: One keystore interface, built on `ssh.Signer`
 **What:** Each backend yields an `ssh.Signer` plus custody metadata. `ssh.NewSignerFromSigner(crypto.Signer)` adapts TPM and PIV keys; the agent client yields `ssh.Signer`s directly.
@@ -402,16 +402,16 @@ Phase 1 is greenfield. The only "rename" is documentary (sshcm → keyroster, D-
 |----------|-------------|------------------|
 | Stored data | None. No DBs or services exist (verified: no source code, no repo on GitHub) | none |
 | Live service config | None. `gh repo view Labontese/keyroster` returns "Could not resolve"; user `keyroster-bot` does not exist (404) | Create the repo and bot in Phase 1 |
-| OS-registered state | None on Daniel-PC; the signer VM does not exist yet | Create the VM and units in the dogfood task |
+| OS-registered state | None on the owner's workstation; the signer VM does not exist yet | Create the VM and units in the dogfood task |
 | Secrets/env vars | `GH_TOKEN` with scopes `admin:ssh_signing_key, repo, user, workflow` is present; **no SSH signing keys registered** on Labontese (`user/ssh_signing_keys` → `[]`); git `gpg.format`/`user.signingkey` unset | Register the owner's signing key and configure git (`gpg.format ssh`) before the first push |
-| Build artifacts | Local git repo at `C:\Users\labon\ssh-cert-manager` with 5+ **unsigned** commits, no remote; directory name differs from the repo name | Re-sign history before the first push (`git rebase --root --exec 'git commit --amend --no-edit -S'`) or accept unsigned genesis commits; set remote `github.com/Labontese/keyroster` |
+| Build artifacts | Local git repo at `~/ssh-cert-manager` with 5+ **unsigned** commits, no remote; directory name differs from the repo name | Re-sign history before the first push (`git rebase --root --exec 'git commit --amend --no-edit -S'`) or accept unsigned genesis commits; set remote `github.com/Labontese/keyroster` |
 
 ## Common Pitfalls
 
 ### Pitfall 1: "OpenSSH 9.5p2" does not exist upstream
 **What goes wrong:** A CI job tries to download `openssh-9.5p2.tar.gz` and gets a 404 (verified), or someone quietly substitutes 9.6.
-**Why:** Windows' inbox `OpenSSH_for_Windows_9.5p2` (verified on Daniel-PC) is Microsoft's own build. The upstream 9.x tarballs are 9.0p1…9.9p2, with 9.3p2 and 9.9p2 but no 9.5p2. Win32-OpenSSH's public release for that line is `v9.5.0.0p1-Beta` (2023-12-18) [VERIFIED: gh api releases].
-**How to avoid:** CI matrix = portable **9.5p1** (closest upstream code) + **10.5p1** (latest). Add a manual `checkpoint:human-verify` on Daniel-PC with the inbox 9.5p2 sshd. Optionally add a windows-runner job installing the Win32-OpenSSH `v9.5.0.0p1-Beta` zip [ASSUMED feasible on hosted runners].
+**Why:** Windows' inbox `OpenSSH_for_Windows_9.5p2` (verified on the owner's workstation) is Microsoft's own build. The upstream 9.x tarballs are 9.0p1…9.9p2, with 9.3p2 and 9.9p2 but no 9.5p2. Win32-OpenSSH's public release for that line is `v9.5.0.0p1-Beta` (2023-12-18) [VERIFIED: gh api releases].
+**How to avoid:** CI matrix = portable **9.5p1** (closest upstream code) + **10.5p1** (latest). Add a manual `checkpoint:human-verify` on the owner's workstation with the inbox 9.5p2 sshd. Optionally add a windows-runner job installing the Win32-OpenSSH `v9.5.0.0p1-Beta` zip [ASSUMED feasible on hosted runners].
 **Warning signs:** The plan says "9.5p2" in a download URL.
 
 ### Pitfall 2: Ed25519 via PKCS#11 needs OpenSSH ≥ 10.1 in the agent
@@ -576,7 +576,7 @@ JSON
 | A2 | `tpm_vtpm_proxy` can be loaded on GitHub-hosted Ubuntu runners | Pitfall 7 | Fall back to A1 |
 | A3 | Ruleset bypass actor `RepositoryRole` id 5 = admin, and is available on a personal-account repo | Pattern 9 | Bypass mis-targeted; check with `gh api …/rulesets` after creation |
 | A4 | Required-status-check `integration_id` 15368 = GitHub Actions | Pattern 9 | Use context-only checks if wrong |
-| A5 | A Win32-OpenSSH 9.5.0.0p1 zip can be installed and run on windows-latest runners | Pitfall 1 | Keep the manual Daniel-PC check as the only Windows evidence |
+| A5 | A Win32-OpenSSH 9.5.0.0p1 zip can be installed and run on windows-latest runners | Pitfall 1 | Keep the manual check on the owner's workstation as the only Windows evidence |
 | A6 | Proxmox vTPM is swtpm and identifiable by manufacturer/vendor string | Pitfall 8 | `doctor` relies on the declared custody instead |
 | A7 | `synchronous=FULL` in WAL mode makes each commit durable before return | Pattern 4 | Weaker durability; verify in the SQLite docs during implementation |
 | A8 | Phase 1 issuance evidence = admin SSHSIG over the request digest, with admin keys in the root-signed genesis policy | Open Q1 | Owner may prefer a different Phase 1 authorization model |
@@ -606,7 +606,7 @@ Related assumptions settled by the plans rather than by an owner answer: A1/A2 (
 
 | Dependency | Required By | Available | Version | Fallback |
 |------------|------------|-----------|---------|----------|
-| Go toolchain | Everything | ✗ (not on Daniel-PC PATH, not in WSL) | — | Install go1.27.1 (Windows MSI and/or WSL tarball) as the first task |
+| Go toolchain | Everything | ✗ (not on the owner's workstation PATH, not in WSL) | — | Install go1.27.1 (Windows MSI and/or WSL tarball) as the first task |
 | git | Repo | ✓ | 2.55.0.windows.5 | — |
 | gh CLI (authenticated as Labontese) | Repo, rulesets, bot setup | ✓ | 2.87.3; scopes `admin:ssh_signing_key, repo, user, workflow` | — |
 | Owner SSH signing key registered | REPO-01 | ✗ (none registered; git signing unconfigured) | — | Register and configure in bootstrap |
@@ -664,7 +664,7 @@ Required: `security_enforcement: true`, ASVS level 1, `security_block_on: high`.
 - openssh.org release notes 10.1, 10.2, 10.3, 10.4, 10.5 (fetched with curl)
 - openssh-portable `PROTOCOL.sshsig` (master); openssh-10.5p1 `Makefile.in` 760-775, `regress/test-exec.sh` 711-728
 - `gh api`: Win32-OpenSSH releases; action release tags and SHAs; repo/user existence; signing-key scopes
-- Local probes: Daniel-PC tools, WSL Ubuntu 24.04 packages
+- Local probes: the owner's workstation tools, WSL Ubuntu 24.04 packages
 
 ### Secondary (MEDIUM confidence)
 - C2SP signed-note spec (signature types 0x01/0x02/0x04/0x05/0x06; ECDSA key ID) — github.com/C2SP/C2SP signed-note.md

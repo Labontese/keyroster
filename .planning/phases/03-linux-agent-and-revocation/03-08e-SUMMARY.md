@@ -363,7 +363,7 @@ The review ran at head `14c5a74` against base `a70c661` in security mode and sto
 
 ### Fixes
 
-| Finding | Commit | Test | RED and mutants (scratchpad `fix77-1/`) |
+| Item | Commit | Test | RED and mutants (scratch directory `fix77-1/`) |
 |---|---|---|---|
 | D-1 (findings [0], [1]) | `989ae2e` | `TestSpoolPrune`: `spool_stays_bounded_across_polls`, `fresh_host_junk_policies_cannot_hide_the_honest_one`, `fresh_host_junk_bundles_below_cannot_hide_the_honest_policy`, `fresh_host_junk_above_dropped`, `prune_keeps_what_the_applier_reads`, `prune_leaves_symlinks_unknown_names_and_non_regular_files`, `prune_removes_no_policy_when_a_kept_bundle_cannot_be_read`, `honest_catch_up_keeps_one_polls_versions` | RED (`d1-red.txt`) on 14c5a74's fetcher, 5 subtests fail:<br>- between polls 3 and 8, policies grow from 49 to 129 and KRLs from 4 to 9;<br>- the floor-0 capture offers only the junk policies;<br>- the orphaned junk policy stays;<br>- every file the prune should remove stays.<br>The three guards pass on 14c5a74. So does dropAbove's part of `fresh_host_junk_above_dropped`, which shows dropAbove already covers junk above.<br>14 mutants killed (`d1-mutants.txt`; M3 and M13 rerun in `d2-mutants.txt`): the policy prune off; the own-version rule off; every KRL kept; the floor ignored for bundles; the floor ignored for directories; a window of 64 instead of 1024; floor 0 keeping 1024; the newest at or below the floor dropped; non-regular files removed; policies named by every bundle; an unreadable bundle naming nothing; the prune never called; dropAbove never called; incomplete sets kept |
 | D-2 (finding [2]) | `c712f0b` | `TestAdopt/runbook_line_in_match_block_refused`, `runbook_file_included_in_match_block_refused` and `runbook_lines_without_adoption_plan_refused`, each at `apply`, `preflight` and `check` | RED (`d2-red-green.txt`), with the three D-2 sources taken from 14c5a74: all 9 subtests fail. The apply returns nil, and Preflight and Check report nothing. The changed `missing_dropin_without_adoption_plan_still_refused` fails too.<br>GREEN with the fix, together with the other F09 cases.<br>8 mutants killed (`d2-mutants.txt`, `d2-mutants-b.txt`): the filter ignoring Match context; the filter ignoring the plan; no line marked after a Match line; an Include inside a Match block not passed on; a later visit not recorded; Check, preflightApply and Preflight each exempting without a plan |
@@ -450,7 +450,7 @@ Superseded by fix round 3, which restored the 1024 window.
 
 ### Fixes
 
-| Fix | Commit | Test | RED | Mutants (scratchpad `fix77-2/`) |
+| Fix | Commit | Test | RED | Mutants (scratch directory `fix77-2/`) |
 |---|---|---|---|---|
 | Q1: the read window | `8c749cb` | `TestSpoolPrune/honest_catch_up_refetches_past_the_read_window` (replaces `honest_catch_up_keeps_one_polls_versions`); the bound in `spool_stays_bounded_across_polls` uses the 64 window | Against round 1's 1024 window: the host read to bundle 200 after the rate-limited poll, where the 64 window stops it at 129 (`q1-red.txt`) | 3 killed (`q1-mutants.txt`): every version kept, round 1's 1024 window, the floor ignored |
 | Check reads the takeover plan before it scans the configuration (low) | `72748aa` | `TestAdopt/check_during_finished_removal_reports_no_runbook_line`, through a new `check-plan-read` fault point between the two reads, at which the test removes 50-keyroster.conf and then the plan | Two RED runs (`f2-red.txt`). Without the fault point the test fails as "does not test". With the old order and the fault point (the swap mutant), Check reports both runbook lines after they are gone | The swap mutant, killed (the second RED run) |
@@ -506,7 +506,7 @@ Daniel decided on 2026-11-01 to go back to round 1's window of 1024 in this PR. 
 
 ### Fixes
 
-| Fix | Commit | Test | RED | Mutants (scratchpad `fix77-3/`) |
+| Fix | Commit | Test | RED | Mutants (scratch directory `fix77-3/`) |
 |---|---|---|---|---|
 | The 1024 window | `890371c` | `TestSpoolPrune/superseded_pending_target_kept` (the check's probe); `honest_catch_up_keeps_one_polls_versions` (round 1's test again; it replaces round 2's `honest_catch_up_refetches_past_the_read_window`) | At `7a763f0` (`r1-red.txt`): the capture at the superseding pending floor 129 offers `[65]`, and the catch-up stops at 129 after the rate-limited poll | 5 killed (`r1-mutants.txt`): a window of 64, a window of 128, the floor ignored, floor 0 keeping the window, the newest at or below the floor dropped. A window of about 200 or more passes these tests; the constant's definition fixes it at 1024 |
 | The check-plan-read point moved after the scan (low) | `982b157` | `TestAdopt/check_during_finished_removal_reports_no_runbook_line`, at the renamed `check-scanned` point right after `trustSettingHits` | The natural revert, the plan read moved back below the scan, survived with the point before the scan, and is killed with it after (`r2-red.txt`) | That revert |

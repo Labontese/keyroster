@@ -416,7 +416,7 @@ The review ran at head `ddcc9a2` against base `6dea9f3` in security mode. Daniel
 
 ### Fixes
 
-| Finding | Commit | Test | RED and mutants (scratchpad `fix75-1/`) |
+| Item | Commit | Test | RED and mutants (scratch directory `fix75-1/`) |
 |---|---|---|---|
 | [0] a forget could delete a host that resumed service: heartbeat stored, confirmation not yet cleared | `4479225`, then `939b5ef` (the refusal code) | `TestRemovalConfirmation/resumed_{before,after}_the_signer_{principals_file,rendered_entry}`, `resumed_host_gone_overrides`, `no_or_unreadable_heartbeat_refused` | RED: 200 with the row deleted in all four cases. 6 mutants killed: the principalsShown term, the Pending term, a nil body accepted, the pre-signer check, the delete's error mapping, and the delete's predicate reverted to swapPending |
 | [7] the signer's forget trusted the in-memory directory | `9bcd77b` | `TestForgetAgent/directory_written_behind_the_signer_refused` | RED: accepted (`Leaf:5`). With only the guard in place: accepted (`Leaf:6`). 2 mutants killed: the guard, and the transaction check |
@@ -468,7 +468,7 @@ The check of fix round 1 ran at head `24e10d2` against base `ddcc9a2`, with Clau
 
 ### Fixes
 
-| Fix | Commit | Test | RED and mutants (scratchpad `fix75-2/`) |
+| Fix | Commit | Test | RED and mutants (scratch directory `fix75-2/`) |
 |---|---|---|---|
 | A (medium): a host_forget could be forged on a line of another kind | `4b861b9` | `TestVerifyForgetKeysOnOtherKinds`: 13 tamper cases and the unedited export | RED: all 13 verified at `24e10d2` (`A-red.txt`, `A-red2.txt`). 6 mutants killed (`A-mutants.txt`): the duplicate check, the kind equality, the forget-only keys, exact top-level names, the call on the checkpoint line, and the call on a leaf line |
 | B (low, docs): 03-16 stated two conditions for the quorum-2 forget | `17515a1` | n/a | n/a |

@@ -268,7 +268,7 @@ See `key-decisions` above.
 
 - `cryptobyte.String` has no uint32 length-prefixed reader (01-02 noted this for the wire format). `internal/sshsig` reads SSH strings with a local `readString` that is bounded by the remaining input.
 - Building OpenSSH in WSL took about 4 min per version, mostly `configure`. In CI the cache keyed on the build-script hash made later runs use the cached prefix (with sk-dummy).
-- `scripts/linux.sh '...'` mangles `$var` inside loops. Multi-step WSL checks ran from script files in the scratchpad.
+- `scripts/linux.sh '...'` mangles `$var` inside loops. Multi-step WSL checks ran from script files in the scratch directory.
 
 ## Known Stubs
 

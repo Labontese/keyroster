@@ -209,7 +209,7 @@ Each mutant was applied, run and reverted, and `git diff` of the file was empty 
 
 - **RED.** Task 2 is `tdd="true"`. RED commit `8d04702` holds the new tests.
   - Run before GREEN, exactly the seven refusal-mapping cases of `TestRevokeRefusalText` failed, each on the planned text: `unknown_serial` (it still said "arrives in a later version"), `key_id_not_issued`, `explicit_key_cap_reached`, `key_is_ca_of_this_installation`, `subject_kind_unsupported`, `revoke_installation_missing` and `revoke_installation_mismatch`.
-  - The other 37 subtests passed. The evidence file was in the scratchpad.
+  - The other 37 subtests passed. The evidence file was in the scratch directory.
   - Semantic assessment: the target cases ran and failed on their own assertions. There was no build, setup or fixture failure.
 - **GREEN.** Commit `9b4f834`; every case passes.
 - **Exception.** The `TestRevokeUser` and `TestRevokeKRLCheck` cases test code that Task 1, the tracer, already wrote, so they did not fail first. The mutants above show they check the behaviour they name.

@@ -518,7 +518,7 @@ Checks run on Windows with go1.27.2:
 Checks for 7105cc9 and 2797569 (Windows, go1.27.2 through the toolchain line):
 - `gofmt -l` printed nothing.
 - `go vet ./...` passed for windows, linux and darwin.
-- golangci-lint v2.14.0 (CI's pinned version, installed with `go install` into the session scratchpad) reported 0 issues for GOOS linux, windows and darwin.
+- golangci-lint v2.14.0 (CI's pinned version, installed with `go install` into the session scratch directory) reported 0 issues for GOOS linux, windows and darwin.
 - `go test -count=1` passed on cmd/keyroster, internal/serverclient and internal/server.
 - In WSL, on an archive of 2797569: `CGO_ENABLED=1 go test -race -count=1` passed on the same three packages, and `go test -tags e2e -count=1 ./test/e2e/...` passed against OpenSSH 9.5p1. That run included TestServerRefusesStart and TestServerInitEndToEnd.
 

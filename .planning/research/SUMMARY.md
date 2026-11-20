@@ -113,7 +113,7 @@ There are five processes in three trust zones. `sshcm-signer` (no network, own O
 **Avoids:** Pitfalls 13, 14, 4.
 
 ### Phase 3: Linux Host Agent and Revocation
-**Delivers:** join tokens with SPKI and root pins plus admin-approved names; mTLS; bundle apply; principals files from ops-signed host policy; KRL sync (SSHSIG, atomic, last-good, rollback protection); host certs by PoP; client `@cert-authority`/`RevokedHostKeys`; machine certs; heartbeats; convergence-gated rotation; break-glass CA; reload + self-test + rollback. Dogfood on the laptop, zima and Proxmox.
+**Delivers:** join tokens with SPKI and root pins plus admin-approved names; mTLS; bundle apply; principals files from ops-signed host policy; KRL sync (SSHSIG, atomic, last-good, rollback protection); host certs by PoP; client `@cert-authority`/`RevokedHostKeys`; machine certs; heartbeats; convergence-gated rotation; break-glass CA; reload + self-test + rollback. Dogfood on the laptop, the homelab server and Proxmox.
 **Avoids:** Pitfalls 2, 5, 6, 7, 8, 15.
 
 ### Phase 4: Insider Resistance and Web UI
@@ -165,7 +165,7 @@ Standard patterns: **Phase 3** (light check of Include variance and RevokedKeys 
 - proxy.golang.org, crates.io, npm, go.dev/dl, GitHub releases (2026-10-04)
 - OpenSSH `sshd_config(5)`, `ssh-keygen(1)`, `PROTOCOL.krl`, release notes 8.2-10.5, openssh-portable source, draft-miller-ssh-cert-06
 - Teleport feature matrix and CA rotation docs; Vault Control Groups; Microsoft Learn OpenSSH for Windows
-- Local check: Daniel-PC `OpenSSH_for_Windows_9.5p2`
+- Local check: the owner's workstation `OpenSSH_for_Windows_9.5p2`
 
 ### Secondary (MEDIUM confidence)
 - Teleport CVE-2025-49825, Vault CVE-2024-7594, step-ca CVE-2025-44005/2026-30836/2025-66406, x/crypto GO-2026-50xx

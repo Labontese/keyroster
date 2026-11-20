@@ -275,7 +275,7 @@ See `key-decisions` above.
 
 - **Escaping in the Bash tool.** In this session the Bash tool rewrote escape sequences inside heredocs and inline WSL command strings. `\\n` became a newline, and `$?`/`$(...)` were expanded in the wrong shell.
   - One Python heredoc patch failed on its assertion, and one inserted a literal newline into a Go string. The newline was fixed with Edit before any commit.
-  - The WSL checks were moved into script files in the scratchpad, which gave clean exit codes.
+  - The WSL checks were moved into script files in the scratch directory, which gave clean exit codes.
 - **capslock reports a pre-existing difference.** It still reports `internal/cert CAPABILITY_ARBITRARY_EXECUTION` as no longer present, as recorded in 01-17. The check exits 0.
 
 ## Not Exercised (UNVERIFIED)

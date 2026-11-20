@@ -154,7 +154,7 @@ The two area reports follow, each unchanged apart from its frontmatter.
 
 ## Verification (where it ran)
 
-All gates ran in the **main checkout** (`C:/Users/labon/ssh-cert-manager`, reached from WSL at `/mnt/c/...`). No worktree was used, so the numbers can be reproduced from this tree.
+All gates ran in the **main checkout** (`~/ssh-cert-manager`, reached from WSL at `/mnt/c/...`). No worktree was used, so the numbers can be reproduced from this tree.
 
 - **Windows, Go 1.27.1:**
   - per fix: `go build ./...`, `go vet`, `gofmt -l`;
@@ -167,7 +167,7 @@ All gates ran in the **main checkout** (`C:/Users/labon/ssh-cert-manager`, reach
 - **Not run:** `CGO_ENABLED=1 -tags piv`. No PIV code was touched.
 - **Lint with the e2e tag:** `golangci-lint --build-tags e2e ./test/e2e/` reports 9 issues, all in `harness_test.go`, which I did not touch. CI does not lint with this tag, and `rotation_test.go` is clean.
 
-Evidence files (scratchpad): `gcr01-failbefore.txt`, `gwr01-failbefore.txt`, `gwr02-failbefore.txt`, `gwr02-passafter.txt`, `gwr03-failbefore.txt`, `gwr03-passafter.txt`, `gwr03-mutations.txt`.
+Evidence files (scratch directory): `gcr01-failbefore.txt`, `gwr01-failbefore.txt`, `gwr02-failbefore.txt`, `gwr02-passafter.txt`, `gwr03-failbefore.txt`, `gwr03-passafter.txt`, `gwr03-mutations.txt`.
 
 The final gates (full `-race`, lint, e2e) ran on the tree at 2c6a53d. 23f97c6 changes only the e2e test and the runbook. After it, the e2e rotation and trust tests, `go vet -tags e2e` and gofmt were rerun, and they pass.
 
@@ -281,7 +281,7 @@ _Iteration: 1_
   - `bash scripts/merge-gate.sh --check p01/zz-made-up-branch-nonexistent` against real GitHub (identity check and fetch only, read-only) refused with exit 1: the final blob is 6abdb7c…, `origin/main`'s is 0925514…. The same refusal came from `internal/` with a relative `$0`.
   - `git credential fill` through the printed helper string returned `username=keyroster-bot`; the token was not printed.
   - `origin/main`'s old copy, run from a temp file, did not refuse: it reported "no pull requests found" and exited 1.
-- **Local harness** (`scratchpad/mg-harness.sh`: a bare origin in the scratchpad, a stub `gh`, an ssh signing key; no GitHub, pushes only to the local bare repo): 13/13 passed. Cases:
+- **Local harness** (`<scratch>/mg-harness.sh`: a bare origin in the scratch directory, a stub `gh`, an ssh signing key; no GitHub, pushes only to the local bare repo): 13/13 passed. Cases:
   - `--check` passes the guard from main;
   - exit 3 lands on main, and the rebased head is signed and contains `origin/main`;
   - exit 1 after the push lands on main;

@@ -158,7 +158,7 @@ status: complete
 | OpenSSH build in CI, no cache (run 37269006141) | 9.5p1: 41 s; 10.5p1: 30 s (step "Build OpenSSH (verified tarball)") |
 | OpenSSH build in CI, cache hit (run 37269881022) | under 1 s for both (`using cached OpenSSH`); cache restore 1-2 s |
 | e2e suite in CI (cached run) | 9.5p1: 28 s step, `ok ... 25.6s`; 10.5p1: 28 s step, `ok ... 25.3s` |
-| OpenSSH 9.5p1 build in WSL (Daniel-PC) | 3 min 26 s |
+| OpenSSH 9.5p1 build in WSL (the owner's workstation) | 3 min 26 s |
 | Cache key | `openssh-Linux-<version>-<sha256 of scripts/build-openssh.sh>` |
 | Runner OpenSSL | 3.0.13 (Ubuntu 24.04); no extra packages needed |
 | Fuzz job | 2 min 41 s; 4 targets × 30 s, all passed |

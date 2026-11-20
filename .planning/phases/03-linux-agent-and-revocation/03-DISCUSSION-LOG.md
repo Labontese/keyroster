@@ -219,11 +219,11 @@ The questions were asked in Swedish with the option text from 03-DISCUSS-PREP.md
 
 | Option | Selected |
 |--------|----------|
-| Zima Ubuntu 26.04, PVE 8 |  |
-| Zima Ubuntu 26.04, PVE 9 |  |
+| Homelab server Ubuntu 26.04, PVE 8 |  |
+| Homelab server Ubuntu 26.04, PVE 9 |  |
 | Jag vet inte, kolla du | ✓ |
 
-**User's choice:** "Jag vet inte, kolla du — Claude read Proxmox VE 9.2.18 on Debian 13 (OpenSSH 10.0p2); zima offline, seen as Ubuntu 26.04.1 with OpenSSH 10.2p1 earlier the same day"
+**User's choice:** "Jag vet inte, kolla du — Claude read Proxmox VE 9.2.18 on Debian 13 (OpenSSH 10.0p2); the homelab server offline, seen as Ubuntu 26.04.1 with OpenSSH 10.2p1 earlier the same day"
 
 ---
 

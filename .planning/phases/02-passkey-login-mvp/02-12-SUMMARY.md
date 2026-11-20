@@ -203,7 +203,7 @@ Not counted: the page-fingerprint-from-another-field mutant did not build. The e
   - `go test -count=1 ./...` passed;
   - `TestLoginFlowFakeServer -v` passed, not skipped (Windows adapter on a test pipe);
   - `CGO_ENABLED=0 GOOS=windows|darwin|linux|freebsd go build ./cmd/keyroster` passed.
-- **WSL (scripts/linux.sh, script files in the session scratchpad):**
+- **WSL (scripts/linux.sh, script files in the session scratch directory):**
   - `go test -race -count=1 ./...` exit 0, no DATA RACE. It ran at the Task 2 test commit, and `./internal/server/` and `./cmd/keyroster/` ran again at HEAD.
   - `go vet ./...` and `go vet -tags e2e ./test/e2e/` clean; `$(go env GOROOT)/bin/gofmt -l .` empty.
   - golangci-lint v2.14.0: 0 issues with GOOS linux, windows and darwin, at HEAD. The first run found 5 test-file issues (bodyclose, revive unused-parameter), which were fixed.

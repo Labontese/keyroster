@@ -37,7 +37,7 @@ Already locked by research and roadmap, and not re-discussed: Go with `CGO_ENABL
 - **D-13:** **Phase 1 issuance is authorized by an admin SSHSIG over the request digest.** The signer refuses a request unless it carries a valid SSHSIG (namespace under the `keyroster/` prefix) by an admin key listed in the root-signed genesis policy. WebAuthn-bound authorization (later phase) replaces or extends this through a policy update, not a signer bypass. — **Reversibility:** costly — the request wire format and genesis-policy schema carry the admin-key list from day one.
 - **D-14:** **Refused signing requests are written to the audit log, rate-limited.** Every refusal is logged locally (slog). Refusals are appended to the Merkle log under a rate limit, so an attacker cannot flood it, and suppressed refusals are summarized in a periodic count entry rather than silently dropped.
 - **D-15:** **The audit log keeps `github.com/transparency-dev/merkle`** as locked in the stack; switching to `x/mod/sumdb/tlog` was considered and rejected.
-- **CA-08 correction (from research):** OpenSSH 9.5p2 does not exist upstream (only Microsoft's Win32-OpenSSH build). The CI matrix builds portable 9.5p1 and the latest release (10.5p1) from source with pinned SHA-256; the 9.5p2 check is a documented manual step against Windows OpenSSH on Daniel-PC (an optional Windows-runner job is at the planner's discretion).
+- **CA-08 correction (from research):** OpenSSH 9.5p2 does not exist upstream (only Microsoft's Win32-OpenSSH build). The CI matrix builds portable 9.5p1 and the latest release (10.5p1) from source with pinned SHA-256; the 9.5p2 check is a documented manual step against Windows OpenSSH on the owner's workstation (an optional Windows-runner job is at the planner's discretion).
 
 ### Claude's Discretion
 - How the offline root ceremony is executed (offline machine or live USB, the exact steps, how the root public keys and genesis policy are distributed). The owner did not select this area. Stay within D-10/D-11, and prefer a design a single admin can run safely from a runbook.
@@ -83,7 +83,7 @@ Already locked by research and roadmap, and not re-discussed: Go with `CGO_ENABL
 - None yet. Conventions get established in this phase, and the research docs are the only guidance.
 
 ### Integration Points
-- The homelab provides the dogfooding target: a Proxmox VM with a vTPM for the signer; Daniel-PC (Windows OpenSSH 9.5p2) and the Ubuntu laptop as real sshd targets for the CA-08 checks outside CI.
+- The homelab provides the dogfooding target: a Proxmox VM with a vTPM for the signer; the owner's workstation (Windows OpenSSH 9.5p2) and the Ubuntu laptop as real sshd targets for the CA-08 checks outside CI.
 
 </code_context>
 

@@ -8,7 +8,7 @@ requires:
   - phase: 02-passkey-login-mvp
     provides: "02-13 (#53): homelab under bundle v3, keyroster-server with the RP, the owner enrolled with a synced Chrome passkey, role homelab-admin (8 h), homelab.export (12 entries) as the audit baseline"
 provides:
-  - "Two stock OpenSSH hosts trusting the keyroster user CA through one sshd drop-in each: a Proxmox test VM (account daniel) and zima-srv (account zima)"
+  - "Two stock OpenSSH hosts trusting the keyroster user CA through one sshd drop-in each: a Proxmox test VM (account daniel) and the homelab server (account srvadmin)"
   - "The first real end-to-end logins, on Windows 11 and on Ubuntu 26.04 GNOME, each corroborated by the signer's audit-verified log and the host's sshd journal"
   - "A3 (gcr-ssh-agent lifetime and certificate probe) run and passed on the laptop"
   - "The platform record in needs-hardware.md (verified vs UNVERIFIED per OS, browser, authenticator and agent)"
@@ -36,7 +36,7 @@ key-files:
     - cmd/keyroster/loginagent_unix.go
 
 key-decisions:
-  - "Owner, 2026-10-22: the Windows login's SSH target is a Proxmox test VM (zima-srv was offline then); the Linux login used zima-srv, which was back online"
+  - "Owner, 2026-10-22: the Windows login's SSH target is a Proxmox test VM (the homelab server was offline then); the Linux login used the homelab server, which was back online"
   - "UI-01 is marked complete (pre-merge review): every one of the six pages has been opened in a real browser under the strict CSP; the owner checked the index page, the error page and sign-out in Chrome after Task 5"
   - "AUTH-03 and PLAT-05 stay Pending: macOS browser leg UNVERIFIED"
 
@@ -66,30 +66,30 @@ are kept only outside the repository, under the evidence directory
 
 ## Deviations from Plan
 
-1. **SSH target for Windows.** zima-srv had been offline for 16 days when
+1. **SSH target for Windows.** The homelab server had been offline for 16 days when
    the Windows part ran (2026-10-22). The owner chose a Proxmox test VM
    (Ubuntu 26.04, OpenSSH 10.2p1) as the stock-OpenSSH host for it. Its
    account is `daniel`, mapped to role homelab-admin in host group homelab
    by directory v6, which the owner signed himself. For the Windows checks,
-   read that VM where the plan says zima: `KR_TARGET_SINCE` in kr.env
-   instead of `KR_ZIMA_SINCE`, journal unit `ssh`, and the accepted line
+   read that VM where the plan says homelab-server: `KR_TARGET_SINCE` in kr.env
+   instead of `KR_SERVER_SINCE`, journal unit `ssh`, and the accepted line
    `Accepted publickey for daniel`.
-2. **SSH target for Linux.** zima-srv was back online on 2026-10-23. Task 1
-   prepared it as the plan describes (account `zima`, `KR_ZIMA_SINCE` in
-   kr.env), and the laptop login went to zima-srv. The adapted Task 5
+2. **SSH target for Linux.** The homelab server was back online on 2026-10-23. Task 1
+   prepared it as the plan describes (account `srvadmin`, `KR_SERVER_SINCE` in
+   kr.env), and the laptop login went to the homelab server. The adapted Task 5
    journal verify therefore reads the Windows serials from the test VM's
-   journal and the Linux serials from zima-srv's journal. The plan reads
-   both from zima's.
+   journal and the Linux serials from the homelab server's journal. The plan reads
+   both from the homelab server's.
 3. **Anchor version.** The plan's `anchor_bundle_version==3` is the 02-13
    plan defect (deferred-items.md). Every audit check below uses
    `bundle_version==3 and anchor_bundle_version==2`.
 4. **Laptop credential.** 02-13 recorded a synced Chrome passkey, which is
-   not bound to Daniel-PC. So Task 1 step 4 made no invite, and Task 3 step
+   not bound to the owner's workstation. So Task 1 step 4 made no invite, and Task 3 step
    5 does not apply. The laptop used the same credential.
 5. **The first Linux `ssh` did not use the certificate.** The plan's
-   `ssh zima@<zima> whoami` printed `zima`, but zima-srv's journal shows
+   `ssh srvadmin@<homelab-server> whoami` printed `srvadmin`, but the homelab server's journal shows
    that login (03:32:29 UTC) with the laptop's own plain ED25519 key, which
-   zima-srv also has in `authorized_keys`. The certificate login was shown
+   the homelab server also has in `authorized_keys`. The certificate login was shown
    by a re-run that offered only certificates (`-o
    PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com`, plus
    password and keyboard-interactive off), at 05:41:52 CEST on the laptop.
@@ -111,8 +111,8 @@ are kept only outside the repository, under the evidence directory
    agent.
 8. **Web sign-in on Linux was not done.** The laptop used only the approval
    page in Chrome. AUTH-02 rests on the Windows sign-in.
-9. **The plan's `ssh.exe -n zima` precondition and the Task 1 `sshd -T -C`
-   check for zima-srv** were re-run in Task 5 (after the logins). Both exit
+9. **The plan's `ssh.exe -n homelab-server` precondition and the Task 1 `sshd -T -C`
+   check for the homelab server** were re-run in Task 5 (after the logins). Both exit
    0; see "Hosts".
 10. **Required checks: cli-macos only (owner decision D1, 2026-10-23,
     pre-merge review).** The plan's must-have says cli-windows and cli-macos
@@ -168,7 +168,7 @@ are kept only outside the repository, under the evidence directory
 
 **Proxmox test VM (Windows target), 2026-10-22.**
 - `host ca-key` and `host principals homelab daniel` were rendered on
-  Daniel-PC and installed byte-identical (SHA-256):
+  the owner's workstation and installed byte-identical (SHA-256):
   - `/etc/ssh/keyroster_user_ca.pub`
     `5bb94b6f7a7ec078225c0bde8566b19f091cab929ca3934a95459bce85fb6689`;
   - `/etc/ssh/principals/daniel`
@@ -182,45 +182,45 @@ are kept only outside the repository, under the evidence directory
 - `sshd -t` exits 0, and sshd was reloaded. `sshd -T -C
   user=daniel,host=<a>,addr=<a>,laddr=<target>,lport=22` (step 4's full
   form; `$P/host-prep-windows.txt`, baseline `usedns no`) shows both
-  settings for Daniel-PC's address. The laptop does not log in to this VM, so its address was not
+  settings for the owner's workstation's address. The laptop does not log in to this VM, so its address was not
   checked here.
 - `Match` files under `/etc/ssh/sshd_config` and `sshd_config.d/`: **0**.
 - The key-based control login exits 0 before and after.
 
-**zima-srv (Linux target), 2026-10-23.**
+**homelab-server (Linux target), 2026-10-23.**
 - `/etc/ssh/keyroster_user_ca.pub` is the same file
-  (`5bb94b6f...fb6689`). `/etc/ssh/principals/zima`
+  (`5bb94b6f...fb6689`). `/etc/ssh/principals/srvadmin`
   `e8d89762d6c3869239f0f8513357ddff82e88efbdab26e12cc273da3cb855f5d` is
-  byte-identical to `host principals homelab zima`: header `host group
-  homelab, account zima, directory version 6`, principal
+  byte-identical to `host principals homelab srvadmin`: header `host group
+  homelab, account srvadmin, directory version 6`, principal
   `role:homelab-admin`.
 - The same drop-in, root:root 0644. sshd is `OpenSSH_10.2p1
   Ubuntu-2ubuntu3.6`.
-- **`sshd -T -C user=zima,host=<a>,addr=<a>`** (no `laddr` or `lport`)
-  shows both settings for Daniel-PC's address (`$SSH_CLIENT`) and for the
+- **`sshd -T -C user=srvadmin,host=<a>,addr=<a>`** (no `laddr` or `lport`)
+  shows both settings for the owner's workstation's address (`$SSH_CLIENT`) and for the
   laptop's Tailscale IPv4:
   the plan's Task 1 verify, exit 0 (re-run in Task 5).
 - `Match` files: **0**.
-- The key-based control login (`ssh.exe -n -o BatchMode=yes zima true`)
+- The key-based control login (`ssh.exe -n -o BatchMode=yes homelab-server true`)
   exits 0.
 
-**Laptop (ub-daniel), 2026-10-23.**
+**Laptop (owner-laptop), 2026-10-23.**
 - `~/.local/bin/keyroster` SHA-256
   `c98749bae5e589c6876f51cadfc0324be012beeff357387b87f376c29da57642`
   (`$P/bin-linux/keyroster`). This is **not** 02-13's linux build
   (`d75b9caa…`, commit 99c2795) but a fresh build of main `ff87054`
   (deviation 12). `keyroster version` reports `ff87054a8f6f`, go1.27.3.
 - `keyroster init` for user `owner`. The server, TLS pin, root pins and
-  threshold equal Daniel-PC's config (compared by hash, field by field).
+  threshold equal the owner's workstation's config (compared by hash, field by field).
 - The GNOME session's `SSH_AUTH_SOCK` is `/run/user/1000/gcr/ssh`. The
   client is `OpenSSH_10.2p1 Ubuntu-2ubuntu3.8`.
 
-**Daniel-PC (Windows CLI).** The owner ran `$P/bin/keyroster.exe`, 02-13's
+**The owner's workstation (Windows CLI).** The owner ran `$P/bin/keyroster.exe`, 02-13's
 recorded build: SHA-256 `da3bd5dd…` (02-13-SUMMARY "Build"), and its build
 info and `keyroster version` report commit `99c2795e7d05`, go1.27.3.
 
 **A3 (moved here from 02-02).** The 02-02 probe ran on the laptop over
-`ssh.exe -n ub-daniel`, base64-encoded (`$P/a3-probe.out`):
+`ssh.exe -n owner-laptop`, base64-encoded (`$P/a3-probe.out`):
 
 A3 (02-14): passed
 
@@ -233,7 +233,7 @@ key and its certificate, and keeps the certificate. The laptop login
 
 **host-setup.md** (Task 1 step 5, commit a81ba29): steps 1-4 are labelled
 as run on a homelab host in 02-14. The pre-merge review scoped step 4's
-label: every criterion on the test VM, no `laddr`/`lport` on zima-srv, and
+label: every criterion on the test VM, no `laddr`/`lport` on the homelab server, and
 no `Match` block on either host. "Where the sshd settings go" is labelled
 for the drop-in case only (Ubuntu with the include line, no `Match`
 block). Step 5 keeps its 02-11 label. Both hosts match that case.
@@ -242,7 +242,7 @@ block). Step 5 keeps its 02-11 label. Both hosts match that case.
 
 | OS | Browser | Authenticator | Agent | order= | Web sign-in |
 |---|---|---|---|---|---|
-| Windows 11 (Daniel-PC) | Chrome | synced Chrome passkey, Windows Hello face recognition | keyroster agent | ok (both approvals) | `/login` in Chrome worked; `/account` showed role homelab-admin. Edge not tried |
+| Windows 11 (the owner's workstation) | Chrome | synced Chrome passkey, Windows Hello face recognition | keyroster agent | ok (both approvals) | `/login` in Chrome worked; `/account` showed role homelab-admin. Edge not tried |
 | Ubuntu 26.04 GNOME (laptop) | Chrome | the same synced passkey, unlocked through Google Password Manager | gcr-ssh-agent | ok (both approvals) | not done |
 
 `$P/owner-reply-windows.txt`, `$P/owner-reply-linux.txt` and
@@ -270,16 +270,16 @@ and policy v2. They are signed by user CA `ecdsa-sha2-nistp256`
 |---|---|---|---|---|---|
 | Windows | `kr2/ca=user/sub=owner/req=d1e7fe3c4758978ebccf922e3ed1b32a/pol=2/dir=6/roles=homelab-admin/ser=1792704938150899` | 1792704938150899 | `SHA256:eItHAZYVKl0zxYFvT+cvn4WeSYIkUpG+QSvs233PrgI` | 1792704638 .. 1792733738 (8 h + 300 s) | test VM, 2026-10-22 23:35:49 CEST, `Accepted publickey for daniel`, `ED25519-CERT`, `(serial 1792704938150899) CA` |
 | Windows | `kr2/ca=user/sub=owner/req=0e094411cdbcdd31118322b8d44e6739/pol=2/dir=6/roles=homelab-admin/ser=1792704994430748` | 1792704994430748 | `SHA256:H5CLDznPL8Vy8sZOOC8SivtiZlJDP1BBLS3zdL/lGd8` | 1792704694 .. 1792705294 (5 m + 300 s) | not used for SSH |
-| Linux | `kr2/ca=user/sub=owner/req=d885bde4cc11e6ddd3f61ed90e29cf18/pol=2/dir=6/roles=homelab-admin/ser=1792726285487553` | 1792726285487553 | `SHA256:nFMutDzbkr3RJ4mttHCT0pL8eKbWPTMq7A1gxu0InUc` | 1792725985 .. 1792755085 (8 h + 300 s) | zima-srv, 2026-10-23 03:41:53 UTC, `Accepted publickey for zima`, `ED25519-CERT`, `(serial 1792726285487553) CA` |
+| Linux | `kr2/ca=user/sub=owner/req=d885bde4cc11e6ddd3f61ed90e29cf18/pol=2/dir=6/roles=homelab-admin/ser=1792726285487553` | 1792726285487553 | `SHA256:nFMutDzbkr3RJ4mttHCT0pL8eKbWPTMq7A1gxu0InUc` | 1792725985 .. 1792755085 (8 h + 300 s) | homelab-server, 2026-10-23 03:41:53 UTC, `Accepted publickey for srvadmin`, `ED25519-CERT`, `(serial 1792726285487553) CA` |
 | Linux | `kr2/ca=user/sub=owner/req=19b45b088abbc222fd2c2bf84cd318cf/pol=2/dir=6/roles=homelab-admin/ser=1792726433708697` | 1792726433708697 | `SHA256:F2bchbf+T6p6/1LqghxN0mIGIHanXqtimENiv2QK33U` | 1792726133 .. 1792726733 (5 m + 300 s) | not used for SSH |
 
 `$P/serials-windows.txt` and `$P/serials-linux.txt` hold the serials.
-`$P/journal-kr-target.txt` and `$P/journal-kr-zima.txt` hold the matching
+`$P/journal-kr-target.txt` and `$P/journal-kr-server.txt` hold the matching
 journal lines, with client addresses, outside the repository. The Windows
 `ssh ... whoami` printed `daniel`, and the Linux certificate-only run
-printed `zima`.
+printed `srvadmin`.
 
-zima-srv's other `Accepted publickey for zima` lines since `KR_ZIMA_SINCE`
+The homelab server's other `Accepted publickey for srvadmin` lines since `KR_SERVER_SINCE`
 are plain ED25519 key logins: Claude's own control and check sessions, and
 the owner's first laptop `ssh` (deviation 5).
 
@@ -433,15 +433,15 @@ are UNVERIFIED.
 - **UI-01 complete** (pre-merge review, 2026-10-23). Task 5 step 5's rule
   is "every page exercised in a real browser". The UI has six pages
   (`pageNames` in `internal/server/render.go`), and each has been:
-  - `enroll` in 02-13 (Chrome on Daniel-PC);
+  - `enroll` in 02-13 (Chrome on the owner's workstation);
   - `login`, `account` and `login_approve` in Tasks 2-4 (Chrome, both OSes
     for the approval page);
   - `index`, the `error` page (an unknown login ID, 404) and sign-out by
-    the owner on 2026-10-23, after Task 5, in Chrome on Daniel-PC with
+    the owner on 2026-10-23, after Task 5, in Chrome on the owner's workstation with
     DevTools open. The keyroster-server journal shows `signin_ok` for owner
     and `logout` three seconds later, and the browser then showed `/login`.
 
-  curl from Daniel-PC at the same time shows the strict
+  curl from the owner's workstation at the same time shows the strict
   `Content-Security-Policy` (`default-src 'none'; script-src 'self'; ...;
   frame-ancestors 'none'; base-uri 'none'`) on `/`, `/login`, the 404 page
   and `/account`, and the console showed no CSP violation on any of the
@@ -486,16 +486,16 @@ are UNVERIFIED.
 
 | Check | Result |
 |---|---|
-| T1: per-connection `sshd -T -C` on zima-srv for Daniel-PC's and the laptop's address; principals file is keyroster-rendered | exit 0 (re-run in Task 5) |
-| T1: `KR_ZIMA_SINCE` and `KR_VM_SINCE` in kr.env (plus `KR_TARGET_SINCE`) | set |
-| T1: key-based control login to zima-srv | exit 0 |
+| T1: per-connection `sshd -T -C` on the homelab server for the owner's workstation's and the laptop's address; principals file is keyroster-rendered | exit 0 (re-run in Task 5) |
+| T1: `KR_SERVER_SINCE` and `KR_VM_SINCE` in kr.env (plus `KR_TARGET_SINCE`) | set |
+| T1: key-based control login to the homelab server | exit 0 |
 | T1: laptop `keyroster version` | exit 0 |
 | T2/T4: `systemctl is-active keyroster-server keyroster-signer` | active, active (checked after the logins, not during them) |
 | T3-1: Windows export, audit verify ok, bundle 3, anchor 2, login_issue ≥ baseline + 2 | exit 0 |
 | T3-2: a Windows serial as `(serial <n>) CA` in the test VM's journal | exit 0 |
 | T3-3: Windows expiry by key ID | exit 0 |
 | T5-1: Linux export extends the Windows one, ok, bundle 3, anchor 2, login_issue ≥ Windows + 2 | exit 0 |
-| T5-2: a Windows serial in the test VM's journal and a Linux serial in zima-srv's journal (adapted, deviation 2) | exit 0 |
+| T5-2: a Windows serial in the test VM's journal and a Linux serial in the homelab server's journal (adapted, deviation 2) | exit 0 |
 | T5-3: Linux expiry by key ID | exit 0 |
 | T5-4 (adapted, deviation 10): ruleset JSON holds cli-macos with integration_id 15368 and no cli-windows (the plan expects both); needs-hardware.md has UNVERIFIED | exit 0 |
 | T5-5: diff guard (pattern plus guard-literals.txt) | exit 0 before each commit |
@@ -577,7 +577,7 @@ Fixed:
   client address as `host=`. Check: runbook tests
   (`TestHostSetupEffectiveSshdConfig` literal kept).
 - `9d1cac2` host-setup.md step 4's label is scoped to what ran: every
-  criterion on the test VM, no laddr/lport on zima-srv, no `Match` block.
+  criterion on the test VM, no laddr/lport on the homelab server, no `Match` block.
   The SUMMARY records the test VM's full form. Check: runbook tests.
 - `cb1674e` loginagent_unix.go comment: A3 passed in 02-14 (comment
   only). Check: gofmt, vet on windows, linux and darwin, and
@@ -617,4 +617,4 @@ Verification of this pass:
 - `go vet ./...` passes on windows, linux and darwin.
 - `go test -count=1 ./cmd/keyroster` passes.
 - `go test -count=1 ./...` passes on Windows 11 (exit 0, `internal/winagent` included; the cli-windows hang did not occur in this run).
-- `-race` was not run: there is no cgo toolchain on Daniel-PC.
+- `-race` was not run: there is no cgo toolchain on the owner's workstation.

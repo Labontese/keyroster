@@ -11,7 +11,7 @@ requires:
     provides: "02-01..02-12 at origin/main 2788397: successor-policy with the WebAuthn RP, keyroster-server and its systemd and tailscale-cert units (02-06), enrollment and approval (02-07..02-09), roles and host groups (02-11), the CLI (02-12)"
 provides:
   - "Homelab under trust bundle v3 (policy v2 with the RP hostname), keyroster-server serving HTTPS with a tailscale cert, the tailscale-cert timer active"
-  - "The owner enrolled like any user (D-04): directory v5 with the owner active, role homelab-admin (8 h) granted to owner, host group homelab mapping account zima to homelab-admin"
+  - "The owner enrolled like any user (D-04): directory v5 with the owner active, role homelab-admin (8 h) granted to owner, host group homelab mapping account srvadmin to homelab-admin"
   - "homelab.export (12 entries) as the 02-14 audit baseline, kept outside the repository"
   - "Runbook labels for the steps that ran on the homelab; KEY-07 owed ceremony renumbered to v4"
 affects: [02-14, KEY-07, AUTH-01, PLAT-05, UI-01]
@@ -147,7 +147,7 @@ After install the signer logged `serving backend=tpm policy_version=2`, with NRe
 - The keyroster-server journal logged `tls certificate loaded` with trigger `sighup` within a second of the second run. Its fingerprint was equal to the certificate on disk.
 - **A renewal started by the timer itself is UNVERIFIED.** This plan started the unit by hand, and a renewal that writes a new certificate and key that the server then loads has not run.
 - **Exposure:** `systemd-analyze security keyroster-server.service` scored 2.1 OK on the host.
-- **healthz** from Daniel-PC over the tailnet answered `{"status":"ok"}` with rc 0, with no `-k` and verified against the system roots. Both Git Bash curl and Windows curl.exe (Schannel) were tried.
+- **healthz** from the owner's workstation over the tailnet answered `{"status":"ok"}` with rc 0, with no `-k` and verified against the system roots. Both Git Bash curl and Windows curl.exe (Schannel) were tried.
 
 ## Windows admin CLI (Task 2 step 6)
 
@@ -161,9 +161,9 @@ After install the signer logged `serving backend=tpm policy_version=2`, with NRe
 | Step | Who ran it | Checked by Claude |
 |---|---|---|
 | `user add owner` | Owner, in his own terminal. The classifier refused it for the agent, and the invite token never entered a transcript | `user pending owner` listed exactly the replied credential |
-| Registration | Owner: Chrome on Daniel-PC (Windows); authenticator reported as `chrome` | `user pending owner`: `SHA256:GKHjxrvAR/mDLNvY9SAb8vw0Xeiw7XlT5VwEizpxJE4`, ES256, backup eligible and synced, registered 2026-10-22 |
+| Registration | Owner: Chrome on the owner's workstation (Windows); authenticator reported as `chrome` | `user pending owner`: `SHA256:GKHjxrvAR/mDLNvY9SAb8vw0Xeiw7XlT5VwEizpxJE4`, ES256, backup eligible and synced, registered 2026-10-22 |
 | `user approve owner --fingerprint SHA256:GKHj…` | Owner, interactively. The classifier refused it for the agent | `user list`: owner active with exactly that passkey |
-| `role add homelab-admin --max-ttl 8h`, `role grant homelab-admin --user owner`, `host-group add homelab`, `host-group map homelab zima homelab-admin` | Owner, interactively. The first round left the grant out (directory v4 had `users=[]`; the cause was not recorded). The owner ran the grant again | below |
+| `role add homelab-admin --max-ttl 8h`, `role grant homelab-admin --user owner`, `host-group add homelab`, `host-group map homelab srvadmin homelab-admin` | Owner, interactively. The first round left the grant out (directory v4 had `users=[]`; the cause was not recorded). The owner ran the grant again | below |
 
 **Read back after the owner's "grant done":**
 - `user list`: directory version 5; `owner active`; `passkey SHA256:GKHjxrvAR/mDLNvY9SAb8vw0Xeiw7XlT5VwEizpxJE4 ES256 synced yes`; no pending accounts.
@@ -171,8 +171,8 @@ After install the signer logged `serving backend=tpm policy_version=2`, with NRe
   - `user owner (active)`;
   - the credential (`backup_eligible=true synced=true`);
   - `role homelab-admin principals=[role:homelab-admin] max_ttl_seconds=28800 extensions=[] users=[owner] groups=[]`;
-  - `host_group homelab accounts=[zima:homelab-admin]`.
-- `host principals homelab zima` renders `role:homelab-admin` (directory v5).
+  - `host_group homelab accounts=[srvadmin:homelab-admin]`.
+- `host principals homelab srvadmin` renders `role:homelab-admin` (directory v5).
 
 ## Audit (Task 4 step 2)
 
@@ -282,7 +282,7 @@ None beyond what was done: Tailscale MagicDNS and HTTPS Certificates were enable
 ## Next Phase Readiness
 
 - 02-14 can use `homelab.export` (12 entries, `ca38b1e8…35dd`) as its `--previous` baseline.
-- Directory v5 grants owner `role:homelab-admin` (8 h) on account `zima` in host group `homelab`.
+- Directory v5 grants owner `role:homelab-admin` (8 h) on account `srvadmin` in host group `homelab`.
 - Fix 02-14's anchor assertions first.
 
 ## Self-Check: PASSED

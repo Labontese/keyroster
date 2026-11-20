@@ -69,9 +69,9 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** A broad but coherent tracer establishes the signed policy and directory, signer-side WebAuthn verification, and first SSH certificate login.
 
-**Strengths.** It preserves the Phase 1 admin request format and defines exact principals and TTL as signer decisions. That fits the existing domain-separated signing bytes in [issue.go:20](C:/Users/labon/ssh-cert-manager/internal/wire/issue.go:20) and the signer’s log-before-release transaction in [issue.go:139](C:/Users/labon/ssh-cert-manager/internal/signer/issue.go:139). The revised end-to-end test checks the parsed certificate’s key, principals, validity, and refusal control ([02-01-PLAN.md:329](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-01-PLAN.md:329)).
+**Strengths.** It preserves the Phase 1 admin request format and defines exact principals and TTL as signer decisions. That fits the existing domain-separated signing bytes in [issue.go:20](../../../internal/wire/issue.go) and the signer’s log-before-release transaction in [issue.go:139](../../../internal/signer/issue.go). The revised end-to-end test checks the parsed certificate’s key, principals, validity, and refusal control ([02-01-PLAN.md:329](02-01-PLAN.md)).
 
-**Concerns.** **MEDIUM** — This plan adds several lasting formats and signer paths at once. Phase 1’s log decoder currently accepts kinds only through `KindBundleInstall` ([leaf.go:67](C:/Users/labon/ssh-cert-manager/internal/tlog/leaf.go:67)); until all decoder, restart, and audit paths are updated, a partial merge could make logs unreadable.
+**Concerns.** **MEDIUM** — This plan adds several lasting formats and signer paths at once. Phase 1’s log decoder currently accepts kinds only through `KindBundleInstall` ([leaf.go:67](../../../internal/tlog/leaf.go)); until all decoder, restart, and audit paths are updated, a partial merge could make logs unreadable.
 
 **Suggestions.** Keep the specified golden vectors and restart checks as merge blockers, and review the new log-kind handling in every consumer, not only the signer.
 
@@ -81,9 +81,9 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** The Windows in-memory agent and cross-platform CI address the known inbox-agent lifetime and persistence problems.
 
-**Strengths.** It probes the Windows client before relying on it and specifies a SID-restricted pipe, server-owner check, and no fallback to the inbox agent. The agent exit race now has a stated synchronization rule and a concurrent-add test ([02-02-PLAN.md:205](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-02-PLAN.md:205), [02-02-PLAN.md:241](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-02-PLAN.md:241)).
+**Strengths.** It probes the Windows client before relying on it and specifies a SID-restricted pipe, server-owner check, and no fallback to the inbox agent. The agent exit race now has a stated synchronization rule and a concurrent-add test ([02-02-PLAN.md:205](02-02-PLAN.md), [02-02-PLAN.md:241](02-02-PLAN.md)).
 
-**Concerns.** **MEDIUM** — Correctness still depends on real Win32 OpenSSH honoring the custom pipe path. The plan gates that assumption with a probe, but the end-to-end login path through `Ensure` is deferred to 02-14 ([02-02-PLAN.md:243](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-02-PLAN.md:243)).
+**Concerns.** **MEDIUM** — Correctness still depends on real Win32 OpenSSH honoring the custom pipe path. The plan gates that assumption with a probe, but the end-to-end login path through `Ensure` is deferred to 02-14 ([02-02-PLAN.md:243](02-02-PLAN.md)).
 
 **Suggestions.** Preserve the distinction between CI’s test pipe and the actual login path in the platform record; do not mark the Windows path verified until the homelab login exercises it.
 
@@ -93,7 +93,7 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** This plan hardens the signer’s new refusal paths, directory state, and per-message framing.
 
-**Strengths.** The revised frame tests cover short headers, exact caps, and oversized messages before allocation ([02-03-PLAN.md:390](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-03-PLAN.md:390)). This matters because the existing framing code uses one 64 KiB cap ([frame.go:19](C:/Users/labon/ssh-cert-manager/internal/wire/frame.go:19)); the plan’s type-aware rewrite changes that boundary.
+**Strengths.** The revised frame tests cover short headers, exact caps, and oversized messages before allocation ([02-03-PLAN.md:390](02-03-PLAN.md)). This matters because the existing framing code uses one 64 KiB cap ([frame.go:19](../../../internal/wire/frame.go)); the plan’s type-aware rewrite changes that boundary.
 
 **Concerns.** **LOW** — Changing `ReadMessage` and `WriteMessage` together creates an opportunity for their per-type limits to diverge. The plan specifies read-side boundary cases clearly; the write-side tests should remain explicit acceptance criteria.
 
@@ -105,9 +105,9 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** The audit extension aims to re-prove each login from the request, assertion, signed directory, policy, and certificate.
 
-**Strengths.** It adds positive as well as tampering fixtures, including a directory that remains valid across an RP-only policy successor ([02-04-PLAN.md:219](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-04-PLAN.md:219)). The existing verifier already checks bundle succession and active CA keys ([verify.go:265](C:/Users/labon/ssh-cert-manager/internal/audit/verify.go:265), [verify.go:186](C:/Users/labon/ssh-cert-manager/internal/audit/verify.go:186)).
+**Strengths.** It adds positive as well as tampering fixtures, including a directory that remains valid across an RP-only policy successor ([02-04-PLAN.md:219](02-04-PLAN.md)). The existing verifier already checks bundle succession and active CA keys ([verify.go:265](../../../internal/audit/verify.go), [verify.go:186](../../../internal/audit/verify.go)).
 
-**Concerns.** **LOW** — The new audit semantics depend on keeping a cached verification result correct as either the policy or directory changes. The plan now specifies rechecking only when that pair changes ([02-04-PLAN.md:149](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-04-PLAN.md:149)); the positive multi-successor fixture is important to preserve.
+**Concerns.** **LOW** — The new audit semantics depend on keeping a cached verification result correct as either the policy or directory changes. The plan now specifies rechecking only when that pair changes ([02-04-PLAN.md:149](02-04-PLAN.md)); the positive multi-successor fixture is important to preserve.
 
 **Suggestions.** Treat the multi-successor fixture as a compatibility test for future policy and directory changes, not just as a one-time regression test.
 
@@ -117,9 +117,9 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** The software CA backend fills a real gap in KEY-06 and ties the warning to signer-reported custody.
 
-**Strengths.** The plan recognizes that software custody exists only as a constant today ([keystore.go:33](C:/Users/labon/ssh-cert-manager/internal/keystore/keystore.go:33)) and specifies a filesystem backend, custody reporting, and a user-reviewed warning. It also caps installed trust documents so a later status response remains representable ([02-05-PLAN.md:44](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-05-PLAN.md:44)).
+**Strengths.** The plan recognizes that software custody exists only as a constant today ([keystore.go:33](../../../internal/keystore/keystore.go)) and specifies a filesystem backend, custody reporting, and a user-reviewed warning. It also caps installed trust documents so a later status response remains representable ([02-05-PLAN.md:44](02-05-PLAN.md)).
 
-**Concerns.** **MEDIUM** — Encrypted files still depend on passphrase handling and safe provisioning. The plan says to mirror the TPM backend’s directory checks and all-or-nothing writes ([02-05-PLAN.md:133](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-05-PLAN.md:133)); that behavior needs direct refusal tests, since the existing custody constant does not provide it.
+**Concerns.** **MEDIUM** — Encrypted files still depend on passphrase handling and safe provisioning. The plan says to mirror the TPM backend’s directory checks and all-or-nothing writes ([02-05-PLAN.md:133](02-05-PLAN.md)); that behavior needs direct refusal tests, since the existing custody constant does not provide it.
 
 **Suggestions.** Verify permissions and failure cleanup for both new and pre-existing paths; document that same-host passphrase storage weakens the protection.
 
@@ -129,7 +129,7 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** This plan creates the server shell, TLS identity pinning, status cache, and deployment path.
 
-**Strengths.** It sources RP and custody from signer status and gives all handlers one fail-closed cache rule ([02-06-PLAN.md:58](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-06-PLAN.md:58), [02-06-PLAN.md:193](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-06-PLAN.md:193)). It also accounts for certificate reload and operational renewal.
+**Strengths.** It sources RP and custody from signer status and gives all handlers one fail-closed cache rule ([02-06-PLAN.md:58](02-06-PLAN.md), [02-06-PLAN.md:193](02-06-PLAN.md)). It also accounts for certificate reload and operational renewal.
 
 **Concerns.** **MEDIUM** — The initial TLS pin ceremony is security-critical and easy to misunderstand: it must authenticate the observed root out of band before saving trust. The plan should ensure errors distinguish a pin mismatch from ordinary TLS validation failure and tell the operator how to recover.
 
@@ -141,9 +141,9 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** The admin API uses SSHSIG-authenticated requests to create pending users and invites without treating server rows as authority.
 
-**Strengths.** The plan signs the raw request target and exact body, and explicitly avoids normalized-path ambiguity ([02-07-PLAN.md:50](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-07-PLAN.md:50)). It includes bounded request bodies, replay controls, and rate limits.
+**Strengths.** The plan signs the raw request target and exact body, and explicitly avoids normalized-path ambiguity ([02-07-PLAN.md:50](02-07-PLAN.md)). It includes bounded request bodies, replay controls, and rate limits.
 
-**Concerns.** **LOW** — The request authentication and rate-limit logic are new server code, not existing mechanisms verified by the current source. In particular, the IPv6 /64 and global limiter behavior should be tested against the stated map-bound guarantees ([02-07-PLAN.md:174](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-07-PLAN.md:174)).
+**Concerns.** **LOW** — The request authentication and rate-limit logic are new server code, not existing mechanisms verified by the current source. In particular, the IPv6 /64 and global limiter behavior should be tested against the stated map-bound guarantees ([02-07-PLAN.md:174](02-07-PLAN.md)).
 
 **Suggestions.** Ensure path/body verification occurs before handler side effects, and retain tests for percent-encoded paths and replayed nonces.
 
@@ -153,7 +153,7 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** This plan adds passkey registration while keeping new credentials pending until an admin binds them in a signed directory.
 
-**Strengths.** Registration parsing stays in the server; the signer receives SPKI data, consistent with the dependency boundary. The revised plan makes session and invite consumption conditional and atomic, with a concurrent-finish test ([02-08-PLAN.md:198](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-08-PLAN.md:198), [02-08-PLAN.md:200](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-08-PLAN.md:200)).
+**Strengths.** Registration parsing stays in the server; the signer receives SPKI data, consistent with the dependency boundary. The revised plan makes session and invite consumption conditional and atomic, with a concurrent-finish test ([02-08-PLAN.md:198](02-08-PLAN.md), [02-08-PLAN.md:200](02-08-PLAN.md)).
 
 **Concerns.** **MEDIUM** — The external WebAuthn library and its transitive dependencies expand the server’s supply chain. The owner review gate and signer dependency check are appropriate, but registration behavior still needs the specified differential tests and real-browser validation.
 
@@ -165,9 +165,9 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** The verified-base directory edit pipeline is the authority bridge between pending enrollment and signer-installed users and roles.
 
-**Strengths.** It has admins verify the base locally, review a diff, sign the successor, and send it to the signer. The server checks newly bound credentials against pending rows before forwarding ([02-09-PLAN.md:183](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-09-PLAN.md:183)).
+**Strengths.** It has admins verify the base locally, review a diff, sign the successor, and send it to the signer. The server checks newly bound credentials against pending rows before forwarding ([02-09-PLAN.md:183](02-09-PLAN.md)).
 
-**Concerns.** **MEDIUM** — The pending-row check and signer install are separate steps. A concurrent `--reinvite` can delete the pending credential after the check at [02-09-PLAN.md:186](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-09-PLAN.md:186) but before the install at [02-09-PLAN.md:190](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-09-PLAN.md:190). The signed directory can then install despite the plan’s claim that reinvite makes the old proposal final.
+**Concerns.** **MEDIUM** — The pending-row check and signer install are separate steps. A concurrent `--reinvite` can delete the pending credential after the check at [02-09-PLAN.md:186](02-09-PLAN.md) but before the install at [02-09-PLAN.md:190](02-09-PLAN.md). The signed directory can then install despite the plan’s claim that reinvite makes the old proposal final.
 
 **Suggestions.** Reserve the pending credential with a conditional state transition before calling the signer, then finalize or release that reservation based on the signer result. Alternatively, define and test which operation wins a reinvite/install race.
 
@@ -177,9 +177,9 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** The web sign-in plan adds passkey sessions and a read-only account page, reusing the assertion verifier.
 
-**Strengths.** It checks the installed directory on session use and terminates sessions when the credential is no longer bound ([02-10-PLAN.md:39](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-10-PLAN.md:39)). The bounded cookie lifetime and fail-closed status refresh are clearly specified.
+**Strengths.** It checks the installed directory on session use and terminates sessions when the credential is no longer bound ([02-10-PLAN.md:39](02-10-PLAN.md)). The bounded cookie lifetime and fail-closed status refresh are clearly specified.
 
-**Concerns.** **LOW** — A disable followed by re-enable can leave a session alive if no request occurred while disabled; the plan documents that residual ([02-10-PLAN.md:168](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-10-PLAN.md:168)). Since the session is read-only and does not authorize issuance, the impact is limited.
+**Concerns.** **LOW** — A disable followed by re-enable can leave a session alive if no request occurred while disabled; the plan documents that residual ([02-10-PLAN.md:168](02-10-PLAN.md)). Since the session is read-only and does not authorize issuance, the impact is limited.
 
 **Suggestions.** Keep the residual visible in the security documentation and test that role changes are reflected on the next account-page request.
 
@@ -189,7 +189,7 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** The role, group, and host-group plan connects signer-computed principals to a shared host-file renderer.
 
-**Strengths.** It now defines empty mappings as a header-only file and uses the renderer’s output in the SSHD refusal test ([02-11-PLAN.md:35](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-11-PLAN.md:35)). This is a useful fail-closed rule for later host-agent work.
+**Strengths.** It now defines empty mappings as a header-only file and uses the renderer’s output in the SSHD refusal test ([02-11-PLAN.md:35](02-11-PLAN.md)). This is a useful fail-closed rule for later host-agent work.
 
 **Concerns.** **LOW** — Host-group mappings are not host-scoped certificate authorization in this phase; the plan correctly says they affect the rendered file only. Operators could mistake the mapping for signer-enforced host restriction unless the CLI and runbook state this plainly.
 
@@ -201,7 +201,7 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** This plan implements the end-user login flow from request construction through passkey approval, redemption, certificate verification, and agent loading.
 
-**Strengths.** It mints only at redemption and uses loopback state, PKCE, exact fingerprint display, and client-side certificate checks ([02-12-PLAN.md:49](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-12-PLAN.md:49), [02-12-PLAN.md:50](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-12-PLAN.md:50)). The expiry check now targets the short-lived entry by key ID while confirming the longer-lived entry remains ([02-12-PLAN.md:232](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-12-PLAN.md:232)).
+**Strengths.** It mints only at redemption and uses loopback state, PKCE, exact fingerprint display, and client-side certificate checks ([02-12-PLAN.md:49](02-12-PLAN.md), [02-12-PLAN.md:50](02-12-PLAN.md)). The expiry check now targets the short-lived entry by key ID while confirming the longer-lived entry remains ([02-12-PLAN.md:232](02-12-PLAN.md)).
 
 **Concerns.** **MEDIUM** — The flow has several independent browser, server, loopback, and agent steps. The plan correctly labels browser and default Windows-agent paths unverified until real use; those labels must remain until 02-14 evidence exists.
 
@@ -213,7 +213,7 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** This is an operational homelab rollout with explicit owner checkpoints before binding credentials to the RP hostname.
 
-**Strengths.** It requires confirmation of the exact hostname before signing RP policy and records the irreversible consequence ([02-13-PLAN.md:128](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-13-PLAN.md:128)). The upgrade includes guarded backups and a written rollback path ([02-13-PLAN.md:210](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-13-PLAN.md:210)).
+**Strengths.** It requires confirmation of the exact hostname before signing RP policy and records the irreversible consequence ([02-13-PLAN.md:128](02-13-PLAN.md)). The upgrade includes guarded backups and a written rollback path ([02-13-PLAN.md:210](02-13-PLAN.md)).
 
 **Concerns.** **MEDIUM** — The rollback boundary ends once a passkey is registered; after that, the plan requires fixing forward. That is appropriate for avoiding a stranded credential, but makes the pre-registration backup, v3 hash checks, and doctor verification essential gates.
 
@@ -225,7 +225,7 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 **Summary.** The final dogfood plan validates web sign-in and real Windows/Linux SSH logins, then records platform status and adds required CI checks.
 
-**Strengths.** It corroborates logins with both audit exports and SSHD journal serials, and the expiry test identifies the five-minute certificate specifically ([02-14-PLAN.md:230](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-14-PLAN.md:230)). It leaves macOS unverified rather than claiming unsupported coverage.
+**Strengths.** It corroborates logins with both audit exports and SSHD journal serials, and the expiry test identifies the five-minute certificate specifically ([02-14-PLAN.md:230](02-14-PLAN.md)). It leaves macOS unverified rather than claiming unsupported coverage.
 
 **Concerns.** **MEDIUM** — The plan depends on real hardware, a live homelab, and owner interaction. It also makes the OS jobs required, so a skipped or unavailable runner could block merges.
 
@@ -235,7 +235,7 @@ All 14 plan files are present. I compared them with the existing Phase 1 code an
 
 ### Cross-plan findings
 
-The sequence is sensible: signer formats precede hardening and audit verification; the server and enrollment flow precede role management and login; real homelab work follows implementation. The existing Phase 1 issue path already logs before releasing a certificate ([issue.go:196](C:/Users/labon/ssh-cert-manager/internal/signer/issue.go:196)), and the Phase 2 plans preserve that invariant.
+The sequence is sensible: signer formats precede hardening and audit verification; the server and enrollment flow precede role management and login; real homelab work follows implementation. The existing Phase 1 issue path already logs before releasing a certificate ([issue.go:196](../../../internal/signer/issue.go)), and the Phase 2 plans preserve that invariant.
 
 The main review finding is the **02-09 reinvite/install race**. The plan says reinvite invalidates old credentials, but checks pending state separately from the signer call. Define a reservation or an explicit race outcome before implementing that pipeline.
 
@@ -654,7 +654,7 @@ Dogfood part 1: Owner confirms RP hostname (D-09 gate), root-signed policy succe
 | HIGH | **One-way RP binding** — Once owner registers passkey under RP, changing it means re-enrolling everyone. D-09 checkpoint is the gate. |
 | MEDIUM | **TEST root C signs v3** — Not production roots. Homelab stays dogfood until KEY-07 v4 ceremony. Documented. |
 | MEDIUM | **tailscale cert renewal** — 90-day expiry, 2/3 renewal. Timer runs daily with 1h jitter. UNVERIFIED until 02-13 run. |
-| LOW | **No jq on Daniel-PC/WSL** — Audit verify JSON parsed with `python -I`. Works but less standard. |
+| LOW | **No jq on the owner's workstation/WSL** — Audit verify JSON parsed with `python -I`. Works but less standard. |
 
 #### Suggestions
 1. Make D-09 checkpoint message extremely clear about consequences
@@ -669,11 +669,11 @@ Operational plan with good safeguards. The one-way RP decision is the critical g
 ### 02-14: Homelab Real Logins — Windows, Linux, Platform Record, Required Checks
 
 #### Summary
-Dogfood part 2: Real logins from Windows (Daniel-PC, keyroster agent) and Linux (laptop, GNOME), corroborated by audit log + sshd journal. Platform record in needs-hardware.md. cli-windows/cli-macos added to main-integrity ruleset.
+Dogfood part 2: Real logins from Windows (the owner's workstation, keyroster agent) and Linux (laptop, GNOME), corroborated by audit log + sshd journal. Platform record in needs-hardware.md. cli-windows/cli-macos added to main-integrity ruleset.
 
 #### Strengths
 - **Dual corroboration**: Every login matched to audit-verified kr2 key ID + sshd journal line
-- **Absolute journal windows**: `KR_ZIMA_SINCE` / `KR_VM_SINCE` recorded before CA trusted
+- **Absolute journal windows**: `KR_SERVER_SINCE` / `KR_VM_SINCE` recorded before CA trusted
 - **Expiry verification**: 5m login targeted by key ID from export, listings A/B matched on key ID
 - **A6 authenticatorData recording**: Length + flags from decoded export (accepted) or keyroster-server journal (refused)
 - **Honest UNVERIFIED labels**: macOS browser leg, Safari, Firefox on Windows, headless
@@ -1873,7 +1873,7 @@ Plan 02‑13 describes the homelab “dog‑food” deployment that binds a co
 | **C3‑02** | **Missing verification that the server’s TLS certificate covers the RP hostname** – The plan checks that `curl https://<FQDN>/healthz` succeeds, but it does **not** verify that the certificate’s SAN list contains the RP hostname (required for WebAuthn). A mis‑issued cert (e.g., wildcard `*.ts.net`) would still pass `curl` yet break the RP check in the signer. | High – The signer will reject WebAuthn assertions if the RP ID does not match the server’s origin; a mis‑configured cert would cause users to be unable to log in, and the failure would be hard to diagnose. |
 | **C3‑03** | **Potential race between `tailscale cert` renewal and the server’s TLS reload** – The plan sets up the `keyroster‑tailscale‑cert.timer` to renew the cert, but does not verify that the `GetCertificate` callback correctly swaps the certificate *atomically* without dropping connections. The `tls.Config.GetCertificate` implementation must be robust (e.g., use `atomic.Pointer`). No test for this is described. | Medium – A brief period without a valid cert could cause the health check to fail, or the server to abort during a login flow. |
 | **C3‑04** | **Assumption that the Windows `ssh‑add -t` failure is always deterministic** – The plan assumes the inbox OpenSSH agent on Windows 9.5p2 will *always* reject a lifetime‑constrained key (which is true today) but does not provide a fallback if the user’s OS is newer (e.g., 9.6+ which *might* accept the lifetime). If that occurs, the key would be persisted without a lifetime, violating success criterion 2. | Low–Medium – Could silently defeat the “expire with cert” guarantee on Windows environments that get a newer agent. |
-| **C3‑05** | **Audit‑verify JSON parsing via Python** – The plan uses `python -I` to parse the JSON output of `audit verify`. The CI environment on Windows (Daniel‑PC) may not have Python installed, causing the verification step to fail silently or be omitted. | Low – The step could be replaced with a pure‑Go checker or a small Go helper binary to avoid platform dependence. |
+| **C3‑05** | **Audit‑verify JSON parsing via Python** – The plan uses `python -I` to parse the JSON output of `audit verify`. The CI environment on Windows (the owner's workstation) may not have Python installed, causing the verification step to fail silently or be omitted. | Low – The step could be replaced with a pure‑Go checker or a small Go helper binary to avoid platform dependence. |
 | **C3‑06** | **No explicit check that the `keyroster‑server` CSP includes `connect‑src 'self'`** – The plan mentions adding this header in the server code (see earlier design), but the verification does not confirm that the final built binary indeed serves the CSP as required. Mis‑configuration could break the login page’s `fetch()` to the loopback listener (Pitfall 5). | Medium – Could cause the browser‑based login flow to break on Chrome/Edge (Local‑Network Access). |
 | **C3‑07** | **Potential exposure of the RP hostname hash (`RP_HASH12`) in logs or alerts** – The checkpoint writes the hash value to the console and to the `kr.env` file. While this is a *partial* hash, it could be used in a targeted enumeration attack (e.g., pre‑image lookup). Though low risk, it is worth noting. | Low – No direct security impact, but best practice would be to treat even partial hashes as sensitive. |
 | **C3‑08** | **Assumes the owner’s admin SSH key is already loaded into the Windows `ssh‑agent`** – The plan’s `keyroster.exe user approve` step depends on the admin key being available. If the Windows agent is not running or the key is not loaded, the command will fail. No explicit pre‑check or guidance is provided. | Low – Could cause an unnecessary manual retry. |
@@ -1914,7 +1914,7 @@ Plan 02‑13 is well‑structured, respects the one‑way RP binding, and prov
 
 ###### 1. Summary
 The plan drives the final “real‑world” verification of the Passkey‑Login MVP.  
-It configures a stock OpenSSH host (`zima‑srv`) with the CA public key and a rendered `AuthorizedPrincipalsFile`, then exercises the full login flow from both Windows (Daniel‑PC) and Linux (the laptop).  All evidence is cross‑checked between the signer’s Merkle log and the host’s sshd journal, and the platform record is written to `docs/security/needs‑hardware.md`.  The plan also finalises the required‑status‑checks ruleset (`cli‑windows` / `cli‑macos`) and merges the changes after owner approval.
+It configures a stock OpenSSH host (`homelab-server`) with the CA public key and a rendered `AuthorizedPrincipalsFile`, then exercises the full login flow from both Windows (the owner's workstation) and Linux (the laptop).  All evidence is cross‑checked between the signer’s Merkle log and the host’s sshd journal, and the platform record is written to `docs/security/needs‑hardware.md`.  The plan also finalises the required‑status‑checks ruleset (`cli‑windows` / `cli‑macos`) and merges the changes after owner approval.
 
 Overall the workflow is sound and matches the success criteria for the MVP, but a few edge‑cases and implementation‑details need tighter handling to guarantee repeatability and security.
 
@@ -1924,15 +1924,15 @@ Overall the workflow is sound and matches the success criteria for the MVP, but 
 
 | Area | Why it’s strong (with file evidence) |
 |------|--------------------------------------|
-| **Zero‑downtime host configuration** | The host changes are limited to a single drop‑in (`/etc/ssh/sshd_config.d/50-keyroster.conf`) and two data files (`keyroster_user_ca.pub`, `principals/zima`).  The plan validates the configuration with `sshd -t` before reload (Task 1 ‑ step 4).  This mirrors the pattern already used in `docs/runbooks/host‑setup.md` and keeps rollback trivial. |
-| **Full‑stack verification** | The login is proven by three independent artefacts: <br>1. `audit verify` JSON export (uses `cmd/keyroster audit verify --json`). <br>2. `zima` journal entries (`journalctl -u ssh -u sshd --since "$KR_ZIMA_SINCE"`). <br>3. SSH‑agent listings (key fingerprint & key‑ID).  All are compared in the automated checks (see verify blocks that invoke Python one‑liners).  This satisfies the core value “full visibility”. |
+| **Zero‑downtime host configuration** | The host changes are limited to a single drop‑in (`/etc/ssh/sshd_config.d/50-keyroster.conf`) and two data files (`keyroster_user_ca.pub`, `principals/srvadmin`).  The plan validates the configuration with `sshd -t` before reload (Task 1 ‑ step 4).  This mirrors the pattern already used in `docs/runbooks/host‑setup.md` and keeps rollback trivial. |
+| **Full‑stack verification** | The login is proven by three independent artefacts: <br>1. `audit verify` JSON export (uses `cmd/keyroster audit verify --json`). <br>2. `homelab-server` journal entries (`journalctl -u ssh -u sshd --since "$KR_SERVER_SINCE"`). <br>3. SSH‑agent listings (key fingerprint & key‑ID).  All are compared in the automated checks (see verify blocks that invoke Python one‑liners).  This satisfies the core value “full visibility”. |
 | **Robust TLS pin handling** | The TLS root‑pin set is recorded in `kr.env` (Task 1) and re‑checked on the laptop during `keyroster init`.  The verification step uses the same pins (`--pin "$KR_PIN_C"` etc.) when running `audit verify`.  This prevents man‑in‑the‑middle attacks on the server‑client channel. |
 | **Explicit handling of the Windows agent limitation** | The plan acknowledges that the built‑in Windows `ssh‑agent` refuses lifetime constraints and therefore runs a custom in‑process agent (option A).  The refusal path is verified (`ssh‑add` error handling) and the CLI aborts without falling back to a non‑constrained add, ensuring the TTL requirement (D‑15) is actually enforced. |
 | **Clear provenance of host identity** | RP‑ID and allowed origins are taken from the **root‑signed policy** (D‑09).  The server checks that the TLS cert covers that hostname; the host drop‑in never contains any hostname or IP address (see final diff guard `git diff … | grep -E '[a-z0-9-]+\.ts\.net|([0-9]{1,3}\.){3}[0-9]{1,3}'`). |
 | **Documentation‑driven “UNVERIFIED” labeling** | `docs/security/needs‑hardware.md` is updated with a per‑OS “Verified” / “UNVERIFIED” table, and the plan explicitly prevents any accidental declaration of verification for macOS.  This respects the “no‑unexercised‑paths” rule. |
 | **Ruleset gating before merge** | The merge gate (Task 6) forces the owner to apply the updated `main‑integrity.json` and confirm that the required‑checks entries exist (Python JSON validation).  This guarantees the CI checks become required on `main` before the PR is merged. |
 | **Use of strict CSP & SameSite cookies** | The server UI (`keyroster‑server`) already embeds CSP (`default-src 'none'; …; connect-src 'self'`) and `__Host-` cookies (see `internal/server/headers.go`).  The plan does not modify this, so the security posture for the web UI remains intact. |
-| **Auditable, deterministic timestamps** | All timestamps that drive log correlation (`KR_ZIMA_SINCE`, `KR_VM_SINCE`) are recorded **before** any CA key is installed (Task 1).  This eliminates the “window‑sliding” problem noted in the earlier review (F5). |
+| **Auditable, deterministic timestamps** | All timestamps that drive log correlation (`KR_SERVER_SINCE`, `KR_VM_SINCE`) are recorded **before** any CA key is installed (Task 1).  This eliminates the “window‑sliding” problem noted in the earlier review (F5). |
 
 ---
 
@@ -1944,7 +1944,7 @@ Overall the workflow is sound and matches the success criteria for the MVP, but 
 | **C2 – Dependency on `ssh‑add` output format** | The verification extracts the key‑ID from the `ssh‑add -l` output, which varies between OpenSSH versions (some print only the fingerprint, some include the comment).  If the format changes, the grep‑based match (`grep -qF "$KID5M"`) could miss the line. | The code uses `tr -d '[:space:]'` before matching, but still relies on the key‑ID appearing verbatim. No fallback parser is defined. |
 | **C3 – Windows agent pipe spelling** | The pipe name (`\\.\pipe\openssh-ssh-agent`) must be passed correctly to the CLI (`--identity-agent` hint).  A typo or missing escaping could cause the CLI to connect to the *inbox* agent instead of the custom one, breaking the TTL guarantee. | The plan references “pipe spelling from 02‑02” but does not programmatically verify the pipe exists (e.g., `test -e \\.\pipe\keyroster‑agent`). |
 | **C4 – Host‑side `Match` block count is only recorded** | The plan records the number of `Match` blocks but does not verify their contents.  A pre‑existing `Match` block could conditionally *override* the `TrustedUserCAKeys` setting for the laptop’s IP, causing the login to fail silently. | Acceptance criteria state “the Match‑file count is recorded (addresses not recorded)”.  No assert that the count is **zero** or that the block does not contain a conflicting directive. |
-| **C5 – Failure handling for missing journal entries** | If the host’s journal rotation discards entries older than the recorded `KR_ZIMA_SINCE`, the grep step may find nothing, leading to a false failure.  The plan does not enforce a journal retention policy. | The verify step only checks `journalctl … --since "$KR_ZIMA_SINCE"`; no pre‑check that the journal contains entries for the whole window. |
+| **C5 – Failure handling for missing journal entries** | If the host’s journal rotation discards entries older than the recorded `KR_SERVER_SINCE`, the grep step may find nothing, leading to a false failure.  The plan does not enforce a journal retention policy. | The verify step only checks `journalctl … --since "$KR_SERVER_SINCE"`; no pre‑check that the journal contains entries for the whole window. |
 | **C6 – MacOS CI coverage** | While the plan intentionally leaves macOS as **UNVERIFIED**, the CI job `cli‑macos` may still be flaky (e.g., missing binary‑compatibility with the custom in‑memory agent).  No smoke test is run on a macOS runner, so a later phase that requires macOS could be blocked unexpectedly. | The plan mentions “CI‑only” for macOS but no explicit test that the binary builds and runs on macOS (e.g., `go test -run TestCLI_MacOS`). |
 | **C7 – No automated rollback of host config** | If any step fails after the drop‑in is installed (e.g., the `AuthorizedPrincipalsFile` has a typo), the plan aborts with a manual rollback note.  An automated rollback (re‑install previous config) would make the process more reliable. | Task 1 step 6 says “If anything fails, remove the drop‑in, reload and stop” – this is manual. |
 | **C8 – Potential for leaking RP hostname** | The final diff guard (`git diff … | grep -E …`) only checks for FQDNs ending in `.ts.net` **or** raw IPs.  If the RP hostname is a non‑tailnet sub‑domain (e.g., `keyroster.example.com`), it would not be caught.  The policy schema does not enforce a specific suffix, so a future change could accidentally commit a hostname. | The guard regex is hard‑coded; no generic rule that *any* hostname must be absent. |
@@ -2089,8 +2089,8 @@ CONFIRMED/PARTIAL findings from round 2, by plan. The evidence is the verifier's
 - Verdict: PARTIAL
 - Verified severity: LOW
 - Round 1: new
-- Evidence: The claim as stated is covered. Ensure itself is tested here against a freshly built keyroster.exe (02-02-PLAN.md:242), the real `keyroster.exe login` on Windows runs in 02-14 (02-14-PLAN.md:190-191), and this plan marks nothing complete (`requirements-completed` empty, 02-02-PLAN.md:408). A narrower gap sits at the line codex cites: TestInboxSSHOffersAgentCert step 1 says "run `keyroster.exe agent` on a test pipe" (:244), but the command is specified to serve only PipePath() (:223), and the plan gives it no flag or environment override (:207, :215). The executor must either invent a pipe-name switch on the command or run the test on the user's real per-SID pipe, where a running agent on Daniel-PC makes the second Serve fail (:203). The same applies to the Ensure test at :242, which always dials PipePath().
-- Fix: In Task 2, state how the two process-level tests choose their pipe. Either say they use the real per-SID pipe and require that no keyroster agent is running (fail with a clear message otherwise), or define a hidden test-only argument on `keyroster agent` for the pipe name and state that Ensure never passes it. Have needs-hardware.md (Task 3) say which pipe the Daniel-PC evidence used.
+- Evidence: The claim as stated is covered. Ensure itself is tested here against a freshly built keyroster.exe (02-02-PLAN.md:242), the real `keyroster.exe login` on Windows runs in 02-14 (02-14-PLAN.md:190-191), and this plan marks nothing complete (`requirements-completed` empty, 02-02-PLAN.md:408). A narrower gap sits at the line codex cites: TestInboxSSHOffersAgentCert step 1 says "run `keyroster.exe agent` on a test pipe" (:244), but the command is specified to serve only PipePath() (:223), and the plan gives it no flag or environment override (:207, :215). The executor must either invent a pipe-name switch on the command or run the test on the user's real per-SID pipe, where a running agent on the owner's workstation makes the second Serve fail (:203). The same applies to the Ensure test at :242, which always dials PipePath().
+- Fix: In Task 2, state how the two process-level tests choose their pipe. Either say they use the real per-SID pipe and require that no keyroster agent is running (fail with a clear message otherwise), or define a hidden test-only argument on `keyroster agent` for the pipe name and state that Ensure never passes it. Have needs-hardware.md (Task 3) say which pipe the owner's workstation evidence used.
 
 **02-02-R2-F4 — No probe of macOS ssh-agent lifetime behaviour**
 - Reviewers: nemotron

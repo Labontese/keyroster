@@ -189,7 +189,7 @@ The hash was also checked in `public.sha256` on the workstation (all 6 files OK)
    - OK: user, state_dir, db_permissions, db_integrity, log, clock, `bundle: trust bundle version 2 installed (2 roots, threshold 1)`, trust, and `tpm` (IBM, vtpm).
    - WARN `software_root` for `SHA256:fKgl1U8S…` (C) and `SHA256:Om9ywmZu…` (D).
    - WARN `vtpm_custody`.
-8. **Issue.** A throwaway Ed25519 key was generated in the scratchpad, and only its public key went to the VM. One `ssh.exe -A` command ran `keyroster ca issue --ca user --principal keyroster-rotation-check --subject u:rotation-check --ttl 1h --admin-key SHA256:BUJx6C2+…` and produced:
+8. **Issue.** A throwaway Ed25519 key was generated in the scratch directory, and only its public key went to the VM. One `ssh.exe -A` command ran `keyroster ca issue --ca user --principal keyroster-rotation-check --subject u:rotation-check --ttl 1h --admin-key SHA256:BUJx6C2+…` and produced:
    - Key ID `kr1/ca=user/sub=u:rotation-check/req=7aa6813e4f978d251ac3a1a0b4f92dc1/pol=1/ser=1791563904373520`;
    - Signing CA `ECDSA SHA256:InRxix/RORRjHDCbp1a6dCdjWfHVwhOCdZzryALvWi0`;
    - log leaf 5.
