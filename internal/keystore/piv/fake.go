@@ -127,9 +127,6 @@ func (f *fakeCard) GenerateKey(mgmtKey []byte, slot ykpiv.Slot, key ykpiv.Key) (
 	if key.PINPolicy != ykpiv.PINPolicyOnce || key.TouchPolicy != ykpiv.TouchPolicyNever {
 		return nil, fmt.Errorf("fake card: unexpected policies %v/%v", key.PINPolicy, key.TouchPolicy)
 	}
-	if f.genFail[slot.Key] == genFailBefore {
-		return nil, fmt.Errorf("fake card: generate in slot %s failed (injected)", slot)
-	}
 	priv, err := newKey(key.Algorithm)
 	if err != nil {
 		return nil, err
@@ -149,13 +146,10 @@ func (f *fakeCard) GenerateKey(mgmtKey []byte, slot ykpiv.Slot, key ykpiv.Key) (
 // fakeGenFailure is an injected GenerateKey failure of one slot.
 type fakeGenFailure int
 
-const (
-	// genFailBefore fails before the card acts: the slot is unchanged.
-	genFailBefore fakeGenFailure = iota + 1
-	// genFailAfterReplace replaces the slot's key and then fails, as a
-	// card that acted and whose answer was lost.
-	genFailAfterReplace
-)
+// genFailAfterReplace replaces the slot's key and then fails, as a card
+// that acted and whose answer was lost. It is not the zero value, which a
+// slot without an injected failure reads.
+const genFailAfterReplace fakeGenFailure = 1
 
 func (f *fakeCard) PrivateKey(slot ykpiv.Slot, pub crypto.PublicKey, auth ykpiv.KeyAuth) (crypto.PrivateKey, error) {
 	s, ok := f.slots[slot.Key]
