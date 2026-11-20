@@ -243,20 +243,36 @@ func TestPrepareGeneration(t *testing.T) {
 			t.Fatalf("the writer did not reload: broken %v, size %d, want %d", lw.broken, lw.tree.Size(), leaves)
 		}
 	})
-	t.Run("tpm_and_piv_refused_until_supported", func(t *testing.T) {
-		for _, name := range []string{"tpm", "piv"} {
-			err := CheckRotationBackend(name)
-			if !errors.Is(err, ErrRotationBackend) || !strings.Contains(err.Error(), "03-12f") || !strings.HasPrefix(err.Error(), "rotation_not_supported_on_backend") {
-				t.Fatalf("CheckRotationBackend(%s) = %v", name, err)
-			}
+	t.Run("orphan_names_the_location", func(t *testing.T) {
+		// 03-12f: the setup of row_and_leaf_one_transaction; the key the
+		// backend created has a location, and the refusal names it there
+		// instead of the software backend's file.
+		e := newGenEnv(t)
+		lw, err := newLogWriter(ctx, e.db, memKey{e.fx.Roles[keystore.RoleLog]}, nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-		for _, name := range []string{"agent", "software"} {
+		leaves, rows := e.leaves(t), len(e.gens(t))
+		lw.cpSigner = failingSigner{lw.cpSigner}
+		_, err = prepareGeneration(ctx, lw, e.db, e.be, keystore.RoleUser, "", time.Now)
+		if err == nil {
+			t.Fatal("prepareGeneration succeeded although the checkpoint was not signed")
+		}
+		unchanged(t, e, leaves, rows)
+		if !strings.Contains(err.Error(), "at location loc-user-g2") || strings.Contains(err.Error(), "{state-dir}/software") {
+			t.Fatalf("the refusal does not name the created key's location: %v", err)
+		}
+	})
+	t.Run("tpm_and_piv_accepted", func(t *testing.T) {
+		// 03-12f: every registered backend can hold a later generation.
+		for _, name := range []string{"tpm", "piv", "agent", "software"} {
 			if err := CheckRotationBackend(name); err != nil {
 				t.Fatalf("CheckRotationBackend(%s) = %v", name, err)
 			}
 		}
 		for _, name := range []string{"pkcs11-agent", "", "foo"} {
-			if err := CheckRotationBackend(name); !errors.Is(err, ErrRotationBackend) {
+			err := CheckRotationBackend(name)
+			if !errors.Is(err, ErrRotationBackend) || !strings.HasPrefix(err.Error(), "rotation_not_supported_on_backend") || strings.Contains(err.Error(), "03-1") {
 				t.Fatalf("CheckRotationBackend(%q) = %v", name, err)
 			}
 		}

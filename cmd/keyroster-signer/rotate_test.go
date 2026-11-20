@@ -396,50 +396,138 @@ func signs(t *testing.T, key keystore.CAKey) {
 	}
 }
 
-// TestSignerRestartMixedBundle (03-12): after ca-rotate prepare the signer
-// restarts, and the stored backend opens both generations of the user CA
-// by generation and fingerprint and refuses each generation's number with
-// the other's fingerprint. The software case is the one test of this
-// package that runs scrypt at the production work factor: its
-// generation-1 files are written at a low work factor, and the
-// generation-2 file that prepare creates is at the production one.
-func TestSignerRestartMixedBundle(t *testing.T) {
-	check := func(t *testing.T, st *rotateState, fp1, fp2 string) {
-		t.Helper()
-		startSigner(t, st)
-		ctx := context.Background()
-		db, err := signerdb.Open(st.db)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = db.Close() })
-		_, be, err := openStoredBackend(ctx, db, nil, st.dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = be.Close() })
-		for _, k := range []struct {
-			gen uint32
-			fp  string
-		}{{1, fp1}, {2, fp2}} {
-			key, err := keystore.KeyFor(be, keystore.RoleUser, k.gen, k.fp, "")
-			if err != nil {
-				t.Fatalf("KeyFor generation %d: %v", k.gen, err)
-			}
-			if got := ssh.FingerprintSHA256(key.PublicKey()); got != k.fp {
-				t.Fatalf("KeyFor generation %d returned %s, want %s", k.gen, got, k.fp)
-			}
-			signs(t, key)
-		}
-		if _, isGen := be.(keystore.GenerationBackend); isGen {
-			if _, err := keystore.KeyFor(be, keystore.RoleUser, 2, fp1, ""); err == nil {
-				t.Fatal("generation 2 opened generation 1's key")
-			}
-			if _, err := keystore.KeyFor(be, keystore.RoleUser, 1, fp2, ""); err == nil {
-				t.Fatal("generation 1 opened generation 2's key")
-			}
+// runningSigner opens the database and the stored backend as serve does and
+// starts a signer on them, which is the restart, and returns it with a
+// function that closes both (03-12f). Unlike startSigner it leaves nothing
+// open until the test ends, so that a test on swtpm, which serves one
+// connection at a time, or on the fake card can open the backend again.
+func runningSigner(t *testing.T, st *rotateState) (*signer.Signer, func()) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := signerdb.Open(st.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, be, err := openStoredBackend(ctx, db, nil, st.dir)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	stop := func() {
+		_ = be.Close()
+		_ = db.Close()
+	}
+	s, err := signer.New(signer.Config{Backend: be, DB: db, AllowUIDs: []uint32{uint32(os.Getuid())}}) //nolint:gosec // G115: a uid
+	if err != nil {
+		stop()
+		t.Fatalf("signer.New: %v", err)
+	}
+	return s, stop
+}
+
+// checkMixedBundle restarts the signer on st and closes it, then opens the
+// stored backend alone and requires it to open generation 1 (fp1) and
+// generation 2 (fp2) of the user CA by generation, fingerprint and the
+// location the stored row records, and to refuse each generation's number
+// with the other's key (03-12; the rows' locations and one backend at a
+// time, 03-12f).
+func checkMixedBundle(t *testing.T, st *rotateState, fp1, fp2 string) {
+	t.Helper()
+	_, stop := runningSigner(t, st)
+	stop()
+	ctx := context.Background()
+	db, err := signerdb.Open(st.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	gens, err := db.CAGenerations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc := map[uint32]string{}
+	for _, g := range gens {
+		if g.Role == "user" {
+			loc[g.Generation] = g.Location
 		}
 	}
+	if _, ok := loc[1]; !ok {
+		t.Fatalf("no stored row of user generation 1: %+v", gens)
+	}
+	if _, ok := loc[2]; !ok {
+		t.Fatalf("no stored row of user generation 2: %+v", gens)
+	}
+	_, be, err := openStoredBackend(ctx, db, nil, st.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = be.Close() }()
+	for _, k := range []struct {
+		gen uint32
+		fp  string
+	}{{1, fp1}, {2, fp2}} {
+		key, err := keystore.KeyFor(be, keystore.RoleUser, k.gen, k.fp, loc[k.gen])
+		if err != nil {
+			t.Fatalf("KeyFor generation %d at location %q: %v", k.gen, loc[k.gen], err)
+		}
+		if got := ssh.FingerprintSHA256(key.PublicKey()); got != k.fp {
+			t.Fatalf("KeyFor generation %d returned %s, want %s", k.gen, got, k.fp)
+		}
+		signs(t, key)
+	}
+	if _, isGen := be.(keystore.GenerationBackend); isGen {
+		if _, err := keystore.KeyFor(be, keystore.RoleUser, 2, fp1, loc[2]); err == nil {
+			t.Fatal("generation 2 opened generation 1's key")
+		}
+		if _, err := keystore.KeyFor(be, keystore.RoleUser, 1, fp2, loc[1]); err == nil {
+			t.Fatal("generation 1 opened generation 2's key")
+		}
+	}
+}
+
+// issuedBy restarts the signer on st, issues one user certificate through
+// it with g's admin, closes it, and requires the certificate to be signed
+// by the key whose fingerprint is fp (03-12f).
+func issuedBy(t *testing.T, st *rotateState, g genesisDocs, fp string) {
+	t.Helper()
+	s, stop := runningSigner(t, st)
+	defer stop()
+	c := issueUserCert(t, s, g)
+	if got := ssh.FingerprintSHA256(c.SignatureKey); got != fp {
+		t.Fatalf("the certificate is signed by %s, want %s", got, fp)
+	}
+}
+
+// readPrepareFile reads the prepare file at path strictly (03-12f).
+func readPrepareFile(t *testing.T, path string) prepareFile {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the test's own prepare file
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pf prepareFile
+	if err := trust.DecodeStrict(data, &pf); err != nil {
+		t.Fatalf("prepare file %q: %v", data, err)
+	}
+	return pf
+}
+
+// pivRestartLeg is the piv leg of TestSignerRestartMixedBundle (03-12f).
+// rotate_piv_test.go, built only with the tags linux, piv and pivfake,
+// sets it; without those tags the leg skips.
+var pivRestartLeg func(t *testing.T)
+
+// TestSignerRestartMixedBundle (03-12): after ca-rotate prepare the signer
+// restarts, and the stored backend opens both generations of the user CA
+// by generation, fingerprint and the row's location and refuses each
+// generation's number with the other's fingerprint. The software case is
+// the one test of this package that runs scrypt at the production work
+// factor: its generation-1 files are written at a low work factor, and
+// the generation-2 file that prepare creates is at the production one.
+// The tpm (swtpm) and piv (the fake card) cases run the whole rotation at
+// command level (03-12f).
+func TestSignerRestartMixedBundle(t *testing.T) {
+	check := checkMixedBundle
 	t.Run("software", func(t *testing.T) {
 		if os.Getuid() == 0 {
 			t.Skip("doctor refuses to run as root; run the tests as a normal user")
@@ -520,6 +608,98 @@ func TestSignerRestartMixedBundle(t *testing.T) {
 		// With generation 2 next in the bundle in force (03-12b).
 		installNext(t, st, g, genesisChain(t, g), pf)
 		check(t, st, ssh.FingerprintSHA256(pub1), fp2)
+	})
+	t.Run("tpm", func(t *testing.T) {
+		// 03-12f: the rotation on a TPM signer (swtpm, custody vtpm), one
+		// backend at a time: prepare creates generation 2's two files, the
+		// signer restarts and issues with generation 1, the switch install,
+		// serve's refusal and doctor's FAIL while generation 1's files are
+		// there, retire-key removes both, a second run finds nothing, and a
+		// restart issues with generation 2.
+		if os.Getuid() == 0 {
+			t.Skip("doctor refuses to run as root; run the tests as a normal user")
+		}
+		sock := startSWTPM(t)
+		st := &rotateState{dir: filepath.Join(t.TempDir(), "state")}
+		if err := os.Mkdir(st.dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		st.db = filepath.Join(st.dir, "signer.db")
+		code, out := runSigner(t, "ca-init", "--backend", "tpm", "--backend-opt", "swtpm-socket="+sock, "--state-dir", st.dir)
+		if code != 0 || !strings.Contains(out, "TPM manufacturer: IBM → custody vtpm") {
+			t.Fatalf("ca-init exited %d:\n%s", code, out)
+		}
+		g := genesisFiles(t, st)
+		install(t, st, g)
+		user, _ := st.caPubKeys(t).Key(trust.RoleUser)
+		pub1, err := trust.ParseKey(user.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp1 := ssh.FingerprintSHA256(pub1)
+		outFile := filepath.Join(t.TempDir(), "user-g2.json")
+		code, out = runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--out", outFile)
+		if code != 0 {
+			t.Fatalf("ca-rotate prepare exited %d:\n%s", code, out)
+		}
+		pf := readPrepareFile(t, outFile)
+		pub2, err := trust.ParseKey(pf.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp2 := ssh.FingerprintSHA256(pub2)
+		if first, _, _ := strings.Cut(out, "\n"); first != "role user generation 2 "+fp2+" ecdsa-sha2-nistp256 vtpm" || strings.Contains(out, "location:") {
+			t.Fatalf("ca-rotate prepare printed:\n%s", out)
+		}
+		for _, name := range []string{"user-g2.tpmkey", "user-g2.auth"} {
+			fi, err := os.Lstat(filepath.Join(st.dir, "tpm", name))
+			if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+				t.Fatalf("%s: %v, %v; want a regular 0600 file", name, fi, err)
+			}
+		}
+		check(t, st, fp1, fp2)
+		issuedBy(t, st, g, fp1)
+		v2 := installNext(t, st, g, genesisChain(t, g), pf)
+		check(t, st, fp1, fp2)
+		if code, out := installSwitch(t, st, g, userSwitch(t, v2), "--previous", exportLog(t, st)); code != 0 {
+			t.Fatalf("install-bundle of the switch exited %d:\n%s", code, out)
+		}
+		if err := startErr(t, st); err == nil || !strings.Contains(err.Error(), "draining_key_still_usable: the backend still holds generation 1 of the user CA ("+fp1+")") {
+			t.Fatalf("serve before retire-key: %v, want draining_key_still_usable naming generation 1", err)
+		}
+		if _, out := runSigner(t, "doctor", "--state-dir", st.dir); !strings.Contains(out, "FAIL draining_key_still_usable: user generation 1 "+fp1+" is still held by the backend") {
+			t.Fatalf("doctor while generation 1's files are there:\n%s", out)
+		}
+		code, out = retireKey(t, st, "user")
+		if code != 0 || !strings.Contains(out, "role user generation 1 "+fp1+": removed\n") || !strings.Contains(out, "retire-key: no draining key of role user is held\n") {
+			t.Fatalf("retire-key exited %d:\n%s", code, out)
+		}
+		entries, err := os.ReadDir(filepath.Join(st.dir, "tpm"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		if got, want := strings.Join(names, " "), "host.auth host.tpmkey log.auth log.tpmkey machine.auth machine.tpmkey ops.auth ops.tpmkey user-g2.auth user-g2.tpmkey"; got != want {
+			t.Fatalf("the TPM key files after retire-key: %s, want %s", got, want)
+		}
+		code, out = retireKey(t, st, "user")
+		if code != 0 || !strings.Contains(out, "role user generation 1 "+fp1+": not held\n") {
+			t.Fatalf("the second retire-key exited %d:\n%s", code, out)
+		}
+		if _, out := runSigner(t, "doctor", "--state-dir", st.dir); strings.Contains(out, "draining_key_") {
+			t.Fatalf("doctor after retire-key:\n%s", out)
+		}
+		issuedBy(t, st, g, fp2)
+	})
+	t.Run("piv", func(t *testing.T) {
+		// 03-12f: the same rotation on the fake card, in rotate_piv_test.go.
+		if pivRestartLeg == nil {
+			t.Skip("needs -tags piv,pivfake; build-piv runs it")
+		}
+		pivRestartLeg(t)
 	})
 	// activeUser is the fingerprint of the active user CA entry of c.
 	activeUser := func(t *testing.T, c chainDocs) string {
@@ -1106,7 +1286,7 @@ func startErr(t *testing.T, st *rotateState) error {
 // else, prints for the agent the ssh-add commands through the signer's own
 // agent socket and checks again, and refuses under the restore marker,
 // without a draining entry, when the active key does not sign, and on a
-// backend that cannot hold a generation.
+// stored backend name that is no backend (03-12f).
 func TestRetireKey(t *testing.T) {
 	refused := func(t *testing.T, code int, out, want string) {
 		t.Helper()
@@ -1249,19 +1429,22 @@ func TestRetireKey(t *testing.T) {
 		}
 	})
 	t.Run("unsupported_backend_refused", func(t *testing.T) {
+		// 03-12f: tpm and piv rotate; a stored name that is no backend is
+		// refused by name before any backend opens.
 		st, _ := agentSwitchState(t)
-		for _, name := range []string{"tpm", "piv"} {
-			db, err := sql.Open("sqlite", st.db)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = db.Exec(`UPDATE backend_config SET name = ? WHERE id = 1`, name)
-			_ = db.Close()
-			if err != nil {
-				t.Fatal(err)
-			}
-			code, out := retireKey(t, st, "user")
-			refused(t, code, out, "rotation_not_supported_on_backend")
+		db, err := sql.Open("sqlite", st.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = db.Exec(`UPDATE backend_config SET name = ? WHERE id = 1`, "foo")
+		_ = db.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, out := retireKey(t, st, "user")
+		refused(t, code, out, "rotation_not_supported_on_backend")
+		if !strings.Contains(out, `unknown backend "foo"`) {
+			t.Fatalf("the refusal does not name the unknown backend:\n%s", out)
 		}
 	})
 }
