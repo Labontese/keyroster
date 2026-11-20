@@ -54,25 +54,51 @@ jobs:
       # pcsc-lite headers installed above, because piv-go uses cgo.
       - name: Scan the piv build for reachable vulnerabilities
         run: CGO_ENABLED=1 go tool -modfile=tools/go.mod govulncheck -tags piv ./...
+      # Both tag sets: the release files (piv) and the test build with the
+      # fake card (piv,pivfake, 03-12f).
       - name: Vet the tagged packages
-        run: CGO_ENABLED=1 go vet -tags piv ./internal/keystore/piv/... ./cmd/keyroster-signer/...
+        run: |
+          CGO_ENABLED=1 go vet -tags piv ./internal/keystore/piv/... ./cmd/keyroster-signer/...
+          CGO_ENABLED=1 go vet -tags piv,pivfake ./internal/keystore/piv/... ./cmd/keyroster-signer/...
       # The lint job in ci.yml builds without tags, so it never sees the
       # piv package; lint it here with the same pinned linter and config.
+      # piv,pivfake is a superset of the release files: it adds fake.go.
       - name: Lint the tagged package
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         env:
           CGO_ENABLED: "1"
         with:
           version: v2.14.0
-          args: --build-tags piv ./internal/keystore/piv/...
+          args: --build-tags piv,pivfake ./internal/keystore/piv/...
+      # The tests use the fake card, so they build only with pivfake: with
+      # -tags piv alone the package has no test files and would pass
+      # silently, which the PASS-line loop refuses.
       - name: Run the PIV keystore unit tests (race detector)
-        run: CGO_ENABLED=1 go test -race -tags piv -count=1 -v ./internal/keystore/piv/...
+        run: |
+          CGO_ENABLED=1 go test -race -tags piv,pivfake -count=1 -timeout 15m -v ./internal/keystore/piv/... 2>&1 | tee "$RUNNER_TEMP/piv-unit.log"
+          for t in TestPIVProvisionAndIssue TestPIVRefusals TestPIVPINRetriesGuard TestPIVSignWithoutMgmtKey TestPIVConcurrency; do grep -q -- "^--- PASS: $t (" "$RUNNER_TEMP/piv-unit.log" || { echo "the log has no PASS line for $t" >&2; exit 1; }; done
+      # The release guard (03-12f): the release piv build leaves out fake.go,
+      # its build info names -tags=piv exactly, and its binary holds no fake
+      # symbol. (1a) and (3a) are positive controls, so that a broken go
+      # list or nm cannot pass the checks after them; a failing go list in
+      # (1) counts as listing fake.go.
       - name: Build keyroster-signer with the PIV backend
         run: |
           CGO_ENABLED=1 go build -tags piv -o "$RUNNER_TEMP/keyroster-signer-piv" ./cmd/keyroster-signer
           go version -m "$RUNNER_TEMP/keyroster-signer-piv" | tee "$RUNNER_TEMP/piv-buildinfo.txt"
           grep -q 'github.com/go-piv/piv-go/v2' "$RUNNER_TEMP/piv-buildinfo.txt"
           grep -q 'CGO_ENABLED=1' "$RUNNER_TEMP/piv-buildinfo.txt"
+          # release piv guard: begin
+          tags=piv
+          bin="$RUNNER_TEMP/keyroster-signer-piv"
+          go tool nm "$bin" >"$RUNNER_TEMP/piv-syms.txt"
+          if ! go list -tags "$tags,pivfake" -f '{{join .GoFiles " "}}' ./internal/keystore/piv | tr ' ' '\n' | grep -Fqx fake.go; then echo "release piv guard: (1a) the pivfake build does not list fake.go, so check (1) proves nothing" >&2; exit 1; fi
+          if { go list -tags "$tags" -f '{{join .GoFiles " "}}' ./internal/keystore/piv || echo fake.go; } | tr ' ' '\n' | grep -Fqx fake.go; then echo "release piv guard: (1) the release build lists fake.go" >&2; exit 1; fi
+          if [ "$(go version -m "$bin" | awk -F '\t' '$2 == "build" && $3 ~ /^-tags=/ {print $3}')" != "-tags=piv" ]; then echo "release piv guard: (2) the binary's build info does not name exactly -tags=piv" >&2; exit 1; fi
+          if ! grep -qF 'internal/keystore/piv.(*backend).Key' "$RUNNER_TEMP/piv-syms.txt"; then echo "release piv guard: (3a) nm did not list the backend's Key symbol, so check (3) proves nothing" >&2; exit 1; fi
+          if grep -qiE 'internal/keystore/piv\.[^ ]*fake' "$RUNNER_TEMP/piv-syms.txt"; then echo "release piv guard: (3) the binary holds a fake symbol of package piv" >&2; exit 1; fi
+          echo "release piv binary: -tags=piv, no fake.go, no fake symbol"
+          # release piv guard: end
       - name: Default builds exclude piv-go and cgo
         run: |
           CGO_ENABLED=0 go build ./...

@@ -93,6 +93,12 @@ var slots = map[keystore.Role]uint32{
 
 func init() { keystore.Register("piv", open) }
 
+// openCard opens the card that open hands to the backend: a real YubiKey
+// through piv-go. It is the only seam a pivfake build repoints, to the
+// in-memory fake card of fake.go (03-12f); a release build never assigns
+// it.
+var openCard = openYubiKey
+
 // config is the parsed and checked backend options.
 type config struct {
 	pin     string
@@ -113,7 +119,7 @@ func open(opts map[string]string) (keystore.Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, err := openYubiKey(cfg.serial)
+	c, err := openCard(cfg.serial)
 	if err != nil {
 		return nil, err
 	}

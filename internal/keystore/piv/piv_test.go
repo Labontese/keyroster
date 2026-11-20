@@ -1,18 +1,14 @@
-//go:build piv
+//go:build piv && pivfake
 
 package piv
 
 import (
 	"bytes"
-	"crypto"
-	"crypto/ecdsa"
 	"crypto/ed25519"
-	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,172 +25,11 @@ import (
 
 // These tests run the real backend (option and secret-file checks, slot
 // map, algorithm choice, provisioning, Key, the mutex) against fakeCard, an
-// in-memory PIV card with real Ed25519 and ECDSA keys. They do not run
+// in-memory PIV card with real Ed25519 and ECDSA keys (fake.go, compiled
+// only with the pivfake tag, as these tests are). They do not run
 // yubikey.go or piv-go's signing code; see docs/security/needs-hardware.md.
 
-const (
-	testPIN = "40961758"
-)
-
-var (
-	testMgmtKey = bytes.Repeat([]byte{0x5a, 0xc3}, 12) // 24 bytes, not the default
-	allRoles    = []keystore.Role{keystore.RoleUser, keystore.RoleHost, keystore.RoleMachine, keystore.RoleOps, keystore.RoleLog}
-)
-
-// fakeSlot is one occupied slot of a fakeCard.
-type fakeSlot struct {
-	priv crypto.Signer
-	info ykpiv.KeyInfo
-}
-
-// fakeCard behaves like a YubiKey, as driven through piv-go, for what the
-// backend uses: GenerateKey needs the management key and, like a real card,
-// replaces an existing key; PrivateKey checks nothing about the PIN (piv-go
-// only builds a handle); VerifyPIN logs the session in, and a PIN-once key
-// signs only in a logged-in session. It has no lock of its own, so only the
-// backend's mutex keeps concurrent use race-free: signs is updated without
-// synchronisation, and -race reports it if the backend does not serialise.
-//
-// Its PIN retry counter follows piv-go against a YubiKey as documented, not
-// as observed on a card: a wrong PIN takes one retry and returns
-// ykpiv.AuthErr with the retries left, the right PIN resets the counter, a
-// counter at zero blocks the PIN (the right PIN no longer helps), and
-// reading the counter in a logged-in session is an error (piv-go's Retries
-// sends an empty VERIFY, which then succeeds).
-type fakeCard struct {
-	major, minor, patch int
-	mgmtKey             []byte
-	pin                 string
-	slots               map[uint32]*fakeSlot
-	infoErr             map[uint32]error // injected KeyInfo failures
-	loggedIn            bool
-	pinAttempts         int
-	pinRetries          int   // PIN retries left; 0 means blocked
-	retriesErr          error // injected PINRetries failure
-	generateCalls       int
-	signs               int
-	closed              bool
-}
-
-// fakePINRetries is the fake card's PIN retry limit, the YubiKey default.
-const fakePINRetries = 3
-
-func (f *fakeCard) VerifyPIN(pin string) error {
-	f.pinAttempts++
-	if f.pinRetries == 0 {
-		f.loggedIn = false
-		return fmt.Errorf("fake card: PIN blocked: %w", ykpiv.AuthErr{Retries: 0})
-	}
-	if pin != f.pin {
-		f.loggedIn = false
-		f.pinRetries--
-		return fmt.Errorf("fake card: wrong PIN: %w", ykpiv.AuthErr{Retries: f.pinRetries})
-	}
-	f.pinRetries = fakePINRetries
-	f.loggedIn = true
-	return nil
-}
-
-func (f *fakeCard) PINRetries() (int, error) {
-	if f.retriesErr != nil {
-		return 0, f.retriesErr
-	}
-	if f.loggedIn {
-		return 0, errors.New("fake card: expected error code from empty pin")
-	}
-	return f.pinRetries, nil
-}
-
-func newFakeCard(major, minor, patch int) *fakeCard {
-	return &fakeCard{major: major, minor: minor, patch: patch, mgmtKey: testMgmtKey, pin: testPIN, pinRetries: fakePINRetries, slots: map[uint32]*fakeSlot{}}
-}
-
-func (f *fakeCard) Version() (int, int, int) { return f.major, f.minor, f.patch }
-
-func (f *fakeCard) KeyInfo(slot ykpiv.Slot) (ykpiv.KeyInfo, error) {
-	if err := f.infoErr[slot.Key]; err != nil {
-		return ykpiv.KeyInfo{}, err
-	}
-	s, ok := f.slots[slot.Key]
-	if !ok {
-		return ykpiv.KeyInfo{}, fmt.Errorf("fake card: slot %s: %w", slot, ykpiv.ErrNotFound)
-	}
-	return s.info, nil
-}
-
-func (f *fakeCard) GenerateKey(mgmtKey []byte, slot ykpiv.Slot, key ykpiv.Key) (crypto.PublicKey, error) {
-	if !bytes.Equal(mgmtKey, f.mgmtKey) {
-		return nil, errors.New("fake card: management key authentication failed")
-	}
-	if key.PINPolicy != ykpiv.PINPolicyOnce || key.TouchPolicy != ykpiv.TouchPolicyNever {
-		return nil, fmt.Errorf("fake card: unexpected policies %v/%v", key.PINPolicy, key.TouchPolicy)
-	}
-	priv, err := newKey(key.Algorithm)
-	if err != nil {
-		return nil, err
-	}
-	f.generateCalls++
-	f.slots[slot.Key] = &fakeSlot{priv: priv, info: ykpiv.KeyInfo{
-		Algorithm: key.Algorithm, PINPolicy: key.PINPolicy, TouchPolicy: key.TouchPolicy,
-		Origin: ykpiv.OriginGenerated, PublicKey: priv.Public(),
-	}}
-	return priv.Public(), nil
-}
-
-func (f *fakeCard) PrivateKey(slot ykpiv.Slot, pub crypto.PublicKey, auth ykpiv.KeyAuth) (crypto.PrivateKey, error) {
-	s, ok := f.slots[slot.Key]
-	if !ok {
-		return nil, fmt.Errorf("fake card: slot %s: %w", slot, ykpiv.ErrNotFound)
-	}
-	if !publicEqual(s.priv.Public(), pub) {
-		return nil, errors.New("fake card: public key does not match the slot")
-	}
-	if auth.PINPolicy != ykpiv.PINPolicyOnce {
-		return nil, fmt.Errorf("fake card: unexpected PIN policy %v", auth.PINPolicy)
-	}
-	return &fakeSigner{card: f, priv: s.priv}, nil
-}
-
-// Close ends the card session, so a reopened card is no longer logged in.
-func (f *fakeCard) Close() error {
-	f.closed = true
-	f.loggedIn = false
-	return nil
-}
-
-// fakeSigner signs with the slot's in-memory key and counts signatures on
-// the card without a lock (see fakeCard).
-type fakeSigner struct {
-	card *fakeCard
-	priv crypto.Signer
-}
-
-func (s *fakeSigner) Public() crypto.PublicKey { return s.priv.Public() }
-
-func (s *fakeSigner) Sign(r io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	if !s.card.loggedIn {
-		return nil, errors.New("fake card: security status not satisfied (PIN not verified)")
-	}
-	s.card.signs++
-	return s.priv.Sign(r, digest, opts)
-}
-
-func newKey(alg ykpiv.Algorithm) (crypto.Signer, error) {
-	switch alg {
-	case ykpiv.AlgorithmEd25519:
-		_, priv, err := ed25519.GenerateKey(rand.Reader)
-		return priv, err
-	case ykpiv.AlgorithmEC256:
-		return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	default:
-		return nil, fmt.Errorf("fake card: unsupported algorithm %v", alg)
-	}
-}
-
-func publicEqual(a, b crypto.PublicKey) bool {
-	ea, ok := a.(interface{ Equal(crypto.PublicKey) bool })
-	return ok && ea.Equal(b)
-}
+var allRoles = []keystore.Role{keystore.RoleUser, keystore.RoleHost, keystore.RoleMachine, keystore.RoleOps, keystore.RoleLog}
 
 // writeSecret writes content to a new file with mode perm and returns its
 // path.
