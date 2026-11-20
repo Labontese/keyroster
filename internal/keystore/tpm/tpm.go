@@ -61,7 +61,15 @@ var (
 	// ErrKeyFilesExist means Provision found key files from an earlier
 	// run; it overwrites nothing.
 	ErrKeyFilesExist = errors.New("keystore tpm: TPM key files already exist")
+	// ErrKeyFileUnreadable means RemoveGeneration found a regular file at
+	// a generation's key name that cannot be read as a TPM key file, so it
+	// is not shown to hold the draining key: nothing is removed (03-12f).
+	ErrKeyFileUnreadable = errors.New("keystore tpm: the key file cannot be read as a TPM key")
 )
+
+// errNotYet is what the CA key generation methods return until the TPM
+// backend keeps generations (03-12f).
+var errNotYet = errors.New("keystore tpm: CA key generations are not implemented yet")
 
 // tpmMu serialises every TPM command of this process: provisioning,
 // capability queries and signatures, across all backends and keys.
@@ -194,6 +202,30 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 		return nil, fmt.Errorf("keystore tpm: key for role %s: %w", role, err)
 	}
 	return &caKey{Signer: s, custody: b.custody}, nil
+}
+
+// KeyAt is Key for generation 1; later generations are not kept yet
+// (03-12f).
+func (b *backend) KeyAt(role keystore.Role, generation uint32, fingerprint, _ string) (keystore.CAKey, error) {
+	if generation == 1 {
+		return b.Key(role, fingerprint)
+	}
+	return nil, errNotYet
+}
+
+// GenerationHeld cannot tell yet and answers held (03-12f).
+func GenerationHeld(_ string, _ keystore.Role, _ uint32) (bool, error) {
+	return true, errNotYet
+}
+
+// Holds cannot tell yet and answers held (03-12f).
+func (b *backend) Holds(_ keystore.Role, _ uint32, _, _ string) (bool, error) {
+	return true, errNotYet
+}
+
+// RemoveGeneration removes nothing yet (03-12f).
+func (b *backend) RemoveGeneration(_ keystore.Role, _ uint32, _, _ string) error {
+	return errNotYet
 }
 
 // probeDigest is what probe signs: a fixed SHA-256 digest, never a

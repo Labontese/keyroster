@@ -140,6 +140,11 @@ func (b *backend) Provision(roles []keystore.Role) (map[keystore.Role]ssh.Public
 	return pubs, nil
 }
 
+// ProvisionGeneration creates nothing yet (03-12f).
+func (b *backend) ProvisionGeneration(_ keystore.Role, _ uint32, _ []string) (ssh.PublicKey, string, error) {
+	return nil, "", errNotYet
+}
+
 // syncDir fsyncs a directory. Tests replace it to see which directories
 // Provision syncs and to inject a failure.
 var syncDir = func(dir string) error {
