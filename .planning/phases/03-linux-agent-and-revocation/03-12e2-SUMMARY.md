@@ -244,7 +244,7 @@ As the PR body lists it: the host drain, the machine CA and the host CA against 
 
 ## Pre-merge review
 
-The review ran on the green PR #111 at head 52ba88b (base 034b1d9): two Opus lenses, a Codex reviewer at high effort, and Sonnet skeptics that tried to disprove each result. Four review items were confirmed by independent skeptics and fixed in round 1; the other results the skeptics refuted need no change.
+The review ran on the green PR #111 at head 52ba88b (base 034b1d9): two Opus lenses, a Codex reviewer at high effort, and one batched Sonnet skeptic that tried to disprove each of the ten results. The skeptic confirmed seven of them, which are four distinct review items, all fixed in round 1; the three results it refuted need no change. (Corrected after the merge: this paragraph first said "Sonnet skeptics" and "confirmed by independent skeptics"; one skeptic agent judged every result.)
 
 | Item | Severity | Fix commit | What changed |
 |------|----------|------------|--------------|
@@ -262,6 +262,8 @@ A and D share one commit because both edit the same section of the runbook and i
 **CI on `cbda777`** (pull_request runs): CI 44504001220, E2E 44504001053, E2E distro 44504001111, E2E PKCS#11 44504001003, E2E TPM 44504001208, PIV 44504001064, Systemd 44504001206, CodeQL 44504001324, PR title 44504001157, Workflow lint 44504000959. All 31 checks passed (the 30 required ones and CodeQL), no rerun needed.
 
 The plan text for review item B is superseded by this SUMMARY (deviation 11). Auto-merge was not enabled and nothing was merged or approved in this round.
+
+**After the merge.** The owner squash-merged PR #111 on 2026-11-20 as 2ed959f; the squash tree equals the tree of the final head 0c3de1f. CI on 0c3de1f (pull_request runs): CI 44509537654, E2E 44509537759, E2E distro 44509537820, E2E PKCS#11 44509537714, E2E TPM 44509537790, PIV 44509537860, Systemd 44509537986, CodeQL 44509537789, PR title 44509537949, Workflow lint 44509537757; all 31 checks passed. The push runs on main for 2ed959f passed as well (E2E 44661169390). Over the five heads 15fc2a4, 52ba88b, cbda777, 0c3de1f and 2ed959f the e2e-rotation lanes' `go test` took 525.296 s to 534.027 s, and TestCARotationNoFailedLogin made 464 to 469 logins with `login failures: 0` and a largest gap of 1.001 s (job logs of E2E runs 44486848997, 44492292026, 44504001053, 44509537759 and 44661169390).
 
 ## Self-Check: PASSED
 
