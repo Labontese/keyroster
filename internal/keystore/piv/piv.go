@@ -74,7 +74,21 @@ var (
 	// ErrSlotOccupied means Provision found a key in a target slot; it
 	// generates nothing and overwrites nothing.
 	ErrSlotOccupied = errors.New("keystore piv: slot already holds a key")
+	// ErrNoFreeSlot means every generation slot from 0x87 to 0x95 is
+	// recorded by a generation row: a later generation gets no slot, and
+	// nothing is generated (03-12f).
+	ErrNoFreeSlot = errors.New("piv_no_free_slot")
+	// ErrBadLocation means a generation's location does not resolve to a
+	// slot that generation may use (03-12f).
+	ErrBadLocation = errors.New("keystore piv: the generation's location names no slot it may use")
+	// ErrSlotHoldsAnotherKey means a generation's recorded slot holds
+	// another key than the generation's, so it is not overwritten (03-12f).
+	ErrSlotHoldsAnotherKey = errors.New("keystore piv: the slot holds another key")
 )
+
+// errNotYet is what the generation methods return until they are
+// implemented.
+var errNotYet = errors.New("keystore piv: CA key generations are not implemented yet")
 
 // minPINRetries is the fewest PIN retries the card must have left before
 // the backend sends it the PIN. Below that it refuses without trying, so
@@ -381,6 +395,33 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 		return nil, fmt.Errorf("keystore piv: key for role %s: %w", role, err)
 	}
 	return &caKey{Signer: s, alg: pub.Type()}, nil
+}
+
+// KeyAt returns the key of generation of role (03-12f). Not implemented
+// yet: generation 1 without a location is Key.
+func (b *backend) KeyAt(role keystore.Role, generation uint32, fingerprint, location string) (keystore.CAKey, error) {
+	if generation == 1 && location == "" {
+		return b.Key(role, fingerprint)
+	}
+	return nil, errNotYet
+}
+
+// ProvisionGeneration creates the key of a later generation (03-12f). Not
+// implemented yet.
+func (b *backend) ProvisionGeneration(_ keystore.Role, _ uint32, _ []string) (ssh.PublicKey, string, error) {
+	return nil, "", errNotYet
+}
+
+// Holds reports whether the backend still holds a generation's key
+// (03-12f). Not implemented yet: held, with an error.
+func (b *backend) Holds(_ keystore.Role, _ uint32, _, _ string) (bool, error) {
+	return true, errNotYet
+}
+
+// RemoveGeneration removes a generation's key (03-12f). Not implemented
+// yet.
+func (b *backend) RemoveGeneration(_ keystore.Role, _ uint32, _, _ string) error {
+	return errNotYet
 }
 
 func (b *backend) Close() error {

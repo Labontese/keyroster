@@ -64,6 +64,10 @@ type fakeCard struct {
 	pinRetries          int   // PIN retries left; 0 means blocked
 	retriesErr          error // injected PINRetries failure
 	generateCalls       int
+	generateAttempts    int                       // GenerateKey calls, counted before the management-key check
+	generated           []uint32                  // the slot ids GenerateKey generated into, in order
+	genFail             map[uint32]fakeGenFailure // injected GenerateKey failures per slot
+	infoCalls           int                       // KeyInfo calls
 	signs               int
 	closed              bool
 }
@@ -104,6 +108,7 @@ func newFakeCard(major, minor, patch int) *fakeCard {
 func (f *fakeCard) Version() (int, int, int) { return f.major, f.minor, f.patch }
 
 func (f *fakeCard) KeyInfo(slot ykpiv.Slot) (ykpiv.KeyInfo, error) {
+	f.infoCalls++
 	if err := f.infoErr[slot.Key]; err != nil {
 		return ykpiv.KeyInfo{}, err
 	}
@@ -115,11 +120,15 @@ func (f *fakeCard) KeyInfo(slot ykpiv.Slot) (ykpiv.KeyInfo, error) {
 }
 
 func (f *fakeCard) GenerateKey(mgmtKey []byte, slot ykpiv.Slot, key ykpiv.Key) (crypto.PublicKey, error) {
+	f.generateAttempts++
 	if !bytes.Equal(mgmtKey, f.mgmtKey) {
 		return nil, errors.New("fake card: management key authentication failed")
 	}
 	if key.PINPolicy != ykpiv.PINPolicyOnce || key.TouchPolicy != ykpiv.TouchPolicyNever {
 		return nil, fmt.Errorf("fake card: unexpected policies %v/%v", key.PINPolicy, key.TouchPolicy)
+	}
+	if f.genFail[slot.Key] == genFailBefore {
+		return nil, fmt.Errorf("fake card: generate in slot %s failed (injected)", slot)
 	}
 	priv, err := newKey(key.Algorithm)
 	if err != nil {
@@ -130,8 +139,23 @@ func (f *fakeCard) GenerateKey(mgmtKey []byte, slot ykpiv.Slot, key ykpiv.Key) (
 		Algorithm: key.Algorithm, PINPolicy: key.PINPolicy, TouchPolicy: key.TouchPolicy,
 		Origin: ykpiv.OriginGenerated, PublicKey: priv.Public(),
 	}}
+	f.generated = append(f.generated, slot.Key)
+	if f.genFail[slot.Key] == genFailAfterReplace {
+		return nil, fmt.Errorf("fake card: the answer for slot %s was lost after the card replaced its key (injected)", slot)
+	}
 	return priv.Public(), nil
 }
+
+// fakeGenFailure is an injected GenerateKey failure of one slot.
+type fakeGenFailure int
+
+const (
+	// genFailBefore fails before the card acts: the slot is unchanged.
+	genFailBefore fakeGenFailure = iota + 1
+	// genFailAfterReplace replaces the slot's key and then fails, as a
+	// card that acted and whose answer was lost.
+	genFailAfterReplace
+)
 
 func (f *fakeCard) PrivateKey(slot ykpiv.Slot, pub crypto.PublicKey, auth ykpiv.KeyAuth) (crypto.PrivateKey, error) {
 	s, ok := f.slots[slot.Key]
@@ -197,6 +221,19 @@ const FakePIN = testPIN
 // It exists only in a pivfake build, so that a test at command level can
 // write an mgmt-key-file the fake accepts.
 var FakeManagementKeyHex = hex.EncodeToString(testMgmtKey)
+
+// FakeCardGenerated returns a copy of the slot ids the fake card of
+// serial generated keys into, in order; nil for a card not yet opened. It
+// exists only in a pivfake build.
+func FakeCardGenerated(serial uint32) []uint32 {
+	fakeRegistry.mu.Lock()
+	defer fakeRegistry.mu.Unlock()
+	c := fakeRegistry.cards[serial]
+	if c == nil {
+		return nil
+	}
+	return append([]uint32(nil), c.generated...)
+}
 
 // fakeRegistry holds the process-wide fake cards of a pivfake build, one
 // per serial (serial 0 is the card of an option without serial). A card is
