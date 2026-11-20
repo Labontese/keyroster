@@ -9,6 +9,20 @@
 // value ({role}.auth) that the TPM requires for every signature. Both are
 // mode 0600 in a 0700 directory owned by the signer.
 //
+// CA key generations (03-12f): generation N of at least 2 of a role is
+// {state-dir}/tpm/{role}-g{N}.tpmkey and {role}-g{N}.auth, created inside
+// the TPM with noDA like the genesis keys; generation 1 keeps the names
+// above. KeyAt opens exactly the asked generation's two files, never falls
+// back to another generation, and refuses a key of generation 2 or later
+// without noDA. Holds and GenerationHeld look at the two names only (any
+// directory entry at either counts) and send no TPM command.
+// RemoveGeneration removes a generation's regular key file, together with
+// its auth file, only after the key file's public key matched the draining
+// fingerprint; a link or any other entry at the names opens no key and is
+// unlinked unchecked. Removing the files deletes the key's wrapped blobs
+// and destroys nothing inside the TPM: any earlier copy of both files
+// still signs on the same TPM until its owner hierarchy is cleared.
+//
 // The TPM is reached through the kernel resource manager (/dev/tpmrm0), or
 // in tests through an swtpm socket. Pure Go, no cgo: go-tpm and
 // go-tpm-keyfiles.
@@ -40,6 +54,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -67,9 +82,14 @@ var (
 	ErrKeyFileUnreadable = errors.New("keystore tpm: the key file cannot be read as a TPM key")
 )
 
-// errNotYet is what the CA key generation methods return until the TPM
-// backend keeps generations (03-12f).
-var errNotYet = errors.New("keystore tpm: CA key generations are not implemented yet")
+// The TPM backend keeps one key per CA key generation, says whether a
+// generation's files are still present and removes them (03-12f).
+var (
+	_ keystore.GenerationBackend     = (*backend)(nil)
+	_ keystore.GenerationProvisioner = (*backend)(nil)
+	_ keystore.GenerationHolder      = (*backend)(nil)
+	_ keystore.GenerationRemover     = (*backend)(nil)
+)
 
 // tpmMu serialises every TPM command of this process: provisioning,
 // capability queries and signatures, across all backends and keys.
@@ -122,28 +142,53 @@ func (b *backend) Describe() string {
 	return fmt.Sprintf("TPM manufacturer: %s → custody %s", b.manufacturer, b.custody)
 }
 
-// keyPaths returns the key file and auth file of role. Only the five known
-// roles have files, so a role can never name a path outside the directory.
+// keyPaths returns the key file and auth file of role's generation 1.
 func (b *backend) keyPaths(role keystore.Role) (keyPath, authPath string, err error) {
+	return b.keyPathsAt(role, 1)
+}
+
+// keyPathsAt returns the key file and auth file of generation of role
+// (03-12f): {role}.tpmkey and {role}.auth for generation 1 and
+// {role}-g{N}.tpmkey and {role}-g{N}.auth from generation 2. Only the five
+// known roles have files, so a role can never name a path outside the
+// directory; generation 0 has none.
+func (b *backend) keyPathsAt(role keystore.Role, generation uint32) (keyPath, authPath string, err error) {
 	switch role {
 	case keystore.RoleUser, keystore.RoleHost, keystore.RoleMachine, keystore.RoleOps, keystore.RoleLog:
 	default:
 		return "", "", fmt.Errorf("keystore tpm: unknown role %q", role)
 	}
-	base := filepath.Join(b.dir, string(role))
+	var base string
+	switch generation {
+	case 0:
+		return "", "", fmt.Errorf("keystore tpm: no generation 0 of role %s", role)
+	case 1:
+		base = filepath.Join(b.dir, string(role))
+	default:
+		base = filepath.Join(b.dir, fmt.Sprintf("%s-g%d", role, generation))
+	}
 	return base + ".tpmkey", base + ".auth", nil
 }
 
-// Key loads the key file of role, checks that the key was generated inside
-// the TPM and cannot leave it (checkGeneratedInTPM) and that its public key
-// has the pinned fingerprint and is an ECDSA P-256 CA key, proves the
-// role's auth value with one test signature (probe), and returns a CAKey
-// that signs inside the TPM with that auth value.
+// Key is KeyAt generation 1: the ca-init key of role (03-12f).
 func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, error) {
+	return b.KeyAt(role, 1, fingerprint, "")
+}
+
+// KeyAt loads the key file of generation of role (exactly that
+// generation's two files: no scanning and no fallback to another
+// generation, 03-12f), checks that the key was generated inside the TPM
+// and cannot leave it (checkGeneratedInTPM), that a key of generation 2 or
+// later has noDA, and that its public key has the pinned fingerprint and
+// is an ECDSA P-256 CA key, proves the auth value with one test signature
+// (probe), and returns a CAKey that signs inside the TPM with that auth
+// value. It ignores location: the file names derive from role and
+// generation only.
+func (b *backend) KeyAt(role keystore.Role, generation uint32, fingerprint, _ string) (keystore.CAKey, error) {
 	if fingerprint == "" {
 		return nil, fmt.Errorf("keystore tpm: no pinned fingerprint for role %s", role)
 	}
-	keyPath, authPath, err := b.keyPaths(role)
+	keyPath, authPath, err := b.keyPathsAt(role, generation)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +217,14 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 	if err := checkGeneratedInTPM(pubArea); err != nil {
 		return nil, fmt.Errorf("keystore tpm: %s: %w", keyPath, err)
 	}
+	// Every key this backend creates has noDA. A later generation's key
+	// may be one the operator placed for prepare --key: without noDA its
+	// failed authorisations would count toward the TPM-wide
+	// dictionary-attack lockout, so it is refused before any TPM command
+	// (03-12f). Generation 1 keys created before noDA was set still open.
+	if generation >= 2 && !pubArea.ObjectAttributes.NoDA {
+		return nil, fmt.Errorf("keystore tpm: %s: the key of generation %d lacks noDA", keyPath, generation)
+	}
 	cpub, err := k.PublicKey()
 	if err != nil {
 		return nil, fmt.Errorf("keystore tpm: %s: %w", keyPath, err)
@@ -185,47 +238,141 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 		return nil, err
 	}
 	if ssh.FingerprintSHA256(pub) != fingerprint {
-		return nil, fmt.Errorf("%w (role %s)", ErrKeyNotPresent, role)
+		return nil, fmt.Errorf("%w (role %s generation %d)", ErrKeyNotPresent, role, generation)
 	}
 	if err := cert.CheckCAKey(pub); err != nil {
-		return nil, fmt.Errorf("keystore tpm: key for role %s: %w", role, err)
+		return nil, fmt.Errorf("keystore tpm: key for role %s generation %d: %w", role, generation, err)
 	}
 	cs, err := k.Signer(b.tpm, nil, auth)
 	if err != nil {
-		return nil, fmt.Errorf("keystore tpm: key for role %s: %w", role, err)
+		return nil, fmt.Errorf("keystore tpm: key for role %s generation %d: %w", role, generation, err)
 	}
 	if err := probe(lockedSigner{cs}, ec); err != nil {
-		return nil, fmt.Errorf("keystore tpm: key for role %s (%s): %w", role, authPath, err)
+		return nil, fmt.Errorf("keystore tpm: key for role %s generation %d (%s): %w", role, generation, authPath, err)
 	}
 	s, err := ssh.NewSignerFromSigner(lockedSigner{cs})
 	if err != nil {
-		return nil, fmt.Errorf("keystore tpm: key for role %s: %w", role, err)
+		return nil, fmt.Errorf("keystore tpm: key for role %s generation %d: %w", role, generation, err)
 	}
 	return &caKey{Signer: s, custody: b.custody}, nil
 }
 
-// KeyAt is Key for generation 1; later generations are not kept yet
-// (03-12f).
-func (b *backend) KeyAt(role keystore.Role, generation uint32, fingerprint, _ string) (keystore.CAKey, error) {
-	if generation == 1 {
-		return b.Key(role, fingerprint)
+// GenerationHeld reports whether a file of generation of role is present
+// in stateDir's TPM key directory (03-12f): the key file or the auth file,
+// and any directory entry at either name counts (a regular file, a damaged
+// file, a link, dangling or not, or a directory). Only the absence of both
+// is not held; any other lstat error is held, with the error. It sends no
+// TPM command, so doctor can ask it without opening the TPM.
+func GenerationHeld(stateDir string, role keystore.Role, generation uint32) (bool, error) {
+	return (&backend{dir: filepath.Join(stateDir, "tpm")}).held(role, generation)
+}
+
+// held is GenerationHeld for b's key directory: os.Lstat of the two names,
+// so a link is never followed.
+func (b *backend) held(role keystore.Role, generation uint32) (bool, error) {
+	keyPath, authPath, err := b.keyPathsAt(role, generation)
+	if err != nil {
+		return true, err
 	}
-	return nil, errNotYet
+	for _, p := range []string{keyPath, authPath} {
+		switch _, err := os.Lstat(p); {
+		case err == nil:
+			return true, nil
+		case !errors.Is(err, fs.ErrNotExist):
+			return true, fmt.Errorf("keystore tpm: %w", err)
+		}
+	}
+	return false, nil
 }
 
-// GenerationHeld cannot tell yet and answers held (03-12f).
-func GenerationHeld(_ string, _ keystore.Role, _ uint32) (bool, error) {
-	return true, errNotYet
+// Holds reports whether a file of generation of role is still present
+// (GenerationHeld); it ignores the fingerprint and the location and sends
+// no TPM command (03-12f).
+func (b *backend) Holds(role keystore.Role, generation uint32, _, _ string) (bool, error) {
+	return b.held(role, generation)
 }
 
-// Holds cannot tell yet and answers held (03-12f).
-func (b *backend) Holds(_ keystore.Role, _ uint32, _, _ string) (bool, error) {
-	return true, errNotYet
+// RemoveGeneration removes the key file and the auth file of generation
+// (at least 1) of role, the auth file first, and then fsyncs the key
+// directory once (03-12f). The directory must be private. Both files
+// absent is done. A regular key file is removed only after its public key
+// (the public area in the file, read with no TPM command and no auth
+// value) has the SHA-256 fingerprint fingerprint: another key refuses with
+// keystore.ErrGenerationFileMismatch, a file that cannot be read as a TPM
+// key with ErrKeyFileUnreadable, and neither removes anything, because the
+// generation number alone never decides which key is destroyed. A link at
+// the key name is unlinked without being followed, and anything else there
+// (a directory) is removed with os.Remove, which fails on a non-empty
+// directory; no key can be opened at such a name, and neither can one from
+// a lone auth file, which is removed unchecked. One fsync does not order
+// the two unlinks: a crash between them leaves a file that Holds reports
+// as held, and a rerun converges. It ignores location.
+func (b *backend) RemoveGeneration(role keystore.Role, generation uint32, fingerprint, _ string) error {
+	keyPath, authPath, err := b.keyPathsAt(role, generation)
+	if err != nil {
+		return err
+	}
+	if err := checkPrivateDir(b.dir); err != nil {
+		return err
+	}
+	keyInfo, err := os.Lstat(keyPath)
+	keyThere := err == nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("keystore tpm: %w", err)
+	}
+	_, err = os.Lstat(authPath)
+	authThere := err == nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("keystore tpm: %w", err)
+	}
+	if !keyThere && !authThere {
+		return nil
+	}
+	if keyThere && keyInfo.Mode().IsRegular() {
+		if err := checkKeyFile(keyPath, fingerprint); err != nil {
+			return err
+		}
+	}
+	if authThere {
+		if err := os.Remove(authPath); err != nil {
+			return fmt.Errorf("keystore tpm: remove %s: %w", authPath, err)
+		}
+	}
+	if keyThere {
+		if err := os.Remove(keyPath); err != nil {
+			return fmt.Errorf("keystore tpm: remove %s: %w", keyPath, err)
+		}
+	}
+	if err := syncDir(b.dir); err != nil {
+		return fmt.Errorf("keystore tpm: sync %s: %w", b.dir, err)
+	}
+	return nil
 }
 
-// RemoveGeneration removes nothing yet (03-12f).
-func (b *backend) RemoveGeneration(_ keystore.Role, _ uint32, _, _ string) error {
-	return errNotYet
+// checkKeyFile requires the TSS2 key file at path to hold the key whose
+// SHA-256 fingerprint is fingerprint (03-12f). The public area is in the
+// file, so the check sends no TPM command and needs no auth value.
+func checkKeyFile(path, fingerprint string) error {
+	pem, err := readPrivateFile(path)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrKeyFileUnreadable, err)
+	}
+	k, err := keyfile.Decode(pem)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrKeyFileUnreadable, path, err)
+	}
+	cpub, err := k.PublicKey()
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrKeyFileUnreadable, path, err)
+	}
+	pub, err := ssh.NewPublicKey(cpub)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrKeyFileUnreadable, path, err)
+	}
+	if got := ssh.FingerprintSHA256(pub); got != fingerprint {
+		return fmt.Errorf("%w (%s)", keystore.ErrGenerationFileMismatch, got)
+	}
+	return nil
 }
 
 // probeDigest is what probe signs: a fixed SHA-256 digest, never a
@@ -238,9 +385,10 @@ var probeDigest = sha256.Sum256([]byte("keyroster tpm key probe"))
 // failure, on every signing request. An authorisation failure, and a TPM
 // already in dictionary-attack lockout, wrap keystore.ErrCredentialRefused:
 // keyroster-signer then exits with a status systemd does not restart on.
-// Keys from Provision have noDA, so their failures do not count toward
-// lockout; keys created before noDA was set still do, and for them this
-// limits the cost to one failure per manual start.
+// Keys from Provision and ProvisionGeneration have noDA, so their failures
+// do not count toward lockout; generation 1 keys created before noDA was
+// set still do, and for them this limits the cost to one failure per
+// manual start (KeyAt refuses a later generation's key without noDA).
 func probe(cs crypto.Signer, pub *ecdsa.PublicKey) error {
 	sig, err := cs.Sign(rand.Reader, probeDigest[:], crypto.SHA256)
 	switch {
