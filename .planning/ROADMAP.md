@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 37/43 plans executed in 42 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 38/43 plans executed in 42 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -273,7 +273,7 @@ Plans:
 - [x] 03-12e-PLAN.md — CA rotation, switch binding and fences (D-14, KEY-08): the chain rule switch, the drain binding, key removal, recovery without CA keys and audit re-derivation
 
 **Wave 37** *(blocked on Wave 36 completion)*
-- [ ] 03-12e2-PLAN.md — CA rotation, ceremony 2 tool and proof (D-14, KEY-08): root sign --ca-switch, the ceremony runbook and the no-failed-login e2e
+- [x] 03-12e2-PLAN.md — CA rotation, ceremony 2 tool and proof (D-14, KEY-08): root sign --ca-switch, the ceremony runbook and the no-failed-login e2e
 
 **Wave 38** *(blocked on Wave 37 completion)*
 - [ ] 03-12f-PLAN.md — CA rotation, TPM and PIV generations (D-14, KEY-08): generations and key removal on TPM and PIV, and the host-CA end-to-end test
@@ -358,7 +358,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 37/43 | In Progress | - |
+| 3. Linux Agent and Revocation | 38/43 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |

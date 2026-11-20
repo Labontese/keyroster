@@ -895,8 +895,8 @@ func setCeremonyNow(t *testing.T, ts string) {
 
 // successorInputs are the flags a successor is built from, as root sign's
 // mismatch refusal names them: the CA flags too, given or not (03-12b
-// review).
-const successorInputs = "--prev, --roots, --threshold, --policy, --ca-next, --ca-next-fingerprint and --ca-retire"
+// review), the switch's two included (03-12e2).
+const successorInputs = "--prev, --roots, --threshold, --policy, --ca-next, --ca-next-fingerprint, --ca-retire, --ca-switch and --drain-allowance"
 
 // TestRootSignSuccessor (KEY-07, owner decision 1) runs root sign --prev in
 // the homelab rotation shape: a genesis bundle by software roots A and B at
@@ -2145,5 +2145,315 @@ func TestRootSuccessorPolicyPoP(t *testing.T) {
 		if code == 0 || !strings.Contains(stderr, "--webauthn-origin needs --webauthn-rp-id") {
 			t.Fatalf("exit %d, stderr %q", code, stderr)
 		}
+	})
+}
+
+// caPrepareFile writes the prepare file of role's CA generation gen with
+// the key of seed n, as keyroster-signer ca-rotate prepare writes it, and
+// returns its path and the key's fingerprint (03-12e2).
+func (f *goldenFixture) caPrepareFile(t *testing.T, role string, gen uint32, n byte) (string, string) {
+	t.Helper()
+	key := seedPub(t, n)
+	pub, err := trust.ParseKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := trust.CanonicalJSON(caNextFile{Role: role, Generation: gen, Key: key, Alg: pub.Type(), Custody: "software"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.dir, role+"-g"+strconv.FormatUint(uint64(gen), 10)+".json")
+	writeTestFile(t, path, data)
+	return path, ssh.FingerprintSHA256(pub)
+}
+
+// ceremony runs a whole successor ceremony named name on the bundle in
+// force under its own policy with the extra flags (03-12e2): root sign's
+// display, A's and B's signatures and trust verify --prev. It returns the
+// display, trust verify's output and the out-dir.
+func (f *goldenFixture) ceremony(t *testing.T, name string, extra ...string) (string, string, string) {
+	t.Helper()
+	pol, out := filepath.Join(f.prev, "policy.json"), filepath.Join(f.dir, name)
+	rs := f.display(t, pol, out, f.fpA, extra...)
+	f.signWith(t, pol, out, f.fpA, extra...)
+	f.signWith(t, pol, out, f.fpB, extra...)
+	return rs, f.verifyPrev(t, out), out
+}
+
+// advance makes the successor in out, signed by A and B, the bundle in
+// force (03-12e2).
+func (f *goldenFixture) advance(t *testing.T, out string) {
+	t.Helper()
+	f.prev, f.prevSHA = out, fileSHA256(t, filepath.Join(out, "bundle.json"))
+}
+
+// rootSign runs root sign --prev on the bundle in force under its own
+// policy with the confirmation confirm and the extra flags, and returns the
+// exit code, stdout and stderr (03-12e2).
+func (f *goldenFixture) rootSign(t *testing.T, out, fp, confirm string, extra ...string) (int, string, string) {
+	t.Helper()
+	return run(t, append([]string{"root", "sign", "--prev", f.prev, "--prev-sha256", f.prevSHA, "--roots", f.roots, "--threshold", "2",
+		"--policy", filepath.Join(f.prev, "policy.json"), "--out-dir", out, "--agent-key", fp, "--confirm", confirm}, extra...)...)
+}
+
+// caFingerprint is the SHA256 fingerprint of the bundle in force's CA
+// entry of role and generation gen (03-12e2).
+func (f *goldenFixture) caFingerprint(t *testing.T, role string, gen uint32) string {
+	t.Helper()
+	b, err := trust.ParseBundle(readTestFile(t, filepath.Join(f.prev, "bundle.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ca := range b.CAs {
+		if ca.Role == role && ca.Generation == gen {
+			pub, err := trust.ParseKey(ca.Key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return ssh.FingerprintSHA256(pub)
+		}
+	}
+	t.Fatalf("the bundle in force has no %s CA generation %d", role, gen)
+	return ""
+}
+
+// switchLines are the two CA-change lines of role's switch from generation
+// old (fingerprint oldFP) to generation old+1 (newFP), in a successor issued
+// at issued whose policies give the role the maximum TTL ttl, with the
+// allowance a (03-12e2): the old key is trusted until issued plus ttl plus
+// 300 s plus a, and the advised install time is issued plus a.
+func switchLines(t *testing.T, role string, old uint32, oldFP, newFP, issued string, ttl, a time.Duration) string {
+	t.Helper()
+	at, err := time.Parse(trust.TimeFormat, issued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := at.Add(ttl + 300*time.Second + a).Format(trust.TimeFormat)
+	by := at.Add(a).Format(trust.TimeFormat)
+	return "CA " + role + " gen " + strconv.FormatUint(uint64(old), 10) + " " + oldFP + ": active -> draining, trusted until " + until + "; install by " + by + " (advice)\n" +
+		"CA " + role + " gen " + strconv.FormatUint(uint64(old)+1, 10) + " " + newFP + ": next -> active\n"
+}
+
+// TestRootSignSwitchFlags (03-12e2): root sign --ca-switch and
+// --drain-allowance on the golden fixture, whose roots are agent keys. A
+// refusal is a usage error (exit 2) with its own text and writes nothing;
+// a role with no next entry is the builder's refusal (exit 1); a switch
+// with any allowance from 0 to the cap signs and verifies, and root sign
+// and trust verify --prev print the same two CA-change lines. The user
+// profile of the fixture's policy allows 12h and the host profile 720h.
+func TestRootSignSwitchFlags(t *testing.T) {
+	const userTTL, hostTTL = 12 * time.Hour, 720 * time.Hour
+	// refused runs root sign with a wrong confirmation, so that a check
+	// that let the flags through would stop at the prompt with exit 1.
+	refused := func(t *testing.T, f *goldenFixture, code int, want string, extra ...string) {
+		t.Helper()
+		out := filepath.Join(f.dir, "out-refused")
+		got, _, stderr := f.rootSign(t, out, f.fpA, "00000000", extra...)
+		if got != code || !strings.Contains(stderr, want) {
+			t.Fatalf("root sign %q: exit %d, stderr %q; want exit %d and %q", extra, got, stderr, code, want)
+		}
+		if _, err := os.Stat(out); !os.IsNotExist(err) {
+			t.Fatalf("%s exists after a refusal (stat error %v)", out, err)
+		}
+	}
+	// switched is a fixture whose bundle in force has the user CA
+	// generation 2 (seed 40) as next, with the ceremony clock at
+	// 2026-10-07T00:00:00Z.
+	switched := func(t *testing.T) *goldenFixture {
+		t.Helper()
+		f := newGoldenFixture(t)
+		f.nextInForce(t, 40)
+		setCeremonyNow(t, "2026-10-07T00:00:00Z")
+		return f
+	}
+	contains := func(t *testing.T, what, got, want string) {
+		t.Helper()
+		if !strings.Contains(got, want) {
+			t.Fatalf("%s lacks %q:\n%s", what, want, got)
+		}
+	}
+	// both checks root sign's display and trust verify's output.
+	both := func(t *testing.T, rs, tv, want string) {
+		t.Helper()
+		contains(t, "root sign", rs, want)
+		contains(t, "trust verify --prev", tv, want)
+	}
+
+	t.Run("ca_switch_needs_prev", func(t *testing.T) {
+		// A genesis argument set that is otherwise complete, so the
+		// generic required-flags check cannot be what refuses it.
+		f := newGoldenFixture(t)
+		setCeremonyNow(t, "2026-10-05T00:00:00Z")
+		out := filepath.Join(f.dir, "out-genesis")
+		code, _, stderr := run(t, "root", "sign", "--ca-pubkeys", f.caPubkeys, "--policy", filepath.Join(f.prev, "policy.json"), "--roots", f.roots,
+			"--threshold", "2", "--out-dir", out, "--agent-key", f.fpA, "--confirm", "00000000", "--ca-switch", "user")
+		if code != 2 || !strings.Contains(stderr, "root sign: --ca-switch needs --prev\n") {
+			t.Fatalf("--ca-switch without --prev: exit %d, stderr %q", code, stderr)
+		}
+		if _, err := os.Stat(out); !os.IsNotExist(err) {
+			t.Fatalf("%s exists after a refusal (stat error %v)", out, err)
+		}
+	})
+	t.Run("drain_allowance_needs_ca_switch", func(t *testing.T) {
+		refused(t, switched(t), 2, "root sign: --drain-allowance needs --ca-switch\n", "--drain-allowance", "1h")
+	})
+	t.Run("drain_allowance_above_cap_refused", func(t *testing.T) {
+		refused(t, switched(t), 2, "root sign: --drain-allowance 168h0m1s is above the cap of 168h0m0s\n",
+			"--ca-switch", "user", "--drain-allowance", "168h0m1s")
+	})
+	t.Run("drain_allowance_negative_refused", func(t *testing.T) {
+		refused(t, switched(t), 2, "root sign: --drain-allowance -1s must be a whole number of seconds from 0 to 168h0m0s\n",
+			"--ca-switch", "user", "--drain-allowance", "-1s")
+	})
+	t.Run("drain_allowance_fraction_refused", func(t *testing.T) {
+		refused(t, switched(t), 2, "root sign: --drain-allowance 1.5s must be a whole number of seconds from 0 to 168h0m0s\n",
+			"--ca-switch", "user", "--drain-allowance", "1.5s")
+	})
+	t.Run("switch_role_without_next_refused", func(t *testing.T) {
+		// The fixture's genesis bundle has no next entry.
+		f := newGoldenFixture(t)
+		setCeremonyNow(t, "2026-10-07T00:00:00Z")
+		refused(t, f, 1, "CA user: no next entry to switch to", "--ca-switch", "user")
+	})
+	t.Run("drain_allowance_zero_accepted", func(t *testing.T) {
+		f := switched(t)
+		want := switchLines(t, "user", 1, f.caFingerprint(t, "user", 1), f.caFingerprint(t, "user", 2), "2026-10-07T00:00:00Z", userTTL, 0)
+		rs, tv, _ := f.ceremony(t, "out", "--ca-switch", "user", "--drain-allowance", "0s")
+		both(t, rs, tv, want)
+	})
+	t.Run("drain_allowance_at_cap_accepted", func(t *testing.T) {
+		f := switched(t)
+		want := switchLines(t, "user", 1, f.caFingerprint(t, "user", 1), f.caFingerprint(t, "user", 2), "2026-10-07T00:00:00Z", userTTL, trust.MaxDrainAllowance)
+		rs, tv, _ := f.ceremony(t, "out", "--ca-switch", "user", "--drain-allowance", "168h0m0s")
+		both(t, rs, tv, want)
+	})
+	t.Run("switch_with_next_of_another_role_accepted", func(t *testing.T) {
+		f := switched(t)
+		file, hfp := f.caPrepareFile(t, "host", 2, 41)
+		want := switchLines(t, "user", 1, f.caFingerprint(t, "user", 1), f.caFingerprint(t, "user", 2), "2026-10-07T00:00:00Z", userTTL, 24*time.Hour) +
+			"CA host gen 2 " + hfp + ": none -> next\n"
+		rs, tv, _ := f.ceremony(t, "out", "--ca-switch", "user", "--ca-next", "host="+file, "--ca-next-fingerprint", "host="+hfp)
+		both(t, rs, tv, want)
+	})
+	t.Run("two_roles_switch_accepted", func(t *testing.T) {
+		f := switched(t)
+		file, hfp := f.caPrepareFile(t, "host", 2, 41)
+		_, _, out := f.ceremony(t, "out-host-next", "--ca-next", "host="+file, "--ca-next-fingerprint", "host="+hfp)
+		f.advance(t, out)
+		setCeremonyNow(t, "2026-10-07T01:00:00Z")
+		want := switchLines(t, "user", 1, f.caFingerprint(t, "user", 1), f.caFingerprint(t, "user", 2), "2026-10-07T01:00:00Z", userTTL, time.Hour) +
+			switchLines(t, "host", 1, f.caFingerprint(t, "host", 1), hfp, "2026-10-07T01:00:00Z", hostTTL, time.Hour)
+		rs, tv, _ := f.ceremony(t, "out-switch", "--ca-switch", "user", "--ca-switch", "host", "--drain-allowance", "1h")
+		both(t, rs, tv, want)
+	})
+	t.Run("second_switch_over_a_draining_entry_accepted", func(t *testing.T) {
+		// Roles switch one at a time, and a role switches again while
+		// its earlier key still drains: that entry prints no line.
+		f := switched(t)
+		fp1, fp2 := f.caFingerprint(t, "user", 1), f.caFingerprint(t, "user", 2)
+		_, _, out := f.ceremony(t, "out-switch-1", "--ca-switch", "user")
+		f.advance(t, out)
+		setCeremonyNow(t, "2026-10-07T01:00:00Z")
+		file, fp3 := f.caPrepareFile(t, "user", 3, 42)
+		_, _, out = f.ceremony(t, "out-next-3", "--ca-next", "user="+file, "--ca-next-fingerprint", "user="+fp3)
+		f.advance(t, out)
+		setCeremonyNow(t, "2026-10-07T02:00:00Z")
+		want := switchLines(t, "user", 2, fp2, fp3, "2026-10-07T02:00:00Z", userTTL, time.Hour)
+		rs, tv, _ := f.ceremony(t, "out-switch-2", "--ca-switch", "user", "--drain-allowance", "1h")
+		both(t, rs, tv, want)
+		for _, got := range []string{rs, tv} {
+			if strings.Contains(got, "CA user gen 1 "+fp1) {
+				t.Fatalf("the second switch prints a line for the draining generation 1:\n%s", got)
+			}
+		}
+	})
+	t.Run("repeat_in_the_same_dir_signs_the_same_bundle", func(t *testing.T) {
+		// A second root in the same out-dir, later, rebuilds the stored
+		// successor with its issued_at and signs those bytes.
+		f := switched(t)
+		ca := []string{"--ca-switch", "user", "--drain-allowance", "1h"}
+		pol, out := filepath.Join(f.prev, "policy.json"), filepath.Join(f.dir, "out")
+		f.display(t, pol, out, f.fpA, ca...)
+		f.signWith(t, pol, out, f.fpA, ca...)
+		before := readTestFile(t, filepath.Join(out, "bundle.json"))
+		setCeremonyNow(t, "2026-10-07T06:00:00Z")
+		f.signWith(t, pol, out, f.fpB, ca...)
+		if after := readTestFile(t, filepath.Join(out, "bundle.json")); !bytes.Equal(after, before) {
+			t.Fatal("bundle.json changed when the second root signed")
+		}
+		want := switchLines(t, "user", 1, f.caFingerprint(t, "user", 1), f.caFingerprint(t, "user", 2), "2026-10-07T00:00:00Z", userTTL, time.Hour)
+		contains(t, "trust verify --prev", f.verifyPrev(t, out), want)
+	})
+	t.Run("repeat_with_another_allowance_refused", func(t *testing.T) {
+		// Other switch flags in the same out-dir build another bundle:
+		// refused, the switch's flags named among the inputs, and nothing
+		// is signed. A refused bundle is burned and the repeat uses a
+		// fresh out-dir.
+		f := switched(t)
+		ca := []string{"--ca-switch", "user", "--drain-allowance", "1h"}
+		pol, out := filepath.Join(f.prev, "policy.json"), filepath.Join(f.dir, "out")
+		f.display(t, pol, out, f.fpA, ca...)
+		f.signWith(t, pol, out, f.fpA, ca...)
+		confirm := fileSHA256(t, filepath.Join(out, "bundle.json"))[:8]
+		sigs := func() []byte {
+			return append(readTestFile(t, filepath.Join(out, "bundle.json.sigs")), readTestFile(t, filepath.Join(out, "policy.json.sigs"))...)
+		}
+		before := sigs()
+		for _, extra := range [][]string{{"--ca-switch", "user", "--drain-allowance", "2h"}, {"--ca-switch", "user"}, nil} {
+			code, _, stderr := f.rootSign(t, out, f.fpB, confirm, extra...)
+			if code != 1 || !strings.Contains(stderr, "does not match "+successorInputs+"; refusing to sign a different bundle") {
+				t.Fatalf("a second root with %q: exit %d, stderr %q", extra, code, stderr)
+			}
+		}
+		if !bytes.Equal(sigs(), before) {
+			t.Fatal("a refused repeat wrote a signature")
+		}
+	})
+	// A successor that changes the role's max_ttl in the same ceremony: the
+	// end is the ceremony's issued_at plus the larger of the policy in
+	// force's and the successor's user max_ttl, 300 s and the allowance.
+	// root sign (root.go) and trust verify --prev (trust.go) each pass the
+	// two policies to CAChanges, so a lowered successor catches a successor
+	// passed twice and a raised one catches the policy in force passed
+	// twice (pre-merge review).
+	for _, c := range []struct {
+		name string
+		next time.Duration
+		ttl  time.Duration
+	}{
+		{"successor_policy_lowers_the_user_max_ttl", time.Hour, userTTL},
+		{"successor_policy_raises_the_user_max_ttl", 24 * time.Hour, 24 * time.Hour},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := switched(t)
+			base := readTestFile(t, filepath.Join(f.prev, "policy.json"))
+			next := diffSuccessor(t, base, func(p *trust.Policy) {
+				for i := range p.CAProfiles {
+					if p.CAProfiles[i].Role == "user" {
+						p.CAProfiles[i].MaxTTLSeconds = uint64(c.next / time.Second) //nolint:gosec // G115: a positive test constant
+					}
+				}
+			})
+			pol, out := filepath.Join(f.dir, "policy-next.json"), filepath.Join(f.dir, "out")
+			writeTestFile(t, pol, next)
+			ca := []string{"--ca-switch", "user", "--drain-allowance", "1h"}
+			rs := f.display(t, pol, out, f.fpA, ca...)
+			f.signWith(t, pol, out, f.fpA, ca...)
+			f.signWith(t, pol, out, f.fpB, ca...)
+			tv := f.verifyPrev(t, out)
+			want := switchLines(t, "user", 1, f.caFingerprint(t, "user", 1), f.caFingerprint(t, "user", 2), "2026-10-07T00:00:00Z", c.ttl, time.Hour)
+			both(t, rs, tv, want)
+			// The successor policy really is the one that changes.
+			both(t, rs, tv, "Successor policy: v2, sha256 "+trust.SHA256Hex(next))
+		})
+	}
+	t.Run("switch_signs_and_verifies", func(t *testing.T) {
+		f := switched(t)
+		want := switchLines(t, "user", 1, f.caFingerprint(t, "user", 1), f.caFingerprint(t, "user", 2), "2026-10-07T00:00:00Z", userTTL, 90*time.Second)
+		if !strings.Contains(want, ": active -> draining, trusted until 2026-10-07T12:06:30Z; install by 2026-10-07T00:01:30Z (advice)\n") {
+			t.Fatalf("switchLines = %q", want)
+		}
+		rs, tv, _ := f.ceremony(t, "out", "--ca-switch", "user", "--drain-allowance", "90s")
+		both(t, rs, tv, want)
 	})
 }

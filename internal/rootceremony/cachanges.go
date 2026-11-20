@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/Labontese/keyroster/internal/trust"
 )
@@ -20,7 +21,20 @@ import (
 // is the state in prev or "none" for an added entry, and new is the state
 // in next or "removed" for an entry next lacks (which the chain rule
 // refuses, so only a direct call prints it).
-func CAChanges(prev, next *trust.Bundle) string {
+//
+// A line whose new state is draining also names the entry's trusted_until,
+// and the line of a switch, whose old state is active, the advised install
+// time (03-12e2):
+//
+//	CA <role> gen <N> <fingerprint>: active -> draining, trusted until <t>; install by <i> (advice)
+//
+// i is next's issued_at plus the allowance, which is t minus
+// trust.DrainFloor of next's issued_at and the role's max_ttl_seconds in
+// prevPol (prev's policy) and in nextPol (next's), the floor the chain rule
+// and BuildSuccessor use. "install by" is the time by which the signer must
+// stop issuing with the old key, by the signer's clock; it is advice and
+// never a refusal. See installBy for when it cannot be given.
+func CAChanges(prev, next *trust.Bundle, prevPol, nextPol *trust.Policy) string {
 	type ref struct {
 		role int
 		gen  uint32
@@ -68,12 +82,56 @@ func CAChanges(prev, next *trust.Bundle) string {
 			e = old
 		}
 		fp, _ := describe(e.Key)
-		fmt.Fprintf(&w, "CA %s gen %d %s: %s -> %s\n", e.Role, e.Generation, fp, from, to)
+		fmt.Fprintf(&w, "CA %s gen %d %s: %s -> %s", e.Role, e.Generation, fp, from, to)
+		if to == "draining" {
+			fmt.Fprintf(&w, ", trusted until %s", e.TrustedUntil)
+			if from == "active" {
+				w.WriteString("; install by " + installBy(next.IssuedAt, e, prevPol, nextPol))
+			}
+		}
+		w.WriteString("\n")
 	}
 	if w.Len() == 0 {
 		return "CA entries: unchanged\n"
 	}
 	return w.String()
+}
+
+// installBy is the advice of a switch's line (03-12e2): "<i> (advice)",
+// with i the successor's issued_at plus the allowance, trusted_until minus
+// the floor. A nil policy, a role with no profile in either policy, a
+// floor that cannot be computed, or a trusted_until that does not parse or
+// lies below the floor print "unknown (advice)"; an allowance above
+// trust.MaxDrainAllowance, which only a hand-built successor carries (root
+// sign caps the flag, and the chain rule bounds trusted_until from below
+// only), says that root sign never builds it and that it is not to be
+// installed or distributed. It does not say that the signer refuses it:
+// the signer's upper bound is measured from its install clock, so it
+// accepts such an allowance up to the cap plus 300 s plus the time between
+// issued_at and the install, and the host agents enforce no cap at all, so
+// the cap is the root holders' check. None of them is a refusal.
+func installBy(issuedAt string, e trust.CAEntry, prevPol, nextPol *trust.Policy) string {
+	const unknown = "unknown (advice)"
+	ttlPrev, okPrev := trust.RoleMaxTTL(prevPol, e.Role)
+	ttlNext, okNext := trust.RoleMaxTTL(nextPol, e.Role)
+	if !okPrev || !okNext {
+		return unknown
+	}
+	floor, err := trust.DrainFloor(issuedAt, ttlPrev, ttlNext)
+	if err != nil {
+		return unknown
+	}
+	until, err := time.Parse(trust.TimeFormat, e.TrustedUntil)
+	if err != nil || until.Unix() < 0 || uint64(until.Unix()) < floor { //nolint:gosec // G115: not negative, checked first
+		return unknown
+	}
+	allowance := uint64(until.Unix()) - floor //nolint:gosec // G115: not negative, checked above
+	if allowance > uint64(trust.MaxDrainAllowance/time.Second) {
+		return "unknown (advice: the allowance " + seconds(allowance) + " is above the cap of " + trust.MaxDrainAllowance.String() + ", which root sign never builds; do not install or distribute this bundle)"
+	}
+	// DrainFloor parsed issuedAt, so the error is nil.
+	issued, _ := time.Parse(trust.TimeFormat, issuedAt)
+	return issued.Add(time.Duration(allowance)*time.Second).UTC().Format(trust.TimeFormat) + " (advice)" //nolint:gosec // G115: at most the cap's seconds
 }
 
 // RootSetLine is the root-set line of a successor (03-12b): "Root set:
