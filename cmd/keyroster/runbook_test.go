@@ -812,7 +812,7 @@ var switchSections = []string{"Install a successor bundle: stop, install, start"
 // means, how retire-key removes the old key per backend and proves before
 // it removes, why serve and doctor refuse while the key is held, and how
 // to recover a restore older than the last switch; it reads as written in
-// its end state, naming no plan of this rotation outside a code span (the
+// its end state, naming neither 03-12e nor 03-12f outside a code span (the
 // later 03-13 is named).
 func TestSignerInstallSwitchFences(t *testing.T) {
 	data := string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
@@ -849,8 +849,16 @@ func TestSignerInstallSwitchFences(t *testing.T) {
 			prose.WriteString(l + "\n")
 		}
 	}
-	if bare := inlineSpan.ReplaceAllString(prose.String(), ""); strings.Contains(bare, "03-12e") {
+	bare := inlineSpan.ReplaceAllString(prose.String(), "")
+	if strings.Contains(bare, "03-12e") {
 		t.Error("signer-install.md names 03-12e outside a code span; describe the rotation as written in its end state")
+	}
+	// 03-12f is described in its end state too (03-12f); the exact token, so
+	// that a later 03-12f2 does not trip it.
+	for _, m := range planNumber.FindAllStringSubmatch(bare, -1) {
+		if m[1] == "03-12f" {
+			t.Error("signer-install.md names 03-12f outside a code span; describe the rotation as written in its end state")
+		}
 	}
 }
 
@@ -1115,7 +1123,9 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 		}
 		bare := inlineSpan.ReplaceAllString(prose.String(), "")
 		for _, m := range planNumber.FindAllStringSubmatch(bare, -1) {
-			if !slices.Contains([]string{"03-12f", "03-13", "03-16"}, m[1]) {
+			// 03-12f is described in its end state; 03-12f2 (the host-CA
+			// test), 03-13 and 03-16 are still to come (03-12f).
+			if !slices.Contains([]string{"03-12f2", "03-13", "03-16"}, m[1]) {
 				t.Errorf("ca-rotation.md names plan %s outside a code span; describe the rotation in its end state", m[1])
 			}
 		}
@@ -1174,6 +1184,13 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 		// text before it says to move the first aside and keep it.
 		if flat := normalizeSpace(caRotationWindow(t, data, "Remove the old key and restart")); !strings.Contains(flat, "First move `/media/transfer/export.jsonl` aside under another name and keep it") {
 			t.Errorf("the section that overwrites /media/transfer/export.jsonl does not say to move the earlier export aside first")
+		}
+		// Every block that writes the export onto the medium, ceremony 1's
+		// included (a second rotation's ceremony 1 writes over the first
+		// rotation's switch export), has the sentence in the prose right
+		// before it (03-12f).
+		for _, p := range moveAsideBeforeExports(data) {
+			t.Errorf("ca-rotation.md: %s", p)
 		}
 		if n != 2 {
 			t.Errorf("%d export-log commands in ca-rotation.md, want 2 (after ceremony 1's install and after the switch)", n)
@@ -1337,4 +1354,280 @@ func TestCARotationInstallBlocks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// moveAsideSentence is the sentence that must stand before every block of
+// ca-rotation.md that writes the export onto the medium, because each of
+// them writes it under the same name (03-12f).
+const moveAsideSentence = "First move `/media/transfer/export.jsonl` aside under another name and keep it"
+
+// moveAsideBeforeExports returns one problem for every fenced block of text
+// holding a command that writes >/media/transfer/export.jsonl whose
+// preceding prose does not contain moveAsideSentence, whitespace-normalised.
+// The preceding prose is the text between the block's opening fence and the
+// latest of the end of the previous fenced block, the nearest heading line
+// above the block and the start of the file (03-12f).
+func moveAsideBeforeExports(text string) []string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	var problems []string
+	from, open, writes := 0, -1, false
+	for i, l := range lines {
+		fence := strings.HasPrefix(strings.TrimSpace(l), "```")
+		switch {
+		case fence && open < 0:
+			open, writes = i, false
+		case fence:
+			if writes && !strings.Contains(normalizeSpace(strings.Join(lines[from:open], "\n")), moveAsideSentence) {
+				problems = append(problems, fmt.Sprintf("the fenced block at line %d writes >/media/transfer/export.jsonl, and the prose before it lacks %q", open+1, moveAsideSentence))
+			}
+			open, from = -1, i+1
+		case open >= 0:
+			if strings.Contains(l, ">/media/transfer/export.jsonl") {
+				writes = true
+			}
+		case strings.HasPrefix(l, "#"):
+			from = i + 1
+		}
+	}
+	return problems
+}
+
+// TestMoveAsideSentence (03-12f): moveAsideBeforeExports accepts the
+// sentence in the prose right before each writing block, also when it
+// wraps, and refuses its absence there, the sentence after the block, and
+// the sentence above the heading of the block's section.
+func TestMoveAsideSentence(t *testing.T) {
+	const sentence = "First move `/media/transfer/export.jsonl` aside under another name\nand keep it: the block writes the new export under the same name."
+	const block = "```\nrunuser -u keyroster-signer -- cat /tmp/x.jsonl >/media/transfer/export.jsonl &&\nrunuser -u keyroster-signer -- rm -f /tmp/x.jsonl\n```\n"
+	// line is the 1-based line of the opening fence that follows prefix.
+	line := func(prefix string) string { return fmt.Sprintf("line %d ", strings.Count(prefix, "\n")+1) }
+	first := "# T\n\n## One\n\nIntro.\n" + sentence + "\n\n" + block + "\nAfter.\n\n## Two\n\nIntro.\n"
+	for _, c := range []struct {
+		name   string
+		prefix string // the text before the block a problem must name
+		text   string
+		want   int
+	}{
+		{"sentence_present_accepted", "", first + sentence + "\n\n" + block, 0},
+		{"sentence_absent_refused", first + "\n", first + "\n" + block, 1},
+		{"sentence_after_block_refused", "# T\n\n## One\n\nIntro.\n\n", "# T\n\n## One\n\nIntro.\n\n" + block + "\n" + sentence + "\n", 1},
+		{"sentence_in_previous_section_refused", "# T\n\n## One\n\n" + sentence + "\n\n## Two\n\nIntro.\n\n",
+			"# T\n\n## One\n\n" + sentence + "\n\n## Two\n\nIntro.\n\n" + block, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := moveAsideBeforeExports(c.text)
+			if len(got) != c.want {
+				t.Fatalf("moveAsideBeforeExports gave %d problems, want %d: %q", len(got), c.want, got)
+			}
+			if c.want == 1 && !strings.Contains(got[0], line(c.prefix)) {
+				t.Errorf("the problem %q does not name the block at %s", got[0], line(c.prefix))
+			}
+		})
+	}
+}
+
+// pivMgmtKeyBlock is the management key's round trip of docs/backends/piv.md
+// step 5, word for word, as five consecutive lines of one fenced block: it
+// stops the signer, places the key at the stored path as the signer's
+// user, runs one ca-rotate command, shreds the key on every exit status and
+// starts the signer only after the shred and only when the command exited 0
+// (03-12f).
+var pivMgmtKeyBlock = []string{
+	"sudo systemctl stop keyroster-signer.service",
+	"K=/etc/keyroster-signer/piv/mgmt-key",
+	`sudo runuser -u keyroster-signer -- rm -f "$K"`,
+	`sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$K"`,
+	`sudo runuser -u keyroster-signer -- keyroster-signer ca-rotate <arguments> --state-dir /var/lib/keyroster-signer; rc=$?; sudo runuser -u keyroster-signer -- shred -u "$K"; test "$rc" -eq 0 && sudo systemctl start keyroster-signer.service`,
+}
+
+// sudoRunuserScript is runuserScript with an optional leading sudo: the
+// script argument of a runuser sh -c that the signer's own shell runs, the
+// only single-quoted text pivMgmtKeyBlockProblems treats as opaque (03-12f).
+var sudoRunuserScript = regexp.MustCompile(`^((?:sudo )?runuser -u keyroster-signer (?:-- )?sh -c )'[^']*'`)
+
+// pivMgmtKeyBlockProblems applies the block rules of piv.md step 5 to win
+// and returns one problem per broken rule, each starting with the rule's
+// name: "consecutive" when no fenced block holds the lines of
+// pivMgmtKeyBlock as consecutive whole lines in order; and, for every
+// command of win's fenced blocks (continuations joined, each line split at
+// its control operators) that names /etc/keyroster-signer/piv or $K, the
+// binding of K excepted, "runuser" when it does not start with sudo runuser
+// -u keyroster-signer, and "redirect" when, with its sh -c script masked,
+// a redirect that root's shell opens names the directory or $K. The
+// directory belongs to the signer's user, who could plant a link there
+// (03-12f).
+func pivMgmtKeyBlockProblems(win string) []string {
+	const dir, binding = "/etc/keyroster-signer/piv", "K=/etc/keyroster-signer/piv/mgmt-key"
+	var problems []string
+	blocks := fencedBlocks(win)
+	found := false
+	for _, b := range blocks {
+		for i := 0; i+len(pivMgmtKeyBlock) <= len(b) && !found; i++ {
+			found = true
+			for j, want := range pivMgmtKeyBlock {
+				if strings.TrimSpace(b[i+j]) != want {
+					found = false
+					break
+				}
+			}
+		}
+	}
+	if !found {
+		problems = append(problems, "consecutive: no fenced block holds the five lines of the management key's round trip as consecutive whole lines, in order")
+	}
+	names := func(s string) bool {
+		return strings.Contains(s, dir) || strings.Contains(s, "$K") || strings.Contains(s, "${K}")
+	}
+	for _, b := range blocks {
+		for _, l := range joinContinued(b) {
+			if strings.HasPrefix(l, "#") {
+				continue
+			}
+			for _, cmd := range splitCommands(l) {
+				if cmd == binding || !names(cmd) {
+					continue
+				}
+				if !strings.HasPrefix(cmd, "sudo runuser -u keyroster-signer ") {
+					problems = append(problems, "runuser: "+cmd)
+					continue
+				}
+				for _, m := range shellRedirect.FindAllStringSubmatch(sudoRunuserScript.ReplaceAllString(cmd, "$1''"), -1) {
+					if names(m[1]) {
+						problems = append(problems, "redirect: "+cmd)
+					}
+				}
+			}
+		}
+	}
+	return problems
+}
+
+// TestCARotationBackendSteps (03-12f): the runbooks say, per backend, what
+// prepare creates and how retire-key removes the old key, each phrase in
+// the window it belongs to; ca-rotation.md names no backend as refused;
+// and piv.md step 5 holds the management key's round trip as one block
+// that runs as the signer's user and shreds the key on every exit status
+// before the signer starts.
+func TestCARotationBackendSteps(t *testing.T) {
+	window := func(t *testing.T, data string, e *signingSection) string {
+		t.Helper()
+		win, err := sectionWindow(data, e)
+		if err != nil {
+			t.Fatalf("%s %s: %v", e.file, e.id, err)
+		}
+		return win
+	}
+	holds := func(t *testing.T, where, win string, want []string) {
+		t.Helper()
+		flat := normalizeSpace(win)
+		for _, w := range want {
+			if !strings.Contains(flat, w) {
+				t.Errorf("%s lacks %q", where, w)
+			}
+		}
+	}
+	signerInstall := func(t *testing.T) string {
+		t.Helper()
+		return string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
+	}
+	t.Run("prepare_per_backend", func(t *testing.T) {
+		win := window(t, caRotationRunbook(t), &signingSection{id: "prepare", file: "ca-rotation.md", section: "1. Prepare the next key"})
+		holds(t, `ca-rotation.md "1. Prepare the next key"`, win, []string{
+			"tpm/user-g2.tpmkey", "tpm/user-g2.auth", "0x87 to 0x95", "15 slots", "never reused", "piv_no_free_slot", "location:",
+			"line into the transcript", "ErrSlotOccupied", "slot already holds a key", "no generation row records", "ykman piv keys delete",
+			"never on a restored database", "ykman piv reset", "the block of piv.md step 5", "after a refused prepare",
+			"no YubiKey or physical TPM has run it",
+		})
+	})
+	t.Run("remove_per_backend", func(t *testing.T) {
+		data := caRotationRunbook(t)
+		section := &signingSection{id: "remove", file: "ca-rotation.md", section: "Remove the old key and restart"}
+		tpmWin := window(t, data, &signingSection{id: "remove_tpm", file: "ca-rotation.md", within: section, start: "- **tpm:**", end: "- **piv:**"})
+		holds(t, `the tpm bullet of ca-rotation.md "Remove the old key and restart"`, tpmWin, []string{
+			"tpm/user.tpmkey", "tpm/user.auth", "delete both files as the signer's user", "no YubiKey or physical TPM has run it",
+		})
+		pivWin := window(t, data, &signingSection{id: "remove_piv", file: "ca-rotation.md", within: section,
+			start: "- **piv:**", end: "Start the signer only after retire-key exits 0"})
+		holds(t, `the piv bullet of ca-rotation.md "Remove the old key and restart"`, pivWin, []string{
+			"throwaway key", "mgmt-key-file", "never reused", "the block of piv.md step 5",
+		})
+	})
+	t.Run("no_backend_refused_by_name", func(t *testing.T) {
+		if strings.Contains(caRotationRunbook(t), "rotation_not_supported_on_backend") {
+			t.Error("ca-rotation.md still says that a backend is refused rotation_not_supported_on_backend")
+		}
+	})
+	t.Run("signer_install_per_backend", func(t *testing.T) {
+		data := signerInstall(t)
+		prepare := window(t, data, &signingSection{id: "prepare", file: "signer-install.md", section: "Prepare a CA key generation"})
+		holds(t, `signer-install.md "Prepare a CA key generation"`, prepare, []string{
+			"tpm/<role>-g<N>.tpmkey", "0x87 to 0x95", "piv_no_free_slot", "mgmt-key-file", "ErrSlotOccupied", "slot already holds a key",
+			"no generation row records", "ykman piv keys delete", "never on a restored database", "ykman piv reset",
+			"the block of piv.md step 5", "after a refused prepare",
+		})
+		remove := window(t, data, &signingSection{id: "remove", file: "signer-install.md", section: "Install a successor bundle: stop, install, start",
+			start: "### Remove the old key after a switch", end: "Other refusals:"})
+		holds(t, `signer-install.md "### Remove the old key after a switch"`, remove, []string{
+			"throwaway key", "tpm/<role>.tpmkey", "delete both files as the signer's user",
+		})
+		// The restore subsection runs to the next "### " or "## " heading;
+		// today it is the last of the file, so it runs to the end.
+		restore := strings.Split(window(t, data, &signingSection{id: "restore", file: "signer-install.md", section: "Snapshot restore: check the clock first",
+			start: "### Restore from before the last switch"}), "\n")
+		for i := 1; i < len(restore); i++ {
+			if strings.HasPrefix(restore[i], "### ") || strings.HasPrefix(restore[i], "## ") {
+				restore = restore[:i]
+				break
+			}
+		}
+		holds(t, `signer-install.md "### Restore from before the last switch"`, strings.Join(restore, "\n"), []string{
+			"ls -la /var/lib/keyroster-signer/tpm/", "a restore from before a prepare",
+		})
+	})
+	t.Run("piv_mgmt_key_round_trip", func(t *testing.T) {
+		// The block rules first, on fixtures, so that a wrong rule cannot
+		// pass piv.md: each refused fixture is refused by the rule named
+		// only.
+		fixture := func(lines ...string) string {
+			return "### 5. Remove the management key from the signer host\n\n```\n" + strings.Join(lines, "\n") + "\n```\n"
+		}
+		b := pivMgmtKeyBlock
+		for _, c := range []struct {
+			name string
+			text string
+			rule string // the one rule that refuses it; "" for accepted
+		}{
+			{"the five lines as written", fixture(b...), ""},
+			{"a start between the fourth and the fifth line", fixture(b[0], b[1], b[2], b[3], "sudo systemctl start keyroster-signer.service", b[4]), "consecutive"},
+			{"the fifth line without its shred", fixture(b[0], b[1], b[2], b[3], strings.Replace(b[4], `sudo runuser -u keyroster-signer -- shred -u "$K"; `, "", 1)), "consecutive"},
+			{"a sixth line with a root redirect to $K", fixture(append(slices.Clone(b), `sudo runuser -u keyroster-signer -- true >"$K"`)...), "redirect"},
+			{"a sixth line that removes $K as root", fixture(append(slices.Clone(b), `sudo rm -f "$K"`)...), "runuser"},
+		} {
+			got := pivMgmtKeyBlockProblems(c.text)
+			only := len(got) > 0
+			for _, p := range got {
+				if !strings.HasPrefix(p, c.rule+": ") {
+					only = false
+				}
+			}
+			if (c.rule == "" && len(got) != 0) || (c.rule != "" && !only) {
+				t.Errorf("block fixture %s: problems %q, want refused by the %q rule only (\"\" for accepted)", c.name, got, c.rule)
+			}
+		}
+		data := string(readTestFile(t, filepath.Join("..", "..", "docs", "backends", "piv.md")))
+		// The "## Setup" section of piv.md ends at the line "## Options",
+		// so this window runs from step 5 up to that line.
+		win := window(t, data, &signingSection{id: "step_5", file: "piv.md", section: "Setup", start: "### 5. Remove the management key from the signer host"})
+		for _, p := range pivMgmtKeyBlockProblems(win) {
+			t.Errorf("piv.md step 5: %s", p)
+		}
+		for _, l := range strings.Split(win, "\n") {
+			if strings.TrimSpace(l) == "sudo shred -u /etc/keyroster-signer/piv/mgmt-key" {
+				t.Errorf("piv.md step 5 shreds the management key as root, below a directory of the signer's user: %s", l)
+			}
+		}
+		holds(t, "piv.md step 5", win, []string{
+			"on every exit status", "only after the shred", "copy-on-write", "after a refused prepare", "did not run to its end",
+		})
+	})
 }
