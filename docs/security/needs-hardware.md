@@ -45,8 +45,9 @@ as is; run the same flow by hand.
 
 ## 2. YubiKey 5 PIV (KEY-05)
 
-CI stand-in: the fake card in `internal/keystore/piv/piv_test.go`, run by the
-`build-piv` check (`.github/workflows/piv.yml`). Never run on a card:
+CI stand-in: the fake card in `internal/keystore/piv/fake.go`, built only
+with `-tags piv,pivfake`, run by the `build-piv` check
+(`.github/workflows/piv.yml`). Never run on a card:
 `internal/keystore/piv/yubikey.go`, piv-go's card code, and every `ykman`,
 `pcscd` and polkit step in [docs/backends/piv.md](../backends/piv.md).
 
@@ -70,8 +71,9 @@ firmware **5.3 to 5.6** (P-256). For each:
 - [ ] `ykman piv keys info 82` to `86`: each slot holds a generated key with
       PIN policy ONCE and touch policy NEVER, and its public key matches
       `ca-pubkeys.json`.
-- [ ] Root ceremony, `install-bundle`, then remove the management key file
-      and run `serve --backend-opt mgmt-key-file=` (piv.md step 5).
+- [ ] Root ceremony and `install-bundle` with the management-key file
+      already removed (piv.md step 5), then start the shipped unit with no
+      override.
 - [ ] Issue a certificate with `keyroster ca issue`, log in on a real sshd,
       run `keyroster audit verify --pin`.
 - [ ] Restart the signer: the same keys load, and issuance and `audit
@@ -110,6 +112,32 @@ firmware **5.3 to 5.6** (P-256). For each:
       against Yubico's PIV CA with piv-go `Verify`, and whether that holds
       for Ed25519 slots on firmware 5.7 and for P-256 on 5.3-5.6. Note
       which Yubico root and intermediates each card's chain uses.
+
+CA key generations (docs/backends/piv.md "Generation slots" and step 5):
+
+- [ ] `ca-rotate prepare` on a real card allocates 0x87: a generated key,
+      PIN policy once and touch policy never, whose public key equals the
+      prepare file's; Ed25519 on firmware 5.7 and later, P-256 on 5.3 to
+      5.6.
+- [ ] The generation opens by its recorded slot after a restart in a
+      separate process, and signs.
+- [ ] Holds reads the slot's metadata in the PIN-verified session.
+- [ ] retire-key overwrites the draining slot (the genesis slot 0x82
+      first), and serve then starts.
+- [ ] The next prepare takes 0x88, never the overwritten slot.
+- [ ] The management key placed for the run by the block of piv.md step 5
+      and shredded on every exit status; retire-key without it refused
+      naming `mgmt-key-file`; the card's answer to a wrong management key.
+- [ ] serve, `install-bundle` and doctor with the management-key file
+      absent.
+- [ ] A key in the next generation slot that no row records is refused
+      `ErrSlotOccupied`, and is emptied with `ykman piv keys delete <slot>`
+      on 5.7 and later, with the signer stopped and the management key
+      given at `ykman`'s prompt (below 5.7 only `ykman piv reset`, which
+      destroys every CA key).
+- [ ] Deletion by the signer on 5.7 and later: not implemented (a later
+      hardening item); retire-key overwrites on every firmware.
+- [ ] The 15-slot exhaustion: checked on the fake card only.
 
 ## 3. Hardware root ceremony (D-11)
 
@@ -154,6 +182,17 @@ CI ([custody.md](custody.md)).
 - [ ] Imported key (D-CR-02): a key made with `tpm2_import` +
       `tpm2_encodeobject` and selected with `ca-init --key` is refused
       ("not generated inside this TPM").
+- [ ] `ca-rotate prepare` on a physical TPM writes `<role>-g<N>.tpmkey`
+      and `.auth` with `noDA`, `fixedtpm`, `fixedparent` and
+      `sensitivedataorigin`, custody `tpm` for an allowlisted vendor,
+      through `/dev/tpmrm0`.
+- [ ] retire-key deletes both files, and serve starts.
+- [ ] A copy of both files taken before retire-key still signs on the same
+      TPM.
+- [ ] A wrong auth on a generation file stops the signer with status 78.
+- [ ] The homelab vTPM signer: its first prepare is 03-15's, its first
+      retire-key 03-16's; a VM snapshot or a hypervisor backup brings
+      removed files back.
 
 ## Platform verification (D-16)
 

@@ -54,6 +54,59 @@ console. Read the fingerprint aloud to the second person, who writes it
 in the transcript as "next CA fingerprint as read from the signer console
 by <name>". Nobody copies it from a file.
 
+What prepare creates depends on the signer's backend:
+
+With the software backend, prepare writes `software/user-g2.age` in the
+state directory (generation 1 keeps `software/user.age`). With the agent
+backend it creates nothing: `--key` names a key the agent already holds.
+
+With the tpm backend, prepare creates the key inside the TPM with noDA and
+writes `tpm/user-g2.tpmkey` and `tpm/user-g2.auth` in the state directory
+(generation 1 keeps `tpm/user.tpmkey` and `tpm/user.auth`). It runs on
+swtpm only, and no YubiKey or physical TPM has run it.
+
+With the piv backend, prepare generates the key on the card in the first
+slot in 0x87 to 0x95 that no generation row records, and prints that slot
+on the console after `prepare file:`, as `location: 87` for the first
+rotation. There are 15 slots in all, shared by every role's later
+generations and, from 03-13, by the ops and log keys. A slot is never
+reused, even after retire-key emptied or overwrote it, and prepare refuses
+`piv_no_free_slot` when none is left: a rotation never changes custody,
+so a card with no free slot rotates no further. The person who reads the
+console writes the `location:` line into the transcript beside the
+fingerprint, because the slot is recorded nowhere else outside
+`signer.db`. It runs on the fake card only, and no YubiKey or physical
+TPM has run it.
+
+A key in the slot that is next, which no generation row records (a lost
+prepare, a `signer.db` restored from before a prepare, or a key put there
+by hand), makes prepare refuse `ErrSlotOccupied` (the console prints
+`slot already holds a key`, naming the slot) on every later run, for
+every role, until the slot is emptied. Overwriting it by hand does not
+clear it. On firmware 5.7 and later `ykman piv keys delete <slot>` empties
+it, and only when the rule of piv.md "Generation slots" allows it: never
+on a restored database before the restore section of signer-install.md
+has run to its end; never while a signed bundle waits to be installed,
+because a bundle that `install-bundle` refuses with `no stored generation`
+names a generation the database lost, and the slot's key may be that
+generation's key; and never a key you keep in the slot for another use.
+The signer holds the card while it runs, so it is stopped for the delete
+(piv.md "Generation slots"). Below 5.7 nothing empties it short of
+`ykman piv reset`, which destroys every CA key on the card. Each `ykman`
+command here is UNVERIFIED. The refusal runs on the fake card only, and
+no YubiKey or physical TPM has run it.
+
+Prepare on piv needs the management key on the signer host for the run,
+placed and shredded by the block of piv.md step 5
+([piv.md](../backends/piv.md)): its last line runs this step's prepare
+and starts the signer only when prepare exited 0. So on a PIV signer that
+block replaces the stop, prepare and start of signer-install.md; after a
+refused prepare the key is already shredded and the signer is still
+stopped, so run `sudo systemctl start keyroster-signer.service` by hand
+(the refusal wrote nothing the signer serves), fix the cause, and run the
+block again. Prepare on piv refuses `--key`. It runs on the fake card
+only, and no YubiKey or physical TPM has run it.
+
 The prepare file lies in the signer's `incoming` directory, which the
 signer's user owns. Read it onto the medium as that user, so that root
 opens nothing below that directory:
@@ -130,6 +183,11 @@ refuses to overwrite, so every file it writes is first removed as that
 user, and the removal, each copy and the install are chained with `&&`:
 a failed removal or copy stops the chain before the install, which never
 runs against a stale or half-copied file.
+
+First move `/media/transfer/export.jsonl` aside under another name and
+keep it, if it is there (the first rotation may find none), as
+signer-install.md asks you to keep every export: the block writes the new
+export under the same name.
 
 ```
 systemctl stop keyroster-signer.service
@@ -228,10 +286,17 @@ needs no wait), and the agents' host-certificate and probe answer checks
 refuse the key. Then destroy the aborted key by hand, because retire-key
 removes draining keys only, never an aborted one: delete
 `software/user-g2.age` in the state directory as the signer's user for
-the software backend (`runuser -u keyroster-signer -- rm -f "$S/software/user-g2.age"`), or
-remove it from the ssh-agent with `ssh-add -d` for the agent backend. The
-generation row stays, and doctor does not warn. The generation number is
-never reused: the next prepare makes generation 3.
+the software backend (`runuser -u keyroster-signer -- rm -f "$S/software/user-g2.age"`);
+remove it from the ssh-agent with `ssh-add -d` for the agent backend; for
+the tpm backend delete `tpm/user-g2.tpmkey` and `tpm/user-g2.auth` as the
+signer's user (`runuser -u keyroster-signer -- rm -f "$S/tpm/user-g2.tpmkey" "$S/tpm/user-g2.auth"`),
+which removes the wrapped key and destroys nothing inside the TPM. With
+the piv backend the key stays in its slot, which the bundle in force no
+longer trusts: the slot is the `location:` line the transcript recorded
+at prepare, and it stays recorded and is never reused; overwriting it by
+hand with `ykman` is UNVERIFIED. The generation row stays, and doctor
+does not warn. The generation number is never reused: the next prepare
+makes generation 3.
 
 ## Before ceremony 2
 
@@ -486,8 +551,32 @@ key after a switch" states it:
   old key object must also be deleted from the token, or the next
   provider load adds it to the agent again and `serve` refuses again
   (UNVERIFIED: no PKCS#11 token has been rotated).
-- **tpm and piv:** refused `rotation_not_supported_on_backend` until
-  03-12f.
+- **tpm:** retire-key checks that a regular `tpm/user.tpmkey` holds the
+  draining key, deletes it and `tpm/user.auth`, syncs the directory, and
+  exits 0 as for software. A link, another entry or a lone auth file at a
+  generation's name is removed unchecked, because no key at that name can
+  be opened. A key file that holds another key, one that does not read as
+  a TPM key, or a directory that is not empty stays, counts as held and is
+  reported `not removed:`: inspect it, and delete both files as the
+  signer's user
+  (`runuser -u keyroster-signer -- rm -f "$S/tpm/user.tpmkey" "$S/tpm/user.auth"`)
+  only once you know what it is, then run retire-key again, and start the
+  signer only after exit 0. After a crash between the two deletions, run
+  retire-key again, which finishes the removal. The deletion removes the
+  key's wrapped blobs and destroys nothing inside the TPM: an earlier copy
+  of both files still signs on the same TPM. It runs on swtpm only, and no
+  YubiKey or physical TPM has run it.
+- **piv:** retire-key checks that the recorded slot holds the draining
+  key, overwrites it with a throwaway key (PIN once, touch never) on every
+  firmware, and exits 0. It needs the management key, placed and shredded
+  by the block of piv.md step 5, whose last line runs this retire-key.
+  Run without the key at the stored path (outside the block, or with no
+  key pasted), it reports `not removed:` naming `mgmt-key-file` (the one
+  form of this refusal: the signer reads the key only when it writes to
+  the card) and exits 1, and the signer stays stopped: run the block with
+  the key, which starts the signer only after exit 0. The slot stays
+  recorded and is never reused. That the overwrite destroys the old key
+  is UNVERIFIED on a real card.
 
 Start the signer only after retire-key exits 0. Then doctor, a fresh
 export, and the audit with both roots pinned. First move
@@ -539,7 +628,7 @@ the host role waits until clients have refreshed. A client gains a host
 CA line only from `keyroster login` or `keyroster known-hosts sync`, so a
 client that has not run either since ceremony 1 knows only the old host
 CA and refuses the hosts' new host certificates after the switch
-(UNVERIFIED until 03-12f's host-CA test).
+(UNVERIFIED until 03-12f2's host-CA test).
 
 ## What this guarantees and what it does not
 
@@ -566,6 +655,14 @@ The residuals, which the signer and audit do not cover:
 - copies of the state directory and of a key file taken before
   retire-key, and the bytes of a deleted key file on an SSD or a
   copy-on-write filesystem;
+- an earlier copy of a TPM generation's `.tpmkey` and `.auth` files (a VM
+  snapshot, a hypervisor backup that holds the vTPM state, a hand copy of
+  the state directory), which still signs on the same TPM after
+  retire-key deleted the files, because the deletion destroys nothing
+  inside the TPM;
+- the old private key in a PIV slot that retire-key overwrote with a
+  throwaway key: that the overwrite destroys it is Yubico's documented
+  behaviour, UNVERIFIED on a card;
 - a restored pre-switch database that is served while its backend holds
   the old key again, and a `--previous` that is an export of the restored
   log itself; both are covered by signer-install.md "Restore from before
@@ -581,9 +678,57 @@ An emergency retire, the only early end of a draining key, is 03-13's.
 second through prepare, ceremony 1, the switch, the removal of the old
 key, the drain and the host's drop), with `TestCANextAndAbort`,
 `TestRootSignSuccessor`, `TestCeremonyGolden` and
-`TestRootCeremonyPolicyChecks`. UNVERIFIED: the drain on real hosts of a
-fleet, the machine CA, the host CA end to end (03-12f), and every
+`TestRootCeremonyPolicyChecks`. The TPM and PIV backends: the `tpm` leg of
+`TestSignerRestartMixedBundle` and `TestTPMCARotation` (the `e2e-tpm`
+job, on swtpm), the `piv` leg of `TestSignerRestartMixedBundle` (the
+`build-piv` job, on the fake card), and the backends' unit tests
+(`TestTPMGenerationFiles`, `TestTPMKeyAtExact`, `TestTPMHolds` and
+`TestTPMRemoveGeneration` in `e2e-tpm`; `TestPIVGenerationAllocator`,
+`TestPIVHolds`, `TestPIVRemoveGeneration` and
+`TestPIVManagementKeyAtUse` in `build-piv`). UNVERIFIED: the drain on
+real hosts of a fleet, the machine CA, the host CA end to end (03-12f2),
+every physical TPM, the homelab vTPM signer, every YubiKey, and every
 homelab signer; a real client run is 03-16's.
+
+CI runs the TPM path on swtpm over a Unix socket (custody `vtpm`) and the
+PIV path on an in-memory fake card. Real hardware is not exercised. In
+particular:
+
+- **TPM:** `/dev/tpmrm0` and a physical TPM (custody `tpm`), their key
+  creation, noDA against a physical TPM's dictionary-attack counter, and
+  that the kernel's resource manager leaves no handle loaded
+  (go-tpm-keyfiles' `FlushHandle` ignores errors). The homelab's vTPM
+  signer has not rotated: the homelab signer's first rotation runs its
+  first prepare and its first retire-key. Removing a generation's
+  `.tpmkey` and `.auth` files deletes the key's wrapped blobs; it
+  destroys nothing inside the TPM. Any earlier copy of both files still
+  signs on the same TPM until its owner hierarchy is cleared: a VM
+  snapshot, a hypervisor backup that holds the vTPM state, a hand copy of
+  the state directory, and unerased blocks on an SSD or a copy-on-write
+  filesystem.
+- **PIV, on every YubiKey:** generating into 0x87 to 0x95; reading a
+  slot's metadata when it is empty, overwritten or never used; that an
+  overwrite is atomic and destroys the old private key (Yubico's
+  documented behaviour, not observed here); signing from a generation
+  slot after a reopen in a separate process; the algorithm per firmware
+  for generations; PIN once across processes; the card's answer to a
+  wrong management key; every `ykman` command this runbook names,
+  `ykman piv keys delete <slot>` and `ykman piv reset` included; and the
+  15-slot exhaustion on a real card, which CI checks on the fake card
+  only. Deletion on firmware 5.7 and later is not implemented: the pinned
+  piv-go v2.6.0 has no delete command, so retire-key overwrites on every
+  firmware.
+- **A key in a generation slot that no generation row records stops PIV
+  rotation**, as "1. Prepare the next key" says, until the slot is
+  emptied when the rule of piv.md "Generation slots" allows it.
+- **The management key file is shredded, not proven erased.** `shred`
+  does not reliably erase a file on an SSD or a copy-on-write
+  filesystem.
+- **The location column is not logged.** A database edit of a PIV
+  generation's location is stopped by the fingerprint checks before any
+  card write, but an edit that points at any slot that does not hold the
+  draining key makes the signer's check answer "not held", and audit
+  cannot show which slot a generation used.
 
 ## What changes for nobody
 

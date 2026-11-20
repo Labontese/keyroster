@@ -36,6 +36,20 @@ Ed25519). For each role the signer keeps two files in
   state directory (for example another member of group `tss`) cannot use the
   key.
 
+From the second generation a role also has `{role}-g<N>.tpmkey` and
+`{role}-g<N>.auth` in the same directory, mode 0600, created inside the TPM
+with `noDA` by `keyroster-signer ca-rotate prepare`, opened only by
+generation, and removed by `ca-rotate retire-key` right after the switch
+that makes the generation draining (run in CI on swtpm:
+TestTPMGenerationFiles, TestTPMKeyAtExact, TestTPMRemoveGeneration and
+TestTPMCARotation; UNVERIFIED on a physical TPM
+and on the homelab vTPM signer). retire-key deletes the wrapped blobs, and
+destroys nothing inside the TPM: an earlier copy of both files (a VM
+snapshot, a hypervisor backup that holds the vTPM state, a hand copy of the
+state directory, or unerased blocks on an SSD or a copy-on-write
+filesystem) still signs on the same TPM until its owner hierarchy is
+cleared.
+
 The keys are created with **`noDA`**: a wrong auth value does not count
 against the TPM's dictionary-attack counter. That counter is TPM-wide, so
 without `noDA` a corrupt auth file could lock the TPM out for every other
