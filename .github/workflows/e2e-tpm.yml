@@ -92,6 +92,11 @@ jobs:
           echo "KEYROSTER_TPM_OPTS=$KEYROSTER_TPM_OPTS"
           KEYROSTER_OPENSSH_PREFIX="$HOME/.cache/keyroster/openssh-$OPENSSH_VERSION" \
             go test -tags e2e_tpm -count=1 -v ./test/e2e/... 2>&1 | tee e2e-logs/go-test-tpm.log
+      # The suite runs every e2e_tpm test with no -run; a rotation test that
+      # skipped or did not run fails here (03-12f).
+      - name: Check that the TPM rotation test ran and passed
+        run: |
+          grep -q -- '^--- PASS: TestTPMCARotation (' e2e-logs/go-test-tpm.log || { echo "the log has no PASS line for TestTPMCARotation" >&2; exit 1; }
       - name: Collect the swtpm log
         if: always()
         run: |
