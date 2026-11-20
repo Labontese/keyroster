@@ -142,7 +142,7 @@ func runCARotatePrepare(ctx context.Context, args []string, stdout, stderr io.Wr
 	flags.SetOutput(stderr)
 	stateDir := flags.String("state-dir", "", "state directory initialised by ca-init (required)")
 	role := flags.String("role", "", "the CA role to prepare a generation for: user, host or machine (required)")
-	keyFP := flags.String("key", "", "SHA256:... selects the new key in the backend (agent); without it the backend creates one (software)")
+	keyFP := flags.String("key", "", "SHA256:... selects the new key in the backend (agent; software and tpm: a key file you placed; piv refuses it); without it the backend creates one (software, tpm, piv)")
 	out := flags.String("out", "", "the prepare file for the root ceremony; must not exist (required)")
 	var backendOpts listFlag
 	flags.Var(&backendOpts, "backend-opt", "override a backend option stored by ca-init, key=value (repeatable)")
@@ -213,6 +213,11 @@ func runCARotatePrepare(ctx context.Context, args []string, stdout, stderr io.Wr
 	}
 	_, err = fmt.Fprintf(stdout, "role %s generation %d %s %s %s\nprepare file: %s\n",
 		g.Role, g.Generation, ssh.FingerprintSHA256(pub), g.Alg, g.Custody, *out)
+	// The location the row records (03-12f: the PIV slot), so that the
+	// operator learns it from the console.
+	if err == nil && g.Location != "" {
+		_, err = fmt.Fprintf(stdout, "location: %s\n", g.Location)
+	}
 	return err
 }
 

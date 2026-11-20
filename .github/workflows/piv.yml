@@ -2,8 +2,12 @@ name: PIV
 
 # YubiKey PIV backend (KEY-05, D-12). The backend is behind the piv build tag
 # and links pcsc-lite through cgo (piv-go). CI has no YubiKey: the unit tests
-# run the backend against an in-memory fake card. Real-hardware validation is
-# tracked in docs/security/needs-hardware.md for the Phase 6 review.
+# and the signer's PIV rotation leg (TestSignerRestartMixedBundle/piv, 03-12f)
+# run against the in-memory fake card of a pivfake build
+# (internal/keystore/piv/fake.go), which the release build never contains;
+# the release guard of the build step proves that on every run. Real-hardware
+# validation is tracked in docs/security/needs-hardware.md for the Phase 6
+# review.
 #
 # The job also proves the exclusion (T-01-53): default builds (CGO_ENABLED=0,
 # no tags) of keyroster and keyroster-signer link neither piv-go nor cgo.
@@ -61,22 +65,32 @@ jobs:
           CGO_ENABLED=1 go vet -tags piv ./internal/keystore/piv/... ./cmd/keyroster-signer/...
           CGO_ENABLED=1 go vet -tags piv,pivfake ./internal/keystore/piv/... ./cmd/keyroster-signer/...
       # The lint job in ci.yml builds without tags, so it never sees the
-      # piv package; lint it here with the same pinned linter and config.
-      # piv,pivfake is a superset of the release files: it adds fake.go.
+      # piv package or the signer's piv-tagged files; lint them here with
+      # the same pinned linter and config. piv,pivfake is a superset of the
+      # release files: it adds fake.go and the signer's PIV leg.
       - name: Lint the tagged package
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         env:
           CGO_ENABLED: "1"
         with:
           version: v2.14.0
-          args: --build-tags piv,pivfake ./internal/keystore/piv/...
+          args: --build-tags piv,pivfake ./internal/keystore/piv/... ./cmd/keyroster-signer/...
       # The tests use the fake card, so they build only with pivfake: with
       # -tags piv alone the package has no test files and would pass
       # silently, which the PASS-line loop refuses.
       - name: Run the PIV keystore unit tests (race detector)
         run: |
           CGO_ENABLED=1 go test -race -tags piv,pivfake -count=1 -timeout 15m -v ./internal/keystore/piv/... 2>&1 | tee "$RUNNER_TEMP/piv-unit.log"
-          for t in TestPIVProvisionAndIssue TestPIVRefusals TestPIVPINRetriesGuard TestPIVSignWithoutMgmtKey TestPIVConcurrency; do grep -q -- "^--- PASS: $t (" "$RUNNER_TEMP/piv-unit.log" || { echo "the log has no PASS line for $t" >&2; exit 1; }; done
+          for t in TestPIVProvisionAndIssue TestPIVRefusals TestPIVPINRetriesGuard TestPIVSignWithoutMgmtKey TestPIVConcurrency TestPIVGenerationAllocator TestGenerationKeyAfterReopen TestPIVGenerationSlots TestPIVHolds TestPIVRemoveGeneration TestPIVManagementKeyAtUse TestPIVFakeRegistry; do grep -q -- "^--- PASS: $t (" "$RUNNER_TEMP/piv-unit.log" || { echo "the log has no PASS line for $t" >&2; exit 1; }; done
+      # The signer's PIV rotation leg on the fake card (03-12f). go test
+      # indents a subtest's result line, so its PASS check is not anchored
+      # at column 0; a skipped leg fails the step.
+      - name: Run the signer's PIV rotation leg on the fake card (race detector)
+        run: |
+          LOG="$RUNNER_TEMP/piv-rotation-leg.log"
+          CGO_ENABLED=1 go test -race -tags piv,pivfake -count=1 -timeout 15m -v -run '^TestSignerRestartMixedBundle$/^piv$' ./cmd/keyroster-signer/ 2>&1 | tee "$LOG"
+          grep -qE -- '^ *--- PASS: TestSignerRestartMixedBundle/piv \(' "$LOG"
+          if grep -qF -- '--- SKIP: TestSignerRestartMixedBundle/' "$LOG"; then echo "the PIV rotation leg skipped" >&2; exit 1; fi
       # The release guard (03-12f): the release piv build leaves out fake.go,
       # its build info names -tags=piv exactly, and its binary holds no fake
       # symbol. (1a) and (3a) are positive controls, so that a broken go

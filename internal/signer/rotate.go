@@ -27,8 +27,8 @@ var (
 	// ErrRotationRole refuses a role whose generations are not supported:
 	// ops and log keys rotate in 03-13.
 	ErrRotationRole = errors.New("rotation_role_not_supported")
-	// ErrRotationBackend refuses a backend whose generations are not
-	// supported yet (tpm and piv) or that is not a registered backend.
+	// ErrRotationBackend refuses a stored backend name that is not a
+	// registered keystore backend.
 	ErrRotationBackend = errors.New("rotation_not_supported_on_backend")
 	// ErrRotationCustody refuses a new key whose custody is not the one
 	// recorded for the role's generation 1: a rotation never changes
@@ -36,25 +36,18 @@ var (
 	ErrRotationCustody = errors.New("rotation_custody_mismatch")
 )
 
-// rotationBackends are the registered keystore backends (pkcs11-agent is a
-// custody label of the agent backend, not a backend), and
-// rotationNotYet those of them whose CA key generations arrive in 03-12f,
-// which deletes both entries.
-var (
-	rotationBackends = map[string]bool{"agent": true, "software": true, "tpm": true, "piv": true}
-	rotationNotYet   = map[string]bool{"tpm": true, "piv": true}
-)
+// rotationBackends are the registered keystore backends, each of which can
+// hold a later CA key generation (pkcs11-agent is a custody label of the
+// agent backend, not a backend).
+var rotationBackends = map[string]bool{"agent": true, "software": true, "tpm": true, "piv": true}
 
 // CheckRotationBackend refuses, by the backend name ca-init stored and
-// before any backend is opened, a backend that cannot hold a later CA key
-// generation yet: agent and software can, tpm and piv cannot until 03-12f,
-// and an unknown name is refused too (03-12).
+// before any backend is opened, a name that is not a registered keystore
+// backend: agent, software, tpm and piv each hold later CA key
+// generations.
 func CheckRotationBackend(name string) error {
-	switch {
-	case rotationNotYet[name]:
-		return fmt.Errorf("%w: backend %s: tpm and piv generations arrive in 03-12f", ErrRotationBackend, name)
-	case !rotationBackends[name]:
-		return fmt.Errorf("%w: unknown backend %q (tpm and piv generations arrive in 03-12f)", ErrRotationBackend, name)
+	if !rotationBackends[name] {
+		return fmt.Errorf("%w: unknown backend %q", ErrRotationBackend, name)
 	}
 	return nil
 }
@@ -220,15 +213,15 @@ func prepareGeneration(ctx context.Context, lw *Signer, db *signerdb.DB, be keys
 		created = pub
 		g.PublicKey, g.Alg, g.Custody, g.Location = pub.Marshal(), pub.Type(), gen1Custody, location
 		if err := cert.CheckCAKey(pub); err != nil {
-			return signerdb.CAGeneration{}, orphaned(created, role, next, err)
+			return signerdb.CAGeneration{}, orphaned(created, role, next, g.Location, err)
 		}
 	}
 	if err := checkGenerationDistinct(g.PublicKey, gens, roots, b, p); err != nil {
-		return signerdb.CAGeneration{}, orphaned(created, role, next, err)
+		return signerdb.CAGeneration{}, orphaned(created, role, next, g.Location, err)
 	}
 	body, err := (&tlog.CAGenerationBody{Role: g.Role, Generation: g.Generation, PublicKey: g.PublicKey, Alg: g.Alg, Custody: g.Custody}).Encode()
 	if err != nil {
-		return signerdb.CAGeneration{}, orphaned(created, role, next, err)
+		return signerdb.CAGeneration{}, orphaned(created, role, next, g.Location, err)
 	}
 	now := clock()
 	g.CreatedAtMicros = now.UnixMicro()
@@ -240,7 +233,7 @@ func prepareGeneration(ctx context.Context, lw *Signer, db *signerdb.DB, be keys
 		return err
 	})
 	if err != nil {
-		return signerdb.CAGeneration{}, orphaned(created, role, next, err)
+		return signerdb.CAGeneration{}, orphaned(created, role, next, g.Location, err)
 	}
 	return g, nil
 }
@@ -266,14 +259,20 @@ func pinnedKeyAt(b keystore.Backend, role keystore.Role, generation uint32, fp, 
 }
 
 // orphaned names a key the backend created for generation of role that no
-// row records, so the operator can remove it; err is returned unchanged
-// when no key was created.
-func orphaned(created ssh.PublicKey, role keystore.Role, generation uint32, err error) error {
+// row records, so the operator can remove it: at the location the backend
+// returned when there is one, otherwise by the software backend's file and
+// the tpm backend's two files. err is returned unchanged when no key was
+// created.
+func orphaned(created ssh.PublicKey, role keystore.Role, generation uint32, location string, err error) error {
 	if created == nil {
 		return err
 	}
-	return fmt.Errorf("%w (the backend created the key %s for generation %d of %s, which no generation row records: remove it; for the software backend it is {state-dir}/software/%s-g%d.age)",
-		err, ssh.FingerprintSHA256(created), generation, role, role, generation)
+	if location != "" {
+		return fmt.Errorf("%w (the backend created the key %s for generation %d of %s at location %s, which no generation row records: remove it)",
+			err, ssh.FingerprintSHA256(created), generation, role, location)
+	}
+	return fmt.Errorf("%w (the backend created the key %s for generation %d of %s, which no generation row records: remove it; for the software backend it is {state-dir}/software/%s-g%d.age, for the tpm backend {state-dir}/tpm/%s-g%d.tpmkey and %s-g%d.auth)",
+		err, ssh.FingerprintSHA256(created), generation, role, role, generation, role, generation, role, generation)
 }
 
 // checkGenerationDistinct refuses a new generation key that equals a

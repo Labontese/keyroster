@@ -185,10 +185,14 @@ func switchFloors(gens []signerdb.CAGeneration, b *trust.Bundle, drain *krl.Drai
 // drainingHeld asks, for every draining CA entry of b, whether the stored
 // backend still holds its generation (03-12e), as serve does at start:
 // the software backend by its file (software.GenerationHeld, which needs
-// no passphrase), the agent backend through the stored socket
-// (keystore.Holds). A generation doctor cannot check, because no stored
+// no passphrase), the tpm backend by its two files (tpm.GenerationHeld,
+// which sends no TPM command, 03-12f), the agent backend through the
+// stored socket (keystore.Holds). doctor does not ask the piv backend: a
+// card read costs a PIN verification and competes with serve for the
+// card's one session. A generation doctor cannot check, because no stored
 // row names its key, the agent cannot be reached or answers with an
-// error, or the backend is neither, is reported Unchecked, never as gone.
+// error, or the backend is piv or unknown, is reported Unchecked, never as
+// gone.
 func drainingHeld(ctx context.Context, db *signerdb.DB, stateDir string, overrides map[string]string, gens []signerdb.CAGeneration, b *trust.Bundle) []doctor.HeldFact {
 	if b == nil {
 		return nil
@@ -218,6 +222,7 @@ func drainingHeld(ctx context.Context, db *signerdb.DB, stateDir string, overrid
 	}
 	var (
 		be      keystore.Backend
+		byFile  = software.GenerationHeld // the backends asked by their files
 		openErr error
 	)
 	switch name, _, err := db.BackendConfig(ctx); {
@@ -227,6 +232,8 @@ func drainingHeld(ctx context.Context, db *signerdb.DB, stateDir string, overrid
 		if _, be, openErr = openStoredBackend(ctx, db, overrides, stateDir); openErr == nil {
 			defer func() { _ = be.Close() }()
 		}
+	case name == "tpm":
+		byFile = tpm.GenerationHeld
 	case name != "software":
 		openErr = fmt.Errorf("doctor does not ask the %s backend", name)
 	}
@@ -242,7 +249,7 @@ func drainingHeld(ctx context.Context, db *signerdb.DB, stateDir string, overrid
 			case openErr != nil:
 				err = openErr
 			case be == nil:
-				held, err = software.GenerationHeld(stateDir, keystore.Role(f.Role), f.Generation)
+				held, err = byFile(stateDir, keystore.Role(f.Role), f.Generation)
 			default:
 				held, err = keystore.Holds(be, keystore.Role(f.Role), f.Generation, f.Fingerprint, t.gen.Location)
 			}
@@ -291,38 +298,49 @@ func generationFacts(gens []signerdb.CAGeneration, b *trust.Bundle) []doctor.Gen
 	return out
 }
 
-// generationFile is the name of a software key file of a later CA key
-// generation: <role>-g<N>.age.
-var generationFile = regexp.MustCompile(`^(user|host|machine|ops|log)-g([0-9]{1,10})\.age$`)
+// generationFiles are, per key directory below the state directory, the
+// names of the files of a later CA key generation: the software backend's
+// <role>-g<N>.age (03-12) and the tpm backend's <role>-g<N>.tpmkey and
+// <role>-g<N>.auth (03-12f).
+var generationFiles = []struct {
+	dir  string
+	name *regexp.Regexp
+}{
+	{"software", regexp.MustCompile(`^(user|host|machine|ops|log)-g([0-9]{1,10})\.age$`)},
+	{"tpm", regexp.MustCompile(`^(user|host|machine|ops|log)-g([0-9]{1,10})\.(tpmkey|auth)$`)},
+}
 
 // unrecordedGenerationFiles lists, by name only (no file is opened), the
-// <role>-g<N>.age files in {stateDir}/software with N of at least 2 that no
-// generation row names (03-12). A missing or unreadable directory gives
-// none: the agent, tpm and piv backends have no such directory.
+// generationFiles in {stateDir}/software and {stateDir}/tpm with N of at
+// least 2 that no generation row names (03-12, 03-12f): a key from a lost
+// prepare, or a key that a restore lost. A missing or unreadable directory
+// gives none: the agent and piv backends have no such directory.
 func unrecordedGenerationFiles(stateDir string, gens []signerdb.CAGeneration) []string {
-	dir := filepath.Join(stateDir, "software")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
 	var out []string
-	for _, e := range entries {
-		m := generationFile.FindStringSubmatch(e.Name())
-		if m == nil {
+	for _, gf := range generationFiles {
+		dir := filepath.Join(stateDir, gf.dir)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
 			continue
 		}
-		n, err := strconv.ParseUint(m[2], 10, 32)
-		if err != nil || n < 2 {
-			continue
-		}
-		recorded := false
-		for _, g := range gens {
-			if g.Role == m[1] && uint64(g.Generation) == n {
-				recorded = true
+		for _, e := range entries {
+			m := gf.name.FindStringSubmatch(e.Name())
+			if m == nil {
+				continue
 			}
-		}
-		if !recorded {
-			out = append(out, filepath.Join(dir, e.Name()))
+			n, err := strconv.ParseUint(m[2], 10, 32)
+			if err != nil || n < 2 {
+				continue
+			}
+			recorded := false
+			for _, g := range gens {
+				if g.Role == m[1] && uint64(g.Generation) == n {
+					recorded = true
+				}
+			}
+			if !recorded {
+				out = append(out, filepath.Join(dir, e.Name()))
+			}
 		}
 	}
 	return out
