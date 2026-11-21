@@ -141,12 +141,14 @@ CA key generations (docs/backends/piv.md "Generation slots" and step 5):
 - [ ] Deletion by the signer on 5.7 and later: not implemented (a later
       hardening item); retire-key overwrites on every firmware.
 - [ ] The 15-slot exhaustion: checked on the fake card only.
-- [ ] The location column is not logged (a later hardening item): a database
-      edit of a PIV generation's location is stopped by the fingerprint
-      checks before any card write, but for generation 2 or later an edit
-      that points at another generation slot, one that does not hold the
-      draining key, makes Holds answer "not held", and audit cannot show
-      which slot a generation used.
+- [ ] The location column is not logged (a later hardening item): after a
+      database edit of a PIV generation's location, retire-key still
+      overwrites a slot only when its key has the draining fingerprint and
+      prepare still generates only into an empty slot, so no other key is
+      written over, but for generation 2 or later an edit that points at
+      another generation slot, one that does not hold the draining key,
+      makes Holds answer "not held", and audit cannot show which slot a
+      generation used.
 
 ## 3. Hardware root ceremony (D-11)
 
