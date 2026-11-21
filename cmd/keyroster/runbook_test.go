@@ -1507,7 +1507,9 @@ func pivMgmtKeyBlockProblems(win string) []string {
 // the window it belongs to; ca-rotation.md names no backend as refused;
 // and piv.md step 5 holds the management key's round trip as one block
 // that runs as the signer's user and shreds the key on every exit status
-// before the signer starts.
+// before the signer starts. The rule for emptying a generation slot, the
+// abort's removal paths, what doctor shows on piv, and when a restore lets
+// an unrecorded generation key go are pinned where each is stated.
 func TestCARotationBackendSteps(t *testing.T) {
 	window := func(t *testing.T, data string, e *signingSection) string {
 		t.Helper()
@@ -1536,7 +1538,7 @@ func TestCARotationBackendSteps(t *testing.T) {
 			"tpm/user-g2.tpmkey", "tpm/user-g2.auth", "0x87 to 0x95", "15 slots", "never reused", "piv_no_free_slot", "location:",
 			"line into the transcript", "ErrSlotOccupied", "slot already holds a key", "no generation row records", "ykman piv keys delete",
 			"never on a restored database", "ykman piv reset", "the block of piv.md step 5", "after a refused prepare",
-			"no YubiKey or physical TPM has run it",
+			"no YubiKey or physical TPM has run it", "never while a signed bundle waits to be installed",
 		})
 	})
 	t.Run("remove_per_backend", func(t *testing.T) {
@@ -1563,7 +1565,7 @@ func TestCARotationBackendSteps(t *testing.T) {
 		holds(t, `signer-install.md "Prepare a CA key generation"`, prepare, []string{
 			"tpm/<role>-g<N>.tpmkey", "0x87 to 0x95", "piv_no_free_slot", "mgmt-key-file", "ErrSlotOccupied", "slot already holds a key",
 			"no generation row records", "ykman piv keys delete", "never on a restored database", "ykman piv reset",
-			"the block of piv.md step 5", "after a refused prepare",
+			"the block of piv.md step 5", "after a refused prepare", "never while a signed bundle waits to be installed",
 		})
 		remove := window(t, data, &signingSection{id: "remove", file: "signer-install.md", section: "Install a successor bundle: stop, install, start",
 			start: "### Remove the old key after a switch", end: "Other refusals:"})
@@ -1628,6 +1630,49 @@ func TestCARotationBackendSteps(t *testing.T) {
 		}
 		holds(t, "piv.md step 5", win, []string{
 			"on every exit status", "only after the shred", "copy-on-write", "after a refused prepare", "did not run to its end",
+		})
+	})
+	t.Run("piv_generation_slots_rule", func(t *testing.T) {
+		data := string(readTestFile(t, filepath.Join("..", "..", "docs", "backends", "piv.md")))
+		win := window(t, data, &signingSection{id: "generation_slots", file: "piv.md", section: "Generation slots"})
+		holds(t, `piv.md "Generation slots"`, win, []string{
+			"Never on a restored database before the restore section of", "Never while a signed bundle waits to be installed",
+			"Never a key you keep in a generation slot for another use", "no stored generation", "it is stopped for the delete",
+		})
+	})
+	t.Run("abort_removal_paths", func(t *testing.T) {
+		// No block of the abort section binds $S, so its inline commands
+		// name the state directory itself.
+		win := window(t, caRotationRunbook(t), &signingSection{id: "abort", file: "ca-rotation.md", section: "Abort"})
+		holds(t, `ca-rotation.md "Abort: withdraw the next CA key"`, win, []string{
+			"/var/lib/keyroster-signer/software/user-g2.age", "/var/lib/keyroster-signer/tpm/user-g2.tpmkey",
+			"/var/lib/keyroster-signer/tpm/user-g2.auth",
+		})
+		if strings.Contains(win, "$S") {
+			t.Errorf(`ca-rotation.md "Abort: withdraw the next CA key" uses $S, which no block of that section binds`)
+		}
+	})
+	t.Run("remove_piv_doctor", func(t *testing.T) {
+		win := window(t, caRotationRunbook(t), &signingSection{id: "remove", file: "ca-rotation.md", section: "Remove the old key and restart"})
+		holds(t, `ca-rotation.md "Remove the old key and restart"`, win, []string{
+			"WARN draining_key_unchecked", "not doctor, show whether the key is still held",
+		})
+	})
+	t.Run("software_key_after_restore", func(t *testing.T) {
+		data := string(readTestFile(t, filepath.Join("..", "..", "docs", "security", "custody.md")))
+		win := window(t, data, &signingSection{id: "software_ca_keys", file: "custody.md", section: "Software CA keys (KEY-06)"})
+		holds(t, `custody.md "Software CA keys (KEY-06)"`, win, []string{
+			"after a restore only once the restore section of", "has run to its end",
+		})
+	})
+	t.Run("restore_lost_bundle_stop", func(t *testing.T) {
+		// The bullet runs from its bold start to the next bullet of the
+		// same list.
+		win := window(t, signerInstall(t), &signingSection{id: "lost_bundle_install", file: "signer-install.md",
+			section: "Snapshot restore: check the clock first", start: "- **A lost `bundle_install`:**",
+			endNext: func(l string) bool { return strings.HasPrefix(l, "- ") }})
+		holds(t, "signer-install.md's restore bullet on a lost bundle_install", win, []string{
+			"stop: the bundle names a CA key generation that the restored database lacks", "is kept, not destroyed",
 		})
 	})
 }
