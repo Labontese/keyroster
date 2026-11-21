@@ -483,8 +483,9 @@ you placed it for a `--key` prepare, but only after the restore section
 has run to its end, because where that section stops on a lost
 generation the pair may hold that generation's key. doctor's
 `unrecorded_generation_file` warning and prepare's refusal over an
-existing file both say to destroy such a file after a restore: that
-holds only once the restore section has run to its end.
+existing file, with the software and the tpm backend alike, say this in
+short: destroy such a file only once the restore section has run to its
+end, and keep it where that section stops on a lost generation.
 
 With the piv backend, `prepare` generates the key on the card in the
 first slot in 0x87 to 0x95 that no generation row records, and prints
