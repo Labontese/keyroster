@@ -141,7 +141,7 @@ func (b *backend) ProvisionGeneration(role keystore.Role, generation uint32, _ [
 	}
 	for _, p := range []string{keyPath, authPath} {
 		if _, err := os.Lstat(p); err == nil {
-			return nil, "", fmt.Errorf("%w: %s (after a restore, a %s-g%d.tpmkey or .auth file that no generation row names is a key from a lost prepare: once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it unless you placed it for a --key prepare)",
+			return nil, "", fmt.Errorf("%w: %s (after a restore, a %s-g%d.tpmkey or .auth file that no generation row names is a key from a lost prepare: once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it unless you placed it for a --key prepare; where that section stops on a lost generation, keep it, because it may hold that generation's key)",
 				ErrKeyFilesExist, p, role, generation)
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return nil, "", fmt.Errorf("keystore tpm: %w", err)

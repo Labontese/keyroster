@@ -60,8 +60,8 @@ var (
 	// ErrKeyNotPresent means the key file for a role holds another key
 	// than the pinned one. The backend never falls back to another key.
 	ErrKeyNotPresent = errors.New("keystore software: pinned CA key not present in the software key files")
-	// ErrKeyFilesExist means Provision found key files from an earlier
-	// run; it overwrites nothing.
+	// ErrKeyFilesExist means Provision or ProvisionGeneration found a key
+	// file that already exists; neither overwrites anything.
 	ErrKeyFilesExist = errors.New("keystore software: software key files already exist")
 )
 
@@ -257,7 +257,7 @@ func (b *backend) ProvisionGeneration(role keystore.Role, generation uint32, _ [
 		return nil, "", err
 	}
 	if _, err := os.Lstat(path); err == nil {
-		return nil, "", fmt.Errorf("%w: %s (after a restore, a %s-g%d.age file that no generation row names is a key from a lost prepare: destroy it unless you placed it for a --key prepare)",
+		return nil, "", fmt.Errorf("%w: %s (after a restore, a %s-g%d.age file that no generation row names is a key from a lost prepare: once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it unless you placed it for a --key prepare; where that section stops on a lost generation, keep it, because it may hold that generation's key)",
 			ErrKeyFilesExist, path, role, generation)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, "", fmt.Errorf("keystore software: %w", err)
