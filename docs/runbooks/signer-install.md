@@ -215,11 +215,13 @@ ls -l /run/keyroster-signer/signer.sock    # srw-rw---- keyroster-signer keyrost
 The unit restarts a failed signer after 5 seconds, at most 5 times in 10
 minutes. It never restarts on **exit status 78**: the key store refused the
 PIV PIN or a TPM key's auth value (the TPM backend proves each key's
-`{role}.auth` with one test signature at start), or the PIV backend
-refused to try the PIN with fewer than 2 retries left. Each restart would
-spend another of the device's limited attempts. `systemctl status` then
-shows `status=78`. Fix the PIN file or restore the `{role}.auth` files from
-backup, check the device by hand ([piv.md](../backends/piv.md)), then run `systemctl
+`{role}.auth`, or `{role}-g<N>.auth` for a later generation, with one
+test signature at start; a wrong auth on a generation file is not run in
+CI and is UNVERIFIED, though it shares the probe of generation 1's key),
+or the PIV backend refused to try the PIN with fewer than 2 retries left.
+Each restart would spend another of the device's limited attempts.
+`systemctl status` then shows `status=78`. Fix the PIN file or restore
+the `{role}.auth` and `{role}-g<N>.auth` files from backup, check the device by hand ([piv.md](../backends/piv.md)), then run `systemctl
 reset-failed keyroster-signer.service` and start it again.
 
 Check the sandbox on the running process:
@@ -359,9 +361,9 @@ asks the agent's own Unix socket whether it still lists the draining key.
 | `WARN tpm_unavailable` | doctor could not read the TPM, or keys are recorded with TPM custody but the TPM was not inspected | Check `/dev/tpmrm0` and group `tss`, and that the recorded backend is `tpm`. Until then the TPM custody is unconfirmed. |
 | `FAIL restore_recovery_pending` | the marker `restore-recovery-pending` exists in the state directory: a restore was not recovered or ruled out | Follow the restore section (step 2b). `serve`, `ca-init`, `install-bundle` and `ca-rotate prepare` refuse until then. |
 | `WARN installed_issued_at_after_now` | the installed bundle is dated after this clock | It blocks every later successor until real time catches up. Check the clock. |
-| `WARN unrecorded_generation_file` | a `<role>-g<N>.age` file in the state directory's `software` directory that no generation row names | See [Prepare a CA key generation](#prepare-a-ca-key-generation). |
-| `FAIL draining_key_still_usable` | the backend still holds the key of a draining CA entry: the software backend has a file at its generation's name, or the agent lists it | See [Remove the old key after a switch](#remove-the-old-key-after-a-switch). `serve` refuses to start until then. |
-| `WARN draining_key_unchecked` | doctor could not ask whether the backend still holds a draining key (the agent did not answer, or no generation row names the key) | Check the backend by hand; `serve` refuses to start while the key is held. |
+| `WARN unrecorded_generation_file` | a `<role>-g<N>.age` file in the state directory's `software` directory, or a `<role>-g<N>.tpmkey` or `<role>-g<N>.auth` file in its `tpm` directory, that no generation row names | See [Prepare a CA key generation](#prepare-a-ca-key-generation). |
+| `FAIL draining_key_still_usable` | the backend still holds the key of a draining CA entry: the software backend has a file at its generation's name, the tpm backend has the key file or the auth file at its generation's name, or the agent lists it | See [Remove the old key after a switch](#remove-the-old-key-after-a-switch). `serve` refuses to start until then. |
+| `WARN draining_key_unchecked` | doctor could not ask whether the backend still holds a draining key (for example, the agent did not answer, the software or tpm key files could not be examined, or no generation row names the key), or the backend is piv, whose card doctor does not read: there the line is printed for every draining entry | Check the backend by hand; `serve` refuses to start while the key is held. |
 
 `OK generations` lists each role's active and prepared CA key
 generations with their fingerprints (03-12). `OK switch_floor` names, per
@@ -422,6 +424,10 @@ runuser -u keyroster-signer -g keyroster-signer -G tss -- \
 systemctl start keyroster-signer.service
 ```
 
+The tpm and piv backends create the key themselves, so leave `--key` out
+for them: piv refuses it, and tpm accepts it only for a key file you
+placed, which must carry noDA.
+
 `--key` names the new key by its fingerprint, and the agent backend
 needs it. Without `--key` the software backend creates the key itself,
 as `software/<role>-g<N>.age` in the state directory; with `--key` it
@@ -440,8 +446,11 @@ names the old key, and the ceremony and the rest of the rotation are in
 The refusals, by name, and what to do:
 
 - `rotation_role_not_supported`: the ops and log keys rotate in 03-13.
-- `rotation_not_supported_on_backend`: the tpm and piv backends get CA key
-  generations in 03-12f.
+- `rotation_not_supported_on_backend`: the stored backend name is not one
+  that rotates (agent, software, tpm and piv rotate).
+- `piv_no_free_slot`: every generation slot from 0x87 to 0x95 is recorded
+  by a generation row, and nothing was generated. A rotation never
+  changes custody, so this card rotates no further.
 - `rotation_custody_mismatch`: the new key's custody is not the one the
   role's first generation records; a rotation never changes custody.
 - a key equal to a stored generation of any role, to a root of any bundle
@@ -460,10 +469,71 @@ directory's `software` directory (mode 0600; generation 1 stays
 names (doctor warns `unrecorded_generation_file`) is, when no prepare is
 running and no `--key` prepare of yours is waiting for it, a key from a
 prepare that the restore lost: destroy it unless you placed it for a
-`--key` prepare, and never record a lost key with `--key`. (Run in CI:
-TestCARotatePrepareTracer, TestPrepareGeneration, TestGenerationsLogged,
-TestSignerRestartMixedBundle and TestDoctorUnrecordedGenerationFile.
-UNVERIFIED on the homelab TPM signer until 03-12f.)
+`--key` prepare, but only after the restore section has run to its end,
+because where that section stops on a lost generation the file may hold
+that generation's key, and never record a lost key with `--key`.
+
+With the tpm backend, `prepare` creates the key inside the TPM with noDA
+and writes `tpm/<role>-g<N>.tpmkey` and `tpm/<role>-g<N>.auth` in the
+state directory (mode 0600; generation 1 stays `tpm/<role>.tpmkey` and
+`tpm/<role>.auth`). After a restore, a pair of that name that no
+generation row names is a key from a prepare that the restore lost, and
+doctor warns about it as `unrecorded_generation_file`. Destroy it unless
+you placed it for a `--key` prepare, but only after the restore section
+has run to its end, because where that section stops on a lost
+generation the pair may hold that generation's key. doctor's
+`unrecorded_generation_file` warning and prepare's refusal over an
+existing file both say to destroy such a file after a restore: that
+holds only once the restore section has run to its end.
+
+With the piv backend, `prepare` generates the key on the card in the
+first slot in 0x87 to 0x95 that no generation row records, and prints
+that slot after `prepare file:` as `location: <slot>` (`location: 87` for
+the first rotation): write that line into the transcript beside the
+fingerprint. The 15 slots are shared by every role's later generations,
+the ops and log keys from 03-13 included, and a slot is never reused,
+even after retire-key emptied or overwrote it; with none left, prepare
+refuses `piv_no_free_slot`. A key in the next slot that no generation row
+records (a lost prepare, a `signer.db` restored from before a prepare, or
+a key put there by hand) makes prepare refuse `ErrSlotOccupied` (printed
+`slot already holds a key`, naming the slot) on every later run, for
+every role, until the slot is emptied; overwriting the slot by hand does
+not clear it. On firmware 5.7 and later `ykman piv keys delete <slot>`
+empties it, and only when the rule of piv.md "Generation slots" allows
+it: never on a restored database before this runbook's restore section
+has run to its end, never while a signed bundle waits to be installed (a
+bundle that `install-bundle` refuses with `no stored generation` names a
+generation the database lost, and the slot's key may be that
+generation's key), and never a key you keep in the slot for another use.
+The signer is stopped for the delete. Below 5.7 nothing empties it short
+of `ykman piv reset`, which destroys every CA key on the card. Each
+`ykman` command is UNVERIFIED.
+
+On a PIV signer the example above is not run as it stands, because it
+starts the signer right after prepare: the block of piv.md step 5
+([piv.md](../backends/piv.md)) replaces it. That block stops the signer,
+places the management key at the path ca-init stored (the
+`mgmt-key-file` option), runs the prepare, shreds the key on every exit
+status and then starts the signer only when prepare exited 0, so the key
+is gone before the start, and no `--backend-opt` is needed. So, after a
+refused prepare, the key is already shredded and the signer is still
+stopped: run `sudo systemctl start keyroster-signer.service`
+by hand (the refusal wrote nothing the signer serves), fix the cause, and
+run the block again. A draining PIV generation is reported by doctor as
+`WARN draining_key_unchecked`: doctor does not ask the card.
+
+(Run in CI: TestCARotatePrepareTracer, TestPrepareGeneration,
+TestGenerationsLogged, TestSignerRestartMixedBundle and
+TestDoctorUnrecordedGenerationFile; for tpm, TestTPMGenerationFiles,
+TestTPMProvisionGenerationRefusals, TestTPMKeyAtExact and the `tpm` leg of
+TestSignerRestartMixedBundle on swtpm in the `e2e-tpm` job; for piv,
+TestPIVGenerationAllocator, TestGenerationKeyAfterReopen,
+TestPIVManagementKeyAtUse and the `piv` leg of TestSignerRestartMixedBundle
+on the fake card in the `build-piv` job. CI runs the TPM path on swtpm
+and the PIV path on an in-memory fake card; real hardware is not
+exercised. UNVERIFIED: every physical TPM, the homelab vTPM signer, whose
+first prepare is 03-15's, and every YubiKey; the block of piv.md step 5
+is not run in CI.)
 
 ## Install a successor bundle: stop, install, start
 
@@ -651,8 +721,33 @@ is fixed. Start the signer only after exit 0. Per backend:
   `serve` refuses `draining_key_still_usable` again (UNVERIFIED: no
   PKCS#11 token has been rotated; CI removes the printed keys through the
   printed socket with an agent client, not with `ssh-add`).
-- **tpm and piv:** refused `rotation_not_supported_on_backend` until
-  their generations exist (03-12f).
+- **tpm:** it checks that a regular `tpm/<role>.tpmkey` (generation 1;
+  `tpm/<role>-g<N>.tpmkey` after) holds the draining key, deletes it and
+  its `.auth` file and syncs the directory. A link, another entry or a
+  lone auth file at the generation's name is removed unchecked, because
+  no key at that name can be opened. A key file that holds another key
+  (`not removed: the file holds another key (<fingerprint>)`), one that
+  does not read as a TPM key
+  (`not removed: keystore tpm: the key file cannot be read as a TPM key: ...`),
+  or a directory that is not empty stays and counts as held: inspect it,
+  and delete both files as the signer's user
+  (`runuser -u keyroster-signer -- rm -f /var/lib/keyroster-signer/tpm/<role>.tpmkey /var/lib/keyroster-signer/tpm/<role>.auth`)
+  only once you know what it is, then run retire-key again. After a crash
+  between the two deletions, run retire-key again: it finishes the
+  removal. The deletion removes the key's wrapped blobs and destroys
+  nothing inside the TPM: an earlier copy of both files still signs on
+  the same TPM (UNVERIFIED on a physical TPM and on the homelab vTPM
+  signer, whose first retire-key is 03-16's).
+- **piv:** it checks that the recorded slot holds the draining key and
+  overwrites it with a throwaway key (PIN once, touch never), on every
+  firmware. It needs the management key: on a PIV signer, run retire-key
+  through the block of piv.md step 5, which stops the signer, places the
+  key, runs this retire-key, shreds the key on every exit status and
+  starts the signer only after exit 0. Without the key at the stored path
+  it reports `not removed:` naming `mgmt-key-file` and exits 1, and the
+  signer stays stopped until the block runs again with the key. The slot
+  stays recorded and is never reused. That the overwrite destroys the old
+  key is UNVERIFIED on a real card.
 
 Other refusals: `no_draining_entry` (the installed bundle drains no key
 of that role), `restore_recovery_pending`, `draining_generation_unknown`
@@ -1025,8 +1120,12 @@ locally: the hold-first rule above is the control there. After a restore,
 a `<role>-g<N>.age` file in the state directory's `software` directory
 that no generation row names (doctor warns `unrecorded_generation_file`)
 is, when no prepare is running, normally a key from a prepare that the
-restore lost: destroy it unless you placed it for a `--key` prepare, and
-never record a lost key with `--key`. (Run in CI: TestRestoreMarker,
+restore lost: destroy it unless you placed it for a `--key` prepare, but
+only once this restore has run to its end ("Restore from before the last
+switch" included), because where it stops on a lost generation the file
+may hold that generation's key, and never record a lost key with
+`--key`. The same holds for a `<role>-g<N>.tpmkey` and `.auth` pair in
+the `tpm` directory that no generation row names. (Run in CI: TestRestoreMarker,
 TestRestoreRunbookChecks and the `systemd-sandbox` job, where smoke.sh
 runs the block and the marker's lifecycle under the real units.)
 
@@ -1828,7 +1927,12 @@ structurally (see the warning above).
      with that bundle (see
      [Install a successor bundle](#install-a-successor-bundle-stop-install-start)),
      and start it again only if a lost directory version follows.
-     (UNVERIFIED: no test replays a lost bundle.)
+     (UNVERIFIED: no test replays a lost bundle.) If `install-bundle`
+     refuses that bundle with `no stored generation`, stop: the bundle
+     names a CA key generation that the restored database lacks (a lost
+     generation, which is 03-13's case), this restore has not run to its
+     end, and a key file or a PIV slot key that no generation row names is
+     kept, not destroyed.
    - **A lost `directory_install`:** write it back as a proposal from the
      saved export, which step 2 verified, and install it with `keyroster
      directory install`, one version at a time, in log order:
@@ -2228,6 +2332,24 @@ option stored at ca-init), no line may show that fingerprint:
 ```
 runuser -u keyroster-signer -g keyroster-signer -G tss -- env SSH_AUTH_SOCK=<socket> ssh-add -l
 ```
+
+With the tpm backend, the old generation's `.tpmkey` and `.auth` files
+(`user.tpmkey` and `user.auth` for generation 1) must not be listed, not
+even as links:
+
+```
+runuser -u keyroster-signer -g keyroster-signer -G tss -- ls -la /var/lib/keyroster-signer/tpm/
+```
+
+With the piv backend there is no file to list, and the check is still
+made for you: retire-key in step 7 and serve's start-up check read the
+recorded slot by its key, so a draining key left in its slot is caught
+there. But a restore from before a prepare leaves that generation's key
+in a slot that no restored row records, and the next prepare then
+refuses `ErrSlotOccupied`. docs/backends/piv.md "Generation slots" says
+what to do: the slot is emptied only after this section has run to its
+end, and where it stops on a lost generation the slot's key may be that
+generation's key and is not deleted.
 
 If the ceremony media lacks the switch bundle (a lost switch bundle), or
 the restored database lacks a generation row of a key the newest bundle

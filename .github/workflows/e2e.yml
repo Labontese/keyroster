@@ -131,7 +131,7 @@ jobs:
 
   # The CA rotation lane (03-12b): the tests under the build tags e2e and
   # e2erotation, which the main e2e lanes do not compile. It runs
-  # TestCANextAndAbort and TestCARotationNoFailedLogin (03-12e2); 03-12f
+  # TestCANextAndAbort and TestCARotationNoFailedLogin (03-12e2); 03-12f2
   # adds TestHostCARotation to this job's -run list and its PASS loop.
   e2e-rotation:
     name: e2e-rotation (${{ matrix.openssh }})

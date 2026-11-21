@@ -328,6 +328,43 @@ func TestDoctorUnrecordedGenerationFile(t *testing.T) {
 			t.Fatalf("doctor exited %d:\n%s", code, out)
 		}
 	})
+	t.Run("tpm_stray_files_warn", func(t *testing.T) {
+		// 03-12f: {state-dir}/tpm <role>-g<N>.tpmkey and .auth files with
+		// N of at least 2 are read the same way: recorded ones give no
+		// warning, unrecorded ones are named.
+		st, _ := bootstrapped(t)
+		if code, out := runSigner(t, "ca-rotate", "prepare", "--state-dir", st.dir, "--role", "user", "--key", st.addKey(t),
+			"--out", filepath.Join(t.TempDir(), "g2.json")); code != 0 {
+			t.Fatalf("prepare exited %d:\n%s", code, out)
+		}
+		d := filepath.Join(st.dir, "tpm")
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		put := func(t *testing.T, names ...string) {
+			t.Helper()
+			for _, n := range names {
+				if err := os.WriteFile(filepath.Join(d, n), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		put(t, "user-g2.tpmkey", "user-g2.auth")
+		if code, out := runSigner(t, "doctor", "--state-dir", st.dir); code != 0 || strings.Contains(out, "unrecorded_generation_file") {
+			t.Fatalf("doctor with the recorded generation's TPM files exited %d:\n%s", code, out)
+		}
+		put(t, "user-g3.tpmkey", "user-g3.auth")
+		code, out := runSigner(t, "doctor", "--state-dir", st.dir)
+		if code != 0 {
+			t.Fatalf("doctor exited %d:\n%s", code, out)
+		}
+		requireLine(t, out, "WARN unrecorded_generation_file: ")
+		for _, n := range []string{"user-g3.tpmkey", "user-g3.auth"} {
+			if !strings.Contains(out, filepath.Join(d, n)) {
+				t.Fatalf("the warning does not name %s:\n%s", n, out)
+			}
+		}
+	})
 	t.Run("no_software_dir_no_warning", func(t *testing.T) {
 		st, _ := bootstrapped(t)
 		code, out := runSigner(t, "doctor", "--state-dir", st.dir)
@@ -433,6 +470,47 @@ func TestDoctorSwitch(t *testing.T) {
 		st, fp1 := agentSwitchState(t)
 		if code, out := doctorRun(t, st); code == 0 || !strings.Contains(out, held(fp1)) {
 			t.Fatalf("doctor while the agent lists the draining key exited %d, want 1 with\n%s\ngot:\n%s", code, held(fp1), out)
+		}
+	})
+	// asTPM rewrites st's stored backend name to tpm, as
+	// TestRetireKey/unsupported_backend_refused rewrites it, and makes a
+	// private tpm key directory holding the given empty files (03-12f).
+	// doctor checks a TPM generation by its files and opens no TPM for it;
+	// its TPM inspection then fails on the agent options, which these
+	// cases do not assert.
+	asTPM := func(t *testing.T, st *rotateState, names ...string) {
+		t.Helper()
+		db, err := sql.Open("sqlite", st.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = db.Exec(`UPDATE backend_config SET name = ? WHERE id = 1`, "tpm")
+		_ = db.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := filepath.Join(st.dir, "tpm")
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range names {
+			if err := os.WriteFile(filepath.Join(d, n), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Run("tpm_held_fails", func(t *testing.T) {
+		st, fp1 := agentSwitchState(t)
+		asTPM(t, st, "user.auth")
+		if code, out := doctorRun(t, st); code == 0 || !strings.Contains(out, held(fp1)) {
+			t.Fatalf("doctor with generation 1's TPM auth file present exited %d, want 1 with\n%s\ngot:\n%s", code, held(fp1), out)
+		}
+	})
+	t.Run("tpm_removed_clean", func(t *testing.T) {
+		st, _ := agentSwitchState(t)
+		asTPM(t, st)
+		if _, out := doctorRun(t, st); strings.Contains(out, "draining_key_") {
+			t.Fatalf("doctor with generation 1's TPM files gone reports a draining key:\n%s", out)
 		}
 	})
 	t.Run("agent_unreachable_warns", func(t *testing.T) {

@@ -36,6 +36,20 @@ Ed25519). For each role the signer keeps two files in
   state directory (for example another member of group `tss`) cannot use the
   key.
 
+From the second generation a role also has `{role}-g<N>.tpmkey` and
+`{role}-g<N>.auth` in the same directory, mode 0600, created inside the TPM
+with `noDA` by `keyroster-signer ca-rotate prepare`, opened only by
+generation, and removed by `ca-rotate retire-key` right after the switch
+that makes the generation draining (run in CI on swtpm:
+TestTPMGenerationFiles, TestTPMKeyAtExact, TestTPMRemoveGeneration and
+TestTPMCARotation; UNVERIFIED on a physical TPM
+and on the homelab vTPM signer). retire-key deletes the wrapped blobs, and
+destroys nothing inside the TPM: an earlier copy of both files (a VM
+snapshot, a hypervisor backup that holds the vTPM state, a hand copy of the
+state directory, or unerased blocks on an SSD or a copy-on-write
+filesystem) still signs on the same TPM until its owner hierarchy is
+cleared.
+
 The keys are created with **`noDA`**: a wrong auth value does not count
 against the TPM's dictionary-attack counter. That counter is TPM-wide, so
 without `noDA` a corrupt auth file could lock the TPM out for every other
@@ -114,9 +128,12 @@ has `<role>-g<N>.age` in the same directory, mode 0600, created by
 `keyroster-signer ca-rotate prepare` and opened only through generation
 addressing (03-12); one that no generation row names is, unless you placed
 it for a `--key` prepare, a key from a lost prepare, to be destroyed and
-not recorded again (run in CI: TestProvisionGeneration; UNVERIFIED on the
-homelab signer). The bundle, `ca-pubkeys.json` and the
-`ca_init` log entry record custody `software` for every key.
+not recorded again, but after a restore only once the restore section of
+[signer-install.md](../runbooks/signer-install.md) has run to its end,
+because where that section stops on a lost generation the file may hold
+that generation's key (run in CI: TestProvisionGeneration; UNVERIFIED on
+the homelab signer). The bundle, `ca-pubkeys.json` and the `ca_init` log
+entry record custody `software` for every key.
 
 **This custody is for evaluation only.** It does not protect against:
 

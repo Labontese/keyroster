@@ -8,9 +8,12 @@ name: E2E TPM
 # production device path (/dev/tpmrm0) is not exercised here; see
 # docs/security/custody.md.
 #
-# The job also runs the TPM keystore unit tests under -race with swtpm
+# The job also runs the TPM keystore unit tests and the signer's TPM rotation
+# leg (TestSignerRestartMixedBundle/tpm, 03-12f) under -race with swtpm
 # present (KEYROSTER_TPM_REQUIRE=1 turns a missing swtpm into a failure); the
-# build-test job has no swtpm and skips them.
+# build-test job has no swtpm and skips them. Each of the two steps checks its
+# log for a PASS line of every named test, so a test that skipped or was
+# filtered out fails the step.
 
 on:
   push:
@@ -64,7 +67,20 @@ jobs:
       - name: Run the TPM keystore unit tests (race detector)
         env:
           KEYROSTER_TPM_REQUIRE: "1"
-        run: CGO_ENABLED=1 go test -race -count=1 -v ./internal/keystore/tpm/...
+        run: |
+          CGO_ENABLED=1 go test -race -count=1 -v ./internal/keystore/tpm/... 2>&1 | tee "$RUNNER_TEMP/tpm-unit.log"
+          for t in TestTPMGenerationFiles TestTPMProvisionGenerationRefusals TestTPMKeyAtExact TestTPMHolds TestTPMRemoveGeneration; do grep -q -- "^--- PASS: $t (" "$RUNNER_TEMP/tpm-unit.log" || { echo "the log has no PASS line for $t" >&2; exit 1; }; done
+      # The leg starts a private swtpm of its own, so it runs before the
+      # job's swtpm. go test indents a subtest's result line, so its PASS
+      # check is not anchored at column 0; a skipped leg fails the step.
+      - name: Run the signer's TPM rotation leg (race detector)
+        env:
+          KEYROSTER_TPM_REQUIRE: "1"
+        run: |
+          LOG="$RUNNER_TEMP/tpm-rotation-leg.log"
+          CGO_ENABLED=1 go test -race -count=1 -timeout 15m -v -run '^TestSignerRestartMixedBundle$/^tpm$' ./cmd/keyroster-signer/ 2>&1 | tee "$LOG"
+          grep -qE -- '^ *--- PASS: TestSignerRestartMixedBundle/tpm \(' "$LOG"
+          if grep -qF -- '--- SKIP: TestSignerRestartMixedBundle/' "$LOG"; then echo "the TPM rotation leg skipped" >&2; exit 1; fi
       - name: Start swtpm
         run: |
           dir="$RUNNER_TEMP/swtpm"
@@ -76,6 +92,11 @@ jobs:
           echo "KEYROSTER_TPM_OPTS=$KEYROSTER_TPM_OPTS"
           KEYROSTER_OPENSSH_PREFIX="$HOME/.cache/keyroster/openssh-$OPENSSH_VERSION" \
             go test -tags e2e_tpm -count=1 -v ./test/e2e/... 2>&1 | tee e2e-logs/go-test-tpm.log
+      # The suite runs every e2e_tpm test with no -run; a rotation test that
+      # skipped or did not run fails here (03-12f).
+      - name: Check that the TPM rotation test ran and passed
+        run: |
+          grep -q -- '^--- PASS: TestTPMCARotation (' e2e-logs/go-test-tpm.log || { echo "the log has no PASS line for TestTPMCARotation" >&2; exit 1; }
       - name: Collect the swtpm log
         if: always()
         run: |

@@ -24,7 +24,7 @@ they do not contain the backend or piv-go. Build the signer yourself with
 the `piv` build tag:
 
 ```
-sudo apt-get install libpcsclite-dev     # Debian/Ubuntu: pcsc-lite headers
+sudo apt-get install gcc libpcsclite-dev pkg-config     # Debian/Ubuntu: a C compiler for cgo, the pcsc-lite headers, and pkg-config to find them
 CGO_ENABLED=1 go build -tags piv -o keyroster-signer ./cmd/keyroster-signer
 go version -m keyroster-signer | grep -E 'piv-go|CGO_ENABLED|-tags'
 ```
@@ -59,9 +59,68 @@ The five keys use retired key-management slots, so the standard slots 9a,
 | machine | 0x84 |
 | ops | 0x85 |
 | log | 0x86 |
+| generations 2 and later, every role | 0x87 to 0x95 |
 
-`ca-init` refuses, and generates nothing, if any of these slots already
-holds a key. It never overwrites a key.
+The generation slots 0x87 to 0x95, 15 in all, are shared by every role's
+later generations: `ca-rotate prepare` takes the first that no generation
+row records, and a slot is never reused, even after retire-key overwrote
+it (see "Generation slots").
+
+`ca-init` refuses, and generates nothing, if any of the five genesis slots
+0x82 to 0x86 already holds a key. It never overwrites a key, and neither
+does prepare, with one exception: retire-key overwrites the draining
+generation's own slot with a throwaway key, after checking that it holds
+that key. The first retire-key of a role overwrites a genesis slot, 0x82
+for the user CA.
+
+## Generation slots
+
+A key in a generation slot that no generation row records is a key the
+signer's database does not know. It arises from a lost prepare (the card
+generated the key and the row was not committed), from a `signer.db`
+restored from before a prepare, or from a key put there by hand.
+`ca-rotate prepare` then refuses `ErrSlotOccupied`, printed as
+`slot already holds a key` and naming that slot, on every later run, for
+every role, because the allocator takes the first slot that no row
+records and never writes over an occupied one. Overwriting the slot by
+hand does not clear it, because the slot stays occupied.
+
+On firmware 5.7 and later the way out is `ykman piv keys delete <slot>`,
+run only when this rule allows it:
+
+- Never on a restored database before the restore section of
+  [signer-install.md](../runbooks/signer-install.md) has run to its end.
+- Never while a signed bundle waits to be installed: first every trust
+  bundle that a ceremony has signed is installed on this signer. Where
+  `install-bundle` refuses a bundle with `no stored generation`, the
+  database lacks a generation that a bundle names (the lost generation
+  that signer-install.md "Restore from before the last switch" stops on),
+  the slot's key may be that generation's key, and it is not deleted.
+  With every signed bundle installed, no bundle names a key in a slot that
+  no generation row records, so no host trusts that key and no signer
+  needs it, because the signer installs no bundle that names a key that
+  is no stored generation.
+- Never a key you keep in a generation slot for another use. keyroster
+  uses 0x87 to 0x95 for generations, so a key of another use there stops
+  PIV rotation.
+
+A prepare's own report of the key is no reason to keep it: the error of a
+prepare that created the key and could not record it says
+`the backend created the key` and gives its fingerprint and slot, and a
+successful prepare's fingerprint and `location:` line stand in the
+transcript from before a restore. The refusal itself names the slot and
+not the key.
+
+The signer holds the card while it runs, so it is stopped for the
+delete, as the first line of step 5's block stops it. `ykman` asks for
+the management key: give it at the prompt from the password manager,
+never write it to a file and never pass it on the command line. The
+block of step 5, run again for the prepare, starts the signer.
+
+Below firmware 5.7 nothing empties a slot short of `ykman piv reset`,
+which destroys every PIV key on the card, the working CA keys included,
+and firmware cannot be upgraded on a YubiKey. Every `ykman` command of
+this section is UNVERIFIED.
 
 ## PIN policy once, touch policy never
 
@@ -213,26 +272,72 @@ repeat from step 1.
 ### 5. Remove the management key from the signer host
 
 Signing needs only the PIN. The management key is needed again only to
-generate keys, so move it off the host after `ca-init`:
+generate keys, so move it off the host after `ca-init`.
+`/etc/keyroster-signer/piv` belongs to the signer's user (step 3), so
+every command of this step that names it runs as that user, never as
+root below that directory:
 
 ```
-sudo shred -u /etc/keyroster-signer/piv/mgmt-key
+sudo runuser -u keyroster-signer -- shred -u /etc/keyroster-signer/piv/mgmt-key
 ```
+
+Step 3's root `sudo install` form is for the first setup only, while root
+has just created the directory, and is never used again.
 
 `ca-init` stored the backend options, including the `mgmt-key-file` path.
-Override that option with an empty value whenever you run `install-bundle`
-or `serve`, so the signer does not look for the file:
+The signer reads the management key only when it writes to the card
+(ca-init, prepare and retire-key), so `install-bundle`, `serve`, `doctor`
+and every other command run with the file absent and need no override;
+an empty override (`--backend-opt mgmt-key-file=`) is still accepted. The
+shipped unit's `serve` carries no override, and the signer's PIV leg
+opens the backend as serve does, with the stored options and no
+override; no test starts the systemd unit on a PIV signer, which stays
+UNVERIFIED.
+
+`ca-rotate prepare` and `ca-rotate retire-key` write to the card, so a
+CA rotation brings the key back for the one command and takes it out
+again, in one block run on the signer host:
 
 ```
-keyroster-signer serve ... --backend-opt mgmt-key-file=
+sudo systemctl stop keyroster-signer.service
+K=/etc/keyroster-signer/piv/mgmt-key
+sudo runuser -u keyroster-signer -- rm -f "$K"
+sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$K"
+sudo runuser -u keyroster-signer -- keyroster-signer ca-rotate <arguments> --state-dir /var/lib/keyroster-signer; rc=$?; sudo runuser -u keyroster-signer -- shred -u "$K"; test "$rc" -eq 0 && sudo systemctl start keyroster-signer.service
 ```
+
+`<arguments>` is `prepare --role <role> --out <file>` or
+`retire-key --role <role>`, as the runbook step names them. Paste the key
+from the password manager into the `cat` of the fourth line and end it
+with Ctrl-D. The path is the one ca-init stored, so no `--backend-opt` is
+needed. The shred runs on every exit status of the command, so the key
+leaves the host whatever prepare or retire-key returned. The signer is
+started only after the shred, and only when the command exited 0:
+
+- after a refused prepare the key is already shredded and the signer is
+  still stopped, so run `sudo systemctl start keyroster-signer.service`
+  by hand (the refusal wrote nothing the signer serves), fix the cause,
+  and run the block again;
+- after a refused retire-key the signer stays stopped until the block
+  runs again with the key and retire-key exits 0;
+- if the last line did not run to its end (an interrupt such as Ctrl-C,
+  which skips the rest of that line, a lost session, or a failed shred),
+  or you stopped after placing the key, run
+  `sudo runuser -u keyroster-signer -- shred -u /etc/keyroster-signer/piv/mgmt-key`
+  by hand before anything else (the full path, because a new shell has
+  no `K`).
+
+`shred` does not reliably erase a file on an SSD or a copy-on-write
+filesystem, so the key's old blocks may survive on such storage. While
+the key is on the host, whoever reads it can overwrite or replace any
+slot.
 
 ## Options
 
 | Option | Required | Meaning |
 |---|---|---|
 | `pin-file` | yes | File with the PIV PIN (mode 0600 or stricter). The default PIN is refused. |
-| `mgmt-key-file` | for `ca-init` only | File with the management key in hex (mode 0600 or stricter). The default management key is refused. |
+| `mgmt-key-file` | for `ca-init`, `ca-rotate prepare` and `ca-rotate retire-key` | File with the management key in hex (mode 0600 or stricter), read only when one of them writes to the card. The default management key is refused. |
 | `serial` | no | Serial number of the YubiKey to use. Without it, exactly one YubiKey must be attached. |
 
 The backend also refuses a key that was imported into a slot rather than
@@ -267,10 +372,22 @@ The `PIV` workflow (`.github/workflows/piv.yml`, check `build-piv`):
 
 - vets and lints the tagged package and runs its unit tests under `-race`
   against an in-memory fake card that holds real Ed25519 and P-256 keys;
+  the fake card (`internal/keystore/piv/fake.go`) is compiled only with
+  `-tags piv,pivfake`;
+- runs the signer's PIV rotation leg (`TestSignerRestartMixedBundle/piv`)
+  at command level on the fake card, under `-race`, with the
+  management-key file absent except for prepare and retire-key;
 - builds `keyroster-signer` with `-tags piv` and checks that it links piv-go
-  with `CGO_ENABLED=1`;
+  with `CGO_ENABLED=1`, and proves that this release binary holds no fake
+  card by its file list, its build info (exactly `-tags=piv`) and its
+  symbols (on a stripped `-s -w` build only the first two checks work);
 - checks that the default `keyroster` and `keyroster-signer` builds link
   neither piv-go nor cgo.
+
+govulncheck in this workflow and CodeQL build `-tags piv` only, so they
+never see `fake.go`. The management key's block of step 5 is pinned for
+its form by `TestCARotationBackendSteps` and is never run in CI
+(UNVERIFIED).
 
 The unit tests run the backend's own code: option and secret-file checks,
 the slot map, the algorithm choice by firmware, the PIN verification at
@@ -280,7 +397,16 @@ fewer than 2 retries left or an unreadable counter, so ten starts with a
 wrong PIN leave one retry), provisioning and its refusals (occupied or
 unreadable slot, default PIN or management key, firmware below 5.3.0), the
 fingerprint pin, the imported-key refusal, signing without the management
-key, and eight concurrent signers through one card. The fake card behaves
+key, and eight concurrent signers through one card; and the generation
+slots: the allocator (the first slot of 0x87 to 0x95 that no generation
+row records, never reused, `piv_no_free_slot` with all 15 recorded, an
+occupied unrecorded slot refused `ErrSlotOccupied` with no card write),
+the location of each generation, Holds by fingerprint, the overwrite of
+the draining slot with a throwaway key, and the management key read only
+at a card write (`TestPIVGenerationAllocator`,
+`TestGenerationKeyAfterReopen`, `TestPIVGenerationSlots`,
+`TestPIVHolds`, `TestPIVRemoveGeneration`,
+`TestPIVManagementKeyAtUse`). The fake card behaves
 like piv-go as far as the backend can tell (a key signs only after the
 session is logged in with the PIN), but it is not a YubiKey. A certificate signed through the backend verifies with
 `cert.Build` and x/crypto's `CertChecker`.
@@ -293,7 +419,28 @@ session is logged in with the PIN), but it is not a YubiKey. A certificate signe
 - piv-go's own code on a real card: GET METADATA on an empty slot (expected
   to return "not found"), key generation, Ed25519 and ECDSA signatures, and
   that a session logged in once with the PIN keeps signing PIN-once keys;
-- every `ykman`, `pcscd` and polkit step on this page.
+- every `ykman`, `pcscd` and polkit step on this page;
+- the generation slots on every YubiKey: generating into 0x87 to 0x95;
+  reading a slot's metadata when it is empty, overwritten or never used;
+  that an overwrite is atomic and destroys the old private key (Yubico's
+  documented behaviour, not observed here); signing from a generation
+  slot after a reopen in a separate process; the algorithm per firmware
+  for generations; PIN once across processes; the card's answer to a
+  wrong management key; `ykman piv keys delete <slot>` and
+  `ykman piv reset`; and the 15-slot exhaustion on a real card, which CI
+  checks on the fake card only. Deletion on firmware 5.7 and later is not
+  implemented: the pinned piv-go v2.6.0 has no delete command, so
+  retire-key overwrites on every firmware;
+- a key in a generation slot that no generation row records stops PIV
+  rotation, for every role, until the slot is emptied ("Generation
+  slots"); overwriting the slot by hand does not clear it;
+- the management key file is shredded, not proven erased: `shred` does
+  not reliably erase a file on an SSD or a copy-on-write filesystem;
+- the location column is not logged: a database edit of a PIV
+  generation's location is stopped by the fingerprint checks before any
+  card write, but an edit that points at any slot that does not hold the
+  draining key makes Holds answer "not held", and audit cannot show which
+  slot a generation used.
 
 These are tracked in [needs-hardware.md](../security/needs-hardware.md) for
 the Phase 6 review (D-12).

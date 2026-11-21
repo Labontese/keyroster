@@ -74,31 +74,11 @@ func (b *backend) Provision(roles []keystore.Role) (map[keystore.Role]ssh.Public
 		if _, err := rand.Read(c.auth); err != nil {
 			return nil, err
 		}
-		tpmMu.Lock()
-		k, err := createKey(b.tpm, c.auth, "keyroster "+string(role)+" key")
-		tpmMu.Unlock()
-		if err != nil {
-			return nil, fmt.Errorf("keystore tpm: create the %s key: %w", role, err)
-		}
-		cpub, err := k.PublicKey()
+		pub, pem, err := b.newKey(c.auth, string(role))
 		if err != nil {
 			return nil, err
 		}
-		ec, ok := cpub.(*ecdsa.PublicKey)
-		if !ok {
-			return nil, fmt.Errorf("keystore tpm: the TPM created a %T for role %s", cpub, role)
-		}
-		pub, err := ssh.NewPublicKey(ec)
-		if err != nil {
-			return nil, err
-		}
-		if pub.Type() != ssh.KeyAlgoECDSA256 {
-			return nil, fmt.Errorf("keystore tpm: the TPM created a %s key for role %s, want %s", pub.Type(), role, ssh.KeyAlgoECDSA256)
-		}
-		c.pem = k.Bytes()
-		if len(c.pem) == 0 {
-			return nil, fmt.Errorf("keystore tpm: encode the %s key file", role)
-		}
+		c.pem = pem
 		pubs[role] = pub
 	}
 
@@ -138,6 +118,92 @@ func (b *backend) Provision(roles []keystore.Role) (map[keystore.Role]ssh.Public
 		}
 	}
 	return pubs, nil
+}
+
+// ProvisionGeneration creates the key of generation (at least 2) of role
+// inside the TPM with noDA, as Provision creates the genesis keys
+// (newKey), writes {role}-g{N}.tpmkey and {role}-g{N}.auth, mode 0600,
+// into the key directory that ca-init made, and fsyncs that directory
+// (03-12f). It ignores used, because a file name per generation needs no
+// allocation, and returns an empty location. It refuses, and writes
+// nothing, when the key directory is not private or either file already
+// exists; on a later failure it removes what it wrote.
+func (b *backend) ProvisionGeneration(role keystore.Role, generation uint32, _ []string) (ssh.PublicKey, string, error) {
+	if generation < 2 {
+		return nil, "", fmt.Errorf("keystore tpm: generation %d of role %s is not a later generation (generation 1 is ca-init's)", generation, role)
+	}
+	keyPath, authPath, err := b.keyPathsAt(role, generation)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := checkPrivateDir(b.dir); err != nil {
+		return nil, "", err
+	}
+	for _, p := range []string{keyPath, authPath} {
+		if _, err := os.Lstat(p); err == nil {
+			return nil, "", fmt.Errorf("%w: %s (after a restore, a %s-g%d.tpmkey or .auth file that no generation row names is a key from a lost prepare: once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it unless you placed it for a --key prepare)",
+				ErrKeyFilesExist, p, role, generation)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return nil, "", fmt.Errorf("keystore tpm: %w", err)
+		}
+	}
+	auth := make([]byte, authSize)
+	if _, err := rand.Read(auth); err != nil {
+		return nil, "", err
+	}
+	pub, pem, err := b.newKey(auth, fmt.Sprintf("%s generation %d", role, generation))
+	if err != nil {
+		return nil, "", err
+	}
+	if err := writeNew(keyPath, pem); err != nil {
+		return nil, "", err
+	}
+	if err := writeNew(authPath, auth); err != nil {
+		_ = os.Remove(keyPath)
+		return nil, "", err
+	}
+	// The files are the only way to use this key, and the caller (prepare)
+	// commits its fingerprint next: make the new entries durable first.
+	if err := syncDir(b.dir); err != nil {
+		_ = os.Remove(authPath)
+		_ = os.Remove(keyPath)
+		return nil, "", fmt.Errorf("keystore tpm: sync %s: %w", b.dir, err)
+	}
+	return pub, "", nil
+}
+
+// newKey creates one keyTemplate key (noDA) with auth value auth inside
+// the TPM and checks it: an ECDSA P-256 key and a non-empty TSS2 PEM. It
+// returns the public key and the key file's PEM. Provision and
+// ProvisionGeneration both create their keys here, so their template
+// cannot drift apart (03-12f). It writes nothing.
+func (b *backend) newKey(auth []byte, what string) (ssh.PublicKey, []byte, error) {
+	tpmMu.Lock()
+	k, err := createKey(b.tpm, auth, "keyroster "+what+" key")
+	tpmMu.Unlock()
+	if err != nil {
+		return nil, nil, fmt.Errorf("keystore tpm: create the %s key: %w", what, err)
+	}
+	cpub, err := k.PublicKey()
+	if err != nil {
+		return nil, nil, err
+	}
+	ec, ok := cpub.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, nil, fmt.Errorf("keystore tpm: the TPM created a %T for the %s key", cpub, what)
+	}
+	pub, err := ssh.NewPublicKey(ec)
+	if err != nil {
+		return nil, nil, err
+	}
+	if pub.Type() != ssh.KeyAlgoECDSA256 {
+		return nil, nil, fmt.Errorf("keystore tpm: the TPM created a %s key for the %s key, want %s", pub.Type(), what, ssh.KeyAlgoECDSA256)
+	}
+	pem := k.Bytes()
+	if len(pem) == 0 {
+		return nil, nil, fmt.Errorf("keystore tpm: encode the %s key file", what)
+	}
+	return pub, pem, nil
 }
 
 // syncDir fsyncs a directory. Tests replace it to see which directories
