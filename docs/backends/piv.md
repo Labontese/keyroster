@@ -436,11 +436,11 @@ session is logged in with the PIN), but it is not a YubiKey. A certificate signe
   slots"); overwriting the slot by hand does not clear it;
 - the management key file is shredded, not proven erased: `shred` does
   not reliably erase a file on an SSD or a copy-on-write filesystem;
-- the location column is not logged: a database edit of a PIV
-  generation's location is stopped by the fingerprint checks before any
-  card write, but an edit that points at any slot that does not hold the
-  draining key makes Holds answer "not held", and audit cannot show which
-  slot a generation used.
+- the location column is not logged: a database edit of a PIV generation's
+  location is stopped by the fingerprint checks before any card write, but
+  for generation 2 or later an edit that points at another generation slot,
+  one that does not hold the draining key, makes Holds answer "not held",
+  and audit cannot show which slot a generation used.
 
 These are tracked in [needs-hardware.md](../security/needs-hardware.md) for
 the Phase 6 review (D-12).

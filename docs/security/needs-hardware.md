@@ -126,18 +126,27 @@ CA key generations (docs/backends/piv.md "Generation slots" and step 5):
       first), and serve then starts.
 - [ ] The next prepare takes 0x88, never the overwritten slot.
 - [ ] The management key placed for the run by the block of piv.md step 5
-      and shredded on every exit status; retire-key without it refused
-      naming `mgmt-key-file`; the card's answer to a wrong management key.
+      and shredded on every exit status (shredded, not proven erased:
+      `shred` does not reliably erase a file on an SSD or a copy-on-write
+      filesystem); retire-key without it refused naming `mgmt-key-file`; the
+      card's answer to a wrong management key.
 - [ ] serve, `install-bundle` and doctor with the management-key file
       absent.
 - [ ] A key in the next generation slot that no row records is refused
-      `ErrSlotOccupied`, and is emptied with `ykman piv keys delete <slot>`
-      on 5.7 and later, with the signer stopped and the management key
-      given at `ykman`'s prompt (below 5.7 only `ykman piv reset`, which
-      destroys every CA key).
+      `ErrSlotOccupied`, and overwriting the slot by hand does not clear it.
+      It is emptied with `ykman piv keys delete <slot>` on 5.7 and later,
+      only when the rule of piv.md "Generation slots" allows it, with the
+      signer stopped and the management key given at `ykman`'s prompt (below
+      5.7 only `ykman piv reset`, which destroys every CA key).
 - [ ] Deletion by the signer on 5.7 and later: not implemented (a later
       hardening item); retire-key overwrites on every firmware.
 - [ ] The 15-slot exhaustion: checked on the fake card only.
+- [ ] The location column is not logged (a later hardening item): a database
+      edit of a PIV generation's location is stopped by the fingerprint
+      checks before any card write, but for generation 2 or later an edit
+      that points at another generation slot, one that does not hold the
+      draining key, makes Holds answer "not held", and audit cannot show
+      which slot a generation used.
 
 ## 3. Hardware root ceremony (D-11)
 
