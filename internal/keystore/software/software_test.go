@@ -639,6 +639,15 @@ func TestProvisionGeneration(t *testing.T) {
 		if !errors.Is(err, ErrKeyFilesExist) || !strings.Contains(err.Error(), p) {
 			t.Fatalf("ProvisionGeneration over an existing file = %v, want ErrKeyFilesExist naming %s", err, p)
 		}
+		for _, want := range []string{
+			"is a key from a lost prepare",
+			"once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it",
+			"where that section stops on a lost generation, keep it",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("ProvisionGeneration over an existing file: %v, want the lost-prepare hint with %q", err, want)
+			}
+		}
 		if data, _ := os.ReadFile(p); string(data) != "x" { //nolint:gosec // G304: a file of the test's own state directory
 			t.Fatal("ProvisionGeneration overwrote the existing file")
 		}

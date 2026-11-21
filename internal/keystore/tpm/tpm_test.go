@@ -798,7 +798,8 @@ func TestTPMProvisionGenerationRefusals(t *testing.T) {
 			_, _, err := b.ProvisionGeneration(keystore.RoleUser, 2, nil)
 			if !errors.Is(err, ErrKeyFilesExist) || !strings.Contains(err.Error(), tc.existing) ||
 				!strings.Contains(err.Error(), "is a key from a lost prepare") ||
-				!strings.Contains(err.Error(), "docs/runbooks/signer-install.md has run to its end") {
+				!strings.Contains(err.Error(), "docs/runbooks/signer-install.md has run to its end") ||
+				!strings.Contains(err.Error(), "where that section stops on a lost generation, keep it") {
 				t.Fatalf("ProvisionGeneration over %s: %v, want ErrKeyFilesExist with the lost-prepare hint", tc.existing, err)
 			}
 			got, err := os.ReadFile(filepath.Join(dir, tc.existing)) //nolint:gosec // test fixture

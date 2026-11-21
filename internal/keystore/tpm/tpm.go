@@ -73,8 +73,8 @@ var (
 	// ErrKeyNotPresent means the key file for a role holds another key
 	// than the pinned one. The backend never falls back to another key.
 	ErrKeyNotPresent = errors.New("keystore tpm: pinned CA key not present in the TPM key files")
-	// ErrKeyFilesExist means Provision found key files from an earlier
-	// run; it overwrites nothing.
+	// ErrKeyFilesExist means Provision or ProvisionGeneration found a key
+	// file that already exists; neither overwrites anything.
 	ErrKeyFilesExist = errors.New("keystore tpm: TPM key files already exist")
 	// ErrKeyFileUnreadable means RemoveGeneration found a regular file at
 	// a generation's key name that cannot be read as a TPM key file, so it

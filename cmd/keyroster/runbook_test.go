@@ -1509,7 +1509,9 @@ func pivMgmtKeyBlockProblems(win string) []string {
 // that runs as the signer's user and shreds the key on every exit status
 // before the signer starts. The rule for emptying a generation slot, the
 // abort's removal paths, what doctor shows on piv, and when a restore lets
-// an unrecorded generation key go are pinned where each is stated.
+// an unrecorded generation key go are pinned where each is stated, and so
+// is the sentence of signer-install.md's tpm paragraph on what the console
+// texts say about an unrecorded key file after a restore.
 func TestCARotationBackendSteps(t *testing.T) {
 	window := func(t *testing.T, data string, e *signingSection) string {
 		t.Helper()
@@ -1673,6 +1675,32 @@ func TestCARotationBackendSteps(t *testing.T) {
 			endNext: func(l string) bool { return strings.HasPrefix(l, "- ") }})
 		holds(t, "signer-install.md's restore bullet on a lost bundle_install", win, []string{
 			"stop: the bundle names a CA key generation that the restored database lacks", "is kept, not destroyed",
+		})
+	})
+	t.Run("unrecorded_key_files_after_restore", func(t *testing.T) {
+		// The software paragraph and the tpm paragraph, each read as a
+		// window of its own, let an unrecorded file go only after the
+		// restore section has run to its end, and the tpm paragraph's
+		// sentence on the console texts says the same for both backends.
+		data := signerInstall(t)
+		section := &signingSection{id: "prepare", file: "signer-install.md", section: "Prepare a CA key generation"}
+		softWin := window(t, data, &signingSection{id: "prepare_software", file: "signer-install.md", within: section,
+			start: "With the software backend,", end: "With the tpm backend,"})
+		holds(t, `the software paragraph of signer-install.md "Prepare a CA key generation"`, softWin, []string{
+			"but only after the restore section has run to its end",
+		})
+		tpmWin := window(t, data, &signingSection{id: "prepare_tpm", file: "signer-install.md", within: section,
+			start: "With the tpm backend,", end: "With the piv backend,"})
+		holds(t, `the tpm paragraph of signer-install.md "Prepare a CA key generation"`, tpmWin, []string{
+			"but only after the restore section has run to its end",
+			"destroy such a file only once the restore section has run to its end, and keep it where that section stops on a lost generation",
+		})
+		if strings.Contains(normalizeSpace(window(t, data, section)), "both say to destroy such a file after a restore") {
+			t.Errorf(`signer-install.md "Prepare a CA key generation" still says the console texts "both say to destroy such a file after a restore"`)
+		}
+		restore := window(t, data, &signingSection{id: "restore", file: "signer-install.md", section: "Snapshot restore: check the clock first"})
+		holds(t, `signer-install.md "Snapshot restore: check the clock first"`, restore, []string{
+			"but only once this restore has run to its end", "The same holds for a `<role>-g<N>.tpmkey` and `.auth` pair",
 		})
 	})
 }

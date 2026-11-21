@@ -501,8 +501,10 @@ func TestDoctorGenerations(t *testing.T) {
 }
 
 // TestDoctorGenerationFiles (03-12): a <role>-g<N>.age file that no
-// generation row names is a WARN that names every such path and states the
-// conditions under which it is a lost prepare's key.
+// generation row names is a WARN that names every such path, states the
+// conditions under which it is a lost prepare's key, and says when it may
+// be destroyed: only once the restore section of signer-install.md has run
+// to its end, and never where that section stops on a lost generation.
 func TestDoctorGenerationFiles(t *testing.T) {
 	paths := []string{"/var/lib/keyroster-signer/software/user-g3.age", "/var/lib/keyroster-signer/software/host-g2.age"}
 	t.Run("warns_for_unrecorded_file", func(t *testing.T) {
@@ -519,7 +521,12 @@ func TestDoctorGenerationFiles(t *testing.T) {
 		f := healthy(t)
 		f.UnrecordedGenerationFiles = paths[:1]
 		r := requireOne(t, Run(f), WARN, "unrecorded_generation_file")
-		for _, want := range []string{"no generation row names this file", "unless you placed it for a --key prepare"} {
+		for _, want := range []string{
+			"no generation row names this file", "unless you placed it for a --key prepare",
+			"if no prepare is running and a restore preceded it", "it is a key from a lost prepare",
+			"once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it",
+			"where that section stops on a lost generation, keep it", "never record it again with --key",
+		} {
 			if !strings.Contains(r.Message, want) {
 				t.Fatalf("the warning lacks %q: %s", want, r.Line())
 			}

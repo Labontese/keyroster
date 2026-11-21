@@ -287,10 +287,13 @@ func TestDoctorGenerationsAndMarker(t *testing.T) {
 	t.Fatalf("doctor printed no OK generations line:\n%s", out)
 }
 
-// TestDoctorUnrecordedGenerationFile (03-12): a {state-dir}/software
-// <role>-g<N>.age file that no generation row names is a WARN naming it;
-// a recorded one, or no software directory, gives none. doctor lists names
-// only, so the files may be empty.
+// TestDoctorUnrecordedGenerationFile (03-12, 03-12f): a
+// {state-dir}/software <role>-g<N>.age file or a {state-dir}/tpm
+// <role>-g<N>.tpmkey and .auth pair that no generation row names is a WARN
+// naming it, and the printed line lets it be destroyed only once the
+// restore section of signer-install.md has run to its end; a recorded one,
+// or no software directory, gives none. doctor lists names only, so the
+// files may be empty.
 func TestDoctorUnrecordedGenerationFile(t *testing.T) {
 	soft := func(t *testing.T, dir string, names ...string) {
 		t.Helper()
@@ -314,6 +317,9 @@ func TestDoctorUnrecordedGenerationFile(t *testing.T) {
 		requireLine(t, out, "WARN unrecorded_generation_file: ")
 		if !strings.Contains(out, filepath.Join(st.dir, "software", "user-g3.age")) {
 			t.Fatalf("the warning does not name the file:\n%s", out)
+		}
+		if want := "once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it"; !strings.Contains(out, want) {
+			t.Fatalf("the warning lacks %q:\n%s", want, out)
 		}
 	})
 	t.Run("recorded_file_no_warn", func(t *testing.T) {
@@ -363,6 +369,9 @@ func TestDoctorUnrecordedGenerationFile(t *testing.T) {
 			if !strings.Contains(out, filepath.Join(d, n)) {
 				t.Fatalf("the warning does not name %s:\n%s", n, out)
 			}
+		}
+		if want := "once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it"; !strings.Contains(out, want) {
+			t.Fatalf("the warning lacks %q:\n%s", want, out)
 		}
 	})
 	t.Run("no_software_dir_no_warning", func(t *testing.T) {

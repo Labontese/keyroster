@@ -198,7 +198,8 @@ type Facts struct {
 	// the state directory, empty when there is none (03-12).
 	RestoreMarker string
 	// UnrecordedGenerationFiles are the {state-dir}/software/<role>-g<N>.age
-	// files that no generation row names (03-12).
+	// files and the {state-dir}/tpm/<role>-g<N>.tpmkey and .auth files that
+	// no generation row names (03-12, 03-12f).
 	UnrecordedGenerationFiles []string
 
 	// DrainingHeld are the generations of the installed bundle's draining
@@ -387,8 +388,8 @@ func switchTime(u uint64) string {
 }
 
 // generationResults lists the CA key generations, warns about a software
-// key file of a later generation that no row names, and warns about an
-// installed bundle dated after this clock (03-12).
+// or tpm key file of a later generation that no row names, and warns about
+// an installed bundle dated after this clock (03-12, 03-12f).
 func generationResults(f Facts) []Result {
 	var rs []Result
 	if len(f.Generations) > 0 {
@@ -412,7 +413,7 @@ func generationResults(f Facts) []Result {
 	}
 	if len(f.UnrecordedGenerationFiles) > 0 {
 		rs = append(rs, Result{Level: WARN, Code: CodeUnrecordedGenerationFile, Message: fmt.Sprintf(
-			"%s: no generation row names this file; if no prepare is running and a restore preceded it, it is a key from a lost prepare: destroy it unless you placed it for a --key prepare, and never record it again with --key",
+			"%s: no generation row names this file; if no prepare is running and a restore preceded it, it is a key from a lost prepare: once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it unless you placed it for a --key prepare; where that section stops on a lost generation, keep it, because it may hold that generation's key; never record it again with --key",
 			strings.Join(f.UnrecordedGenerationFiles, ", "))})
 	}
 	if f.Bundle != nil {
