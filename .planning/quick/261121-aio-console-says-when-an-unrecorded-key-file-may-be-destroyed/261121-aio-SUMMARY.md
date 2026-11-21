@@ -32,14 +32,14 @@ metrics:
 actuals:
   tokens: 5500
   tasks: 3
-  commits: 4
+  commits: 6
 plan_head_before: 3d0d1b4
-plan_head_after: 3f4f912
+plan_head_after: e2be623
 ---
 
 # Quick 261121-aio Plan 01: the console says when an unrecorded key file may be destroyed Summary
 
-doctor's `unrecorded_generation_file` warning and the software backend's refusal over an existing `<role>-g<N>.age` file now say what the tpm refusal has said since 03-12f: destroy an unrecorded later-generation key file only once the restore section of signer-install.md has run to its end. All three texts also say to keep the file where that section stops on a lost generation, and the runbook sentence that describes them says the same. Only string literals and comments change in the Go code; no behaviour changes. The four commits of the work are 2c7fff7 (the plan), d7cb63f (the tests), 7a5a792 (the texts) and 3f4f912 (the runbook); the commit that records this SUMMARY follows them, so `commits: 4` counts the work before this record.
+doctor's `unrecorded_generation_file` warning and the software backend's refusal over an existing `<role>-g<N>.age` file now say what the tpm refusal has said since 03-12f: destroy an unrecorded later-generation key file only once the restore section of signer-install.md has run to its end. All three texts also say to keep the file where that section stops on a lost generation, and the runbook sentence that describes them says the same. Only string literals and comments change in the Go code; no behaviour changes. The commits are 2c7fff7 (the plan), d7cb63f (the tests), 7a5a792 (the texts), 3f4f912 (the runbook), c7ce9dc (the first form of this SUMMARY) and, in the fix round after the pre-merge review, e2be623 (the tests' paragraph windows and the doctor warning's guard). The commit that adds the pre-merge review to this SUMMARY follows them. `commits: 6` is `git rev-list --count 3d0d1b4..e2be623`: every commit of the branch before that last record, the first record included; `plan_head_after` is e2be623.
 
 ## Why
 
@@ -80,11 +80,11 @@ Comments, checked against the code first: `Facts.UnrecordedGenerationFiles` and 
 
 ## Tests
 
-- `TestDoctorGenerationFiles/warn_text_states_the_conditions` (internal/doctor): the warning holds "no generation row names this file", "unless you placed it for a --key prepare", "once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it" (one string, so the condition stands directly before the verb), "where that section stops on a lost generation, keep it" and "never record it again with --key".
+- `TestDoctorGenerationFiles/warn_text_states_the_conditions` (internal/doctor): the warning holds "no generation row names this file", "unless you placed it for a --key prepare", (since the fix round) "if no prepare is running and a restore preceded it" and "it is a key from a lost prepare", "once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it" (one string, so the condition stands directly before the verb), "where that section stops on a lost generation, keep it" and "never record it again with --key".
 - `TestProvisionGeneration/refuses_existing_file` (internal/keystore/software): besides `ErrKeyFilesExist`, the path and the unchanged file, the error holds "is a key from a lost prepare", the condition and the keep clause.
 - `TestTPMProvisionGenerationRefusals/existing_key_file_refused` and `/existing_auth_file_refused` (internal/keystore/tpm, against swtpm): the error also holds the keep clause.
 - `TestDoctorUnrecordedGenerationFile/stray_file_warns` and `/tpm_stray_files_warn` (cmd/keyroster-signer): the printed doctor line holds the condition, for a software file and for a tpm pair.
-- `TestCARotationBackendSteps/unrecorded_key_files_after_restore` (cmd/keyroster): in "Prepare a CA key generation", white space normalised, "but only after the restore section has run to its end" occurs exactly twice (the software and the tpm paragraph), the new sentence is there and the old phrase "both say to destroy such a file after a restore" is not; in "Snapshot restore: check the clock first", "but only once this restore has run to its end" and "The same holds for a `<role>-g<N>.tpmkey` and `.auth` pair" are there.
+- `TestCARotationBackendSteps/unrecorded_key_files_after_restore` (cmd/keyroster): in "Prepare a CA key generation", white space normalised, the software paragraph and the tpm paragraph each hold "but only after the restore section has run to its end", the tpm paragraph holds the new sentence, and the section does not hold the old phrase "both say to destroy such a file after a restore" (until the fix round the leaf counted the phrase twice in the whole section and looked for the new sentence anywhere in it; it now reads each paragraph as a window of its own); in "Snapshot restore: check the clock first", "but only once this restore has run to its end" and "The same holds for a `<role>-g<N>.tpmkey` and `.auth` pair" are there.
 
 ## RED
 
@@ -129,7 +129,7 @@ Each was applied to the working tree after 3f4f912, alone. The unmutated run of 
 ## Left unchanged on purpose
 
 - internal/keystore/piv/piv.go, the `ErrSlotOccupied` text ("... every later PIV prepare stops here until the slot is emptied (docs/backends/piv.md)"): it tells the operator to destroy nothing, and the document it names carries the rule with its three conditions.
-- The `ca-init` hints "remove %s only if no trust bundle uses these keys" (software.go and tpm/provision.go): they concern generation-1 files, carry their own condition, and `InitCA` refuses an initialised signer before they can print (internal/signer/trust.go, `ErrAlreadyInitialised`).
+- The `ca-init` hints "remove %s only if no trust bundle uses these keys" (software.go and tpm/provision.go): the software hint can name any `.age` file of the key directory (the software backend's `Provision` refuses over any entry whose name ends in `.age`, in its first loop), and the tpm hint a generation-1 file (the tpm backend's `Provision` checks each role's generation-1 pair); each carries its own condition (no trust bundle uses these keys); and `InitCA` refuses an initialised signer before either can print (internal/signer/trust.go, `ErrAlreadyInitialised`).
 - `orphaned` in internal/signer/rotate.go ("... which no generation row records: remove it"): it names a key that the same run created.
 - docs/security/needs-hardware.md's checklist line on a planted key in a generation slot.
 
@@ -141,9 +141,79 @@ As the task's contract records it, the tree was swept for every text of this rul
 
 The runbook names 03-13 as the owner of the lost-generation case three times in signer-install.md: the sentence "The lost-bundle and lost-generation cases are 03-13's", the stop on an `install-bundle` refusal with `no stored generation` ("a lost generation, which is 03-13's case"), and the stop at the end of "Restore from before the last switch" ("those cases are 03-13's"). 03-13's plan (03-13-PLAN.md) does not yet speak of it. When 03-13 defines what happens where the restore section stops on a lost generation, it updates these three console texts, the sentence in signer-install.md and their pins, and decides whether "never record it again with --key" stays unconditional.
 
+- The piv rule (docs/backends/piv.md "Generation slots", and in short form in ca-rotation.md and signer-install.md) also forbids emptying a slot while a signed bundle waits to be installed. The rule for software and tpm key files, in the documents and in these three console texts, carries only the restore-section condition. In the state the review describes (a prepare, then ceremony 1's bundle signed but not yet installed, then a restore from before the prepare) the restore section runs to its end and the texts let the file go, although the waiting bundle names its key. No host trusts that key, and `install-bundle` refuses that bundle with `no stored generation` as long as the generation row is missing, so the cost is a repeated ceremony. 03-13 decides whether software and tpm get the same condition.
+- The texts lean on the restore section's own stops. Where the section does not notice a lost install (the review's scenario: the export after an install was skipped, and the hosts' bundle versions and the ceremony record went unread), it runs to its end, and the texts then let a file go that may hold a key in use. What the section must notice is 03-13's and the restore section's, not these texts'.
+- A prepare that stopped before it recorded its row, with no restore: the three texts say nothing for that state (the doctor warning speaks only where a restore preceded, the refusals begin "after a restore"), and the next prepare refuses over the file, so rotation stops until the operator acts without an instruction. The file then holds a key that no row and no bundle names.
+
 ## UNVERIFIED
 
 No restore of a real signer has exercised these texts. The rule itself is UNVERIFIED on the homelab signer, as custody.md says; CI runs the pins above.
+
+## Pre-merge review
+
+The orchestrator ran the review on the green PR at head c7ce9dc (2026-11-21), in a read-only detached worktree of that head. This section is written from the run's record, not from a description of what the review was meant to do.
+
+### Who reviewed what
+
+Three agents in one run, and Codex:
+
+- One lens on Opus at high effort, "texts-and-pins". It read the diff, this task's PLAN, this SUMMARY and the PR text in full, and the code and the document sections around the three texts in part; it lists the parts of signer-install.md's restore section and of the surrounding Go files that it did not read. On a private copy of the tree it ran the five narrow test commands, the runbook pattern (16 top-level tests, no SKIP), the RED again on a copy of d7cb63f (the same seven leaves at the lines of the table above), and five mutants of its own.
+- One Codex lens at high effort (159 s, 104,816 tokens), started through a thin runner on Sonnet at low effort whose only task was to start Codex and hand back its result. It read the diff and the PR text statically and reported nothing.
+- One batch skeptic on Sonnet at high effort, which judged all six items of the lens. No item was rated critical or high, so none had two skeptics.
+
+The three agents used about 376,000 tokens. The orchestrator read the whole diff of the PR before the review, then read every item and the skeptic's reason, checked each against the code and the documents at the head, and made the rulings below.
+
+### Result
+
+Six items, all from the lens. The skeptic upheld two, both at low severity, and refuted four. Neither upheld item shows a text that tells an operator to destroy a key that a host trusts; one refuted item describes how that can still happen where the restore section itself does not notice a lost install (the third item below).
+
+The lens's own statements of what it found sound: every edit in a non-test Go file is inside a string literal or a comment, and gofmt lists nothing; no non-test code, script, workflow or file under test/ matches or parses the old or the new wording; the three texts agree, the software and the tpm hint differing only in the file names; the keep clause covers the reading that the restore section "has run to its end" at the place where it stopped; the restore marker is removed before the steps that can stop on a lost generation, so the texts rightly do not lean on the marker; and the commit ids, the subjects and the RED table of this SUMMARY match the tree.
+
+### The two upheld items
+
+1. **The rule for software and tpm key files has no condition for a signed bundle that waits to be installed; the piv rule has one.** The state: a prepare, then ceremony 1's bundle signed but not yet installed, then a restore from before the prepare. No install was lost, so the restore section runs to its end, and the three texts and the documents' software and tpm paragraphs then let the file go, although the waiting bundle names its key. No host trusts that key, because the bundle was never installed, so the cost is a repeated ceremony. Ruling: the rule is not changed in this task; the difference is recorded under "Hand-over to 03-13".
+2. **This SUMMARY and the PR text gave a wrong reason for leaving the `ca-init` hints unchanged.** They said the hints "concern generation-1 files". The software backend's hint prints over any `.age` entry of the key directory (`Provision`'s first loop in software.go); only the tpm one checks each role's generation-1 pair. The decision stands on the other two reasons. Corrected under "Left unchanged on purpose" and in the PR text.
+
+### The four refuted items, and the orchestrator's rulings
+
+- **The runbook leaf counted a phrase in the section and did not check which paragraph holds it** (the lens rated it medium). Two of the lens's mutants passed the leaf: the sentence on the console texts moved into the piv paragraph, and the condition taken out of the software paragraph with the same phrase added to the piv paragraph. The skeptic refuted it as the risk of a later edit. Ruling: taken up; the leaf now reads the software paragraph and the tpm paragraph as windows of their own.
+- **The doctor pins did not hold the guard "if no prepare is running and a restore preceded it" or the statement "it is a key from a lost prepare".** The lens's mutant without the guard passed both doctor tests it ran. Refuted as test strength; the gap is older than this task. Ruling: taken up; both phrases join the leaf's list.
+- **The texts are only as strong as the restore section's own detection of a lost install.** Refuted: the scenario needs a skipped mandatory step and two missed signals, and the restore section is outside this change. Ruling: no change; named under "Hand-over to 03-13".
+- **After a prepare that stopped with no restore, the three texts say nothing.** Refuted: the wording is older than this task, and the state fails closed. Ruling: no change; named under "Hand-over to 03-13".
+
+### Recorded, not changed
+
+- The lens did not check: the full local gate, the end-to-end lanes and the piv-tag build (taken from this SUMMARY), the publish scan with the owner's private pattern files, the validity of the commit signatures (it saw that each commit carries one), the sweep of the preparation, and real hardware.
+
+### The fix round
+
+One commit changes tests only, e2be623 (`test(signer): read the runbook's paragraphs one by one and pin the doctor warning's guard`); no product code and no document changes.
+
+- `TestCARotationBackendSteps/unrecorded_key_files_after_restore` no longer counts "but only after the restore section has run to its end" in the whole section. In the house style of `remove_per_backend` it reads two windows within "Prepare a CA key generation": the software paragraph (from `With the software backend,` up to `With the tpm backend,`) must hold that phrase, and the tpm paragraph (from `With the tpm backend,` up to `With the piv backend,`) must hold it and the sentence on the console texts. The check that "both say to destroy such a file after a restore" is gone stays on the whole section, and the restore section's two phrases stay as they were. The leaf's comment and the clause of the test's doc comment say so.
+- `TestDoctorGenerationFiles/warn_text_states_the_conditions` also requires "if no prepare is running and a restore preceded it" and "it is a key from a lost prepare".
+
+Both changes pass on the unchanged texts, so the proof is by mutants, by the same rule as before: the unmutated run first, `go vet` of the mutated package exits 0, no `[build failed]`, `[setup failed]` or `--- SKIP:` line, the file restored from HEAD with its sha256 checked, `git status --short -- cmd internal test docs .github` empty afterwards, `-count=1 -timeout 5m -v` and a `-run` naming the leaf. F1 to F5 were first run on the leaf's earlier form (c7ce9dc, before e2be623): all five passed the leaf there, F1 and F2 being the two mutants of the review's lens that had passed it. After e2be623:
+
+| Mutant | Change | On c7ce9dc | After e2be623 |
+|--------|--------|------------|---------------|
+| F1 | signer-install.md: the sentence on the console texts moved from the end of the tpm paragraph to the end of the piv paragraph | passed the leaf | killed: the tpm paragraph lacks the sentence (runbook_test.go:1694) |
+| F2 | signer-install.md: ", but only after the restore section has run to its end" removed from the software paragraph, and the same words added to the piv paragraph | passed the leaf | killed: the software paragraph lacks the phrase (runbook_test.go:1689) |
+| F3 | signer-install.md: the same words removed from the tpm paragraph and added to the piv paragraph | passed the leaf | killed: the tpm paragraph lacks the phrase (runbook_test.go:1694) |
+| F4 | doctor.go: the text without "if no prepare is running and a restore preceded it, " | passed the leaf | killed: `warn_text_states_the_conditions` lacks the guard (doctor_test.go:531) |
+| F5 | doctor.go: the text without "it is a key from a lost prepare: " | passed the leaf | killed: `warn_text_states_the_conditions` lacks the statement (doctor_test.go:531) |
+| D1 | as in the first round | | killed: the tpm paragraph lacks the new sentence (:1694), and the section still holds the old phrase (:1699) |
+| D2 | as in the first round | | killed: the software paragraph lacks the phrase (:1689), on a paragraph window, not on a count |
+| D3 | as in the first round | | killed: the tpm paragraph lacks the phrase (:1694), on a paragraph window, not on a count |
+| D4 | as in the first round | | killed: the restore section lacks "but only once this restore has run to its end" (:1702) |
+
+Checks of the fix round, on e2be623:
+
+- The narrow runs of the two changed leaves: pass. The runbook pattern `go test -count=1 -timeout 15m -v -run "Runbook|CARotation|SignerInstall|MoveAside|Restore" ./cmd/keyroster/`: 16 top-level tests pass, no SKIP.
+- `go test -race -count=1 ./internal/doctor/ ./cmd/keyroster/`: ok (internal/doctor 1.066 s, cmd/keyroster 320.944 s).
+- The vet, gofmt and golangci-lint legs of the full gate, taken from line 674 of 03-12f-PLAN.md (every `go vet` form, `bash -n test/systemd/smoke.sh`, `test -z "$(gofmt -l .)"` and the four golangci-lint passes): exit 0 in 121 s, 0 issues in each lint pass. The long `go test -race ./...` leg was not run again, because no non-test code changes and CI runs every package.
+- The publish scan with the owner's two private pattern files, the word scan and the authorship check, over the branch and its commit messages: no hit; Daniel Gustafsson is the only author and keyroster-bot the only committer.
+
+The orchestrator's rulings on this session's deviations: deviation 1 (the gate re-run for the recorded `clock_regression` flake), deviation 2 and deviation 3 are accepted as recorded.
 
 ## Deviations from Plan
 
