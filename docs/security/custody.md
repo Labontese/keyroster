@@ -50,6 +50,17 @@ state directory, or unerased blocks on an SSD or a copy-on-write
 filesystem) still signs on the same TPM until its owner hierarchy is
 cleared.
 
+A `{role}-g<N>.tpmkey` and `.auth` pair that no generation row names (doctor
+warns `unrecorded_generation_file`) is, when no prepare is running and
+unless you placed it for a `--key` prepare, a key from a lost prepare, to be
+destroyed and not recorded again, but after a restore only once the restore
+section of [signer-install.md](../runbooks/signer-install.md) has run to its
+end, because where that section stops on a lost generation the pair may hold
+that generation's key (what doctor and prepare print for such a pair is run
+in CI: TestDoctorUnrecordedGenerationFile, and on swtpm
+TestTPMProvisionGenerationRefusals; the rule itself is UNVERIFIED on a
+physical TPM and on the homelab vTPM signer).
+
 The keys are created with **`noDA`**: a wrong auth value does not count
 against the TPM's dictionary-attack counter. That counter is TPM-wide, so
 without `noDA` a corrupt auth file could lock the TPM out for every other
@@ -126,9 +137,10 @@ recipient at age's default work factor: `{state-dir}/software/{role}.age`,
 mode 0600 in a 0700 directory. From the second generation a role also
 has `<role>-g<N>.age` in the same directory, mode 0600, created by
 `keyroster-signer ca-rotate prepare` and opened only through generation
-addressing (03-12); one that no generation row names is, unless you placed
-it for a `--key` prepare, a key from a lost prepare, to be destroyed and
-not recorded again, but after a restore only once the restore section of
+addressing (03-12); one that no generation row names is, when no prepare
+is running and unless you placed it for a `--key` prepare, a key from a
+lost prepare, to be destroyed and not recorded again, but after a restore
+only once the restore section of
 [signer-install.md](../runbooks/signer-install.md) has run to its end,
 because where that section stops on a lost generation the file may hold
 that generation's key (run in CI: TestProvisionGeneration; UNVERIFIED on
