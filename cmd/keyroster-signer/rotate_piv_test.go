@@ -59,7 +59,8 @@ func withStoredBackend(t *testing.T, st *rotateState, fn func(keystore.Backend))
 // and issues with generation 1; after the switch install serve refuses;
 // retire-key without the management key is refused with no card write,
 // and with it overwrites slot 82; a second run finds nothing; doctor does
-// not ask the card; a restart issues with generation 2.
+// not ask the card, before the removal or after it; a restart issues with
+// generation 2.
 func pivLeg(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("doctor refuses to run as root; run the tests as a normal user")
@@ -166,6 +167,13 @@ func pivLeg(t *testing.T) {
 		}
 		signs(t, key)
 	})
+	// doctor does not read the card: with generation 1 still in slot 82 it
+	// prints the same unchecked line as after the removal.
+	_, out = runSigner(t, "doctor", "--state-dir", st.dir)
+	requireLine(t, out, "WARN draining_key_unchecked: user generation 1 "+fp1+": ")
+	if !strings.Contains(out, "doctor does not ask the piv backend") {
+		t.Fatalf("doctor before retire-key does not give the reason:\n%s", out)
+	}
 
 	place()
 	code, out = retireKey(t, st, "user")

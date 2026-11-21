@@ -120,7 +120,7 @@ func tpmRotKeyFiles(t *testing.T, env *signerEnv) string {
 
 // TestTPMCARotation (03-12f, D-14, KEY-08) rotates the user CA of a TPM
 // signer (swtpm, custody vtpm) end to end with the real binaries, one
-// TPM connection at a time: ca-rotate prepare creates generation 2 inside
+// signer process at a time: ca-rotate prepare creates generation 2 inside
 // the TPM, ceremony 1 makes it next, the switch makes it active, serve
 // refuses while generation 1's key and auth files are there, retire-key
 // removes both, and the signer then issues with generation 2 only.
@@ -133,9 +133,8 @@ func TestTPMCARotation(t *testing.T) {
 	tpmRotIssueAndLogin(t, env, env.UserCAPub, fp1)
 	s.stop(t)
 
-	// 2. Prepare with serve stopped (swtpm serves one connection, and the
-	// state lock is free): the TPM creates generation 2's key, stored in
-	// two files of mode 0600.
+	// 2. Prepare with serve stopped (the state lock is free): the TPM
+	// creates generation 2's key, stored in two files of mode 0600.
 	keys := t.TempDir()
 	prepared := filepath.Join(keys, "user-g2.json")
 	code, out := env.signerCmd(t, "ca-rotate", "prepare", "--state-dir", env.StateDir, "--role", "user", "--out", prepared)
@@ -209,7 +208,7 @@ func TestTPMCARotation(t *testing.T) {
 	}
 
 	// 6. retire-key removes generation 1's two files and nothing else; a
-	// second run finds nothing to remove; doctor is silent on draining keys.
+	// second run finds nothing to remove; doctor runs clean.
 	code, out = env.signerCmd(t, "ca-rotate", "retire-key", "--state-dir", env.StateDir, "--role", "user")
 	if code != 0 || !strings.Contains(out, "role user generation 1 "+fp1+": removed\n") || !strings.Contains(out, "retire-key: no draining key of role user is held\n") {
 		t.Fatalf("retire-key exited %d:\n%s", code, out)
@@ -221,8 +220,15 @@ func TestTPMCARotation(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "role user generation 1 "+fp1+": not held\n") {
 		t.Fatalf("the second retire-key exited %d:\n%s", code, out)
 	}
-	if _, out := env.signerCmd(t, "doctor", "--state-dir", env.StateDir); strings.Contains(out, "draining_key_") {
-		t.Fatalf("doctor after retire-key:\n%s", out)
+	// A clean doctor run: exit 0, its last block printed (the line
+	// ca-rotation.md tells the operator to look for), and no draining line.
+	code, out = env.signerCmd(t, "doctor", "--state-dir", env.StateDir)
+	floor := false
+	for _, l := range strings.Split(out, "\n") {
+		floor = floor || strings.HasPrefix(l, "OK switch_floor: user generation 2: ")
+	}
+	if code != 0 || !floor || strings.Contains(out, "draining_key_") {
+		t.Fatalf("doctor after retire-key exited %d, want 0 with an OK switch_floor line for user generation 2 and no draining line:\n%s", code, out)
 	}
 
 	// 7. Generation 2 signs, and an sshd that trusts only its key accepts

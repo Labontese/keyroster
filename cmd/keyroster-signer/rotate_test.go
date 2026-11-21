@@ -399,8 +399,9 @@ func signs(t *testing.T, key keystore.CAKey) {
 // runningSigner opens the database and the stored backend as serve does and
 // starts a signer on them, which is the restart, and returns it with a
 // function that closes both (03-12f). Unlike startSigner it leaves nothing
-// open until the test ends, so that a test on swtpm, which serves one
-// connection at a time, or on the fake card can open the backend again.
+// open until the test ends, so that a test can open the backend again: the
+// fake card refuses a second open (swtpm does not, because go-tpm's socket
+// transport connects for each command and disconnects after the answer).
 func runningSigner(t *testing.T, st *rotateState) (*signer.Signer, func()) {
 	t.Helper()
 	ctx := context.Background()
@@ -689,9 +690,13 @@ func TestSignerRestartMixedBundle(t *testing.T) {
 		if code != 0 || !strings.Contains(out, "role user generation 1 "+fp1+": not held\n") {
 			t.Fatalf("the second retire-key exited %d:\n%s", code, out)
 		}
-		if _, out := runSigner(t, "doctor", "--state-dir", st.dir); strings.Contains(out, "draining_key_") {
-			t.Fatalf("doctor after retire-key:\n%s", out)
+		// A clean doctor run: exit 0, its last block printed, and no
+		// draining line.
+		code, out = runSigner(t, "doctor", "--state-dir", st.dir)
+		if code != 0 || strings.Contains(out, "draining_key_") {
+			t.Fatalf("doctor after retire-key exited %d, want 0 with no draining line:\n%s", code, out)
 		}
+		requireLine(t, out, "OK switch_floor: user generation 2: ")
 		issuedBy(t, st, g, fp2)
 	})
 	t.Run("piv", func(t *testing.T) {

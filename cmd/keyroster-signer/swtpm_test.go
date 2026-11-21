@@ -18,8 +18,9 @@ import (
 // package tpm, with the same guard: KEYROSTER_SWTPM names the binary,
 // otherwise swtpm is looked up on PATH; without it the test skips, unless
 // KEYROSTER_TPM_REQUIRE=1 (set by the e2e-tpm workflow), when a missing
-// swtpm fails it. swtpm serves one client connection at a time, so a test
-// closes every backend on it before it opens the next.
+// swtpm fails it. A test still closes every backend before it opens the
+// next, but nothing on swtpm checks that: go-tpm's socket transport
+// connects for each command and disconnects after the answer.
 func startSWTPM(t *testing.T) string {
 	t.Helper()
 	bin := os.Getenv("KEYROSTER_SWTPM")
