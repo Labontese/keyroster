@@ -585,9 +585,10 @@ func TestProvisionSyncsDirectories(t *testing.T) {
 // The tests below pin CA key generations on the TPM backend (03-12f). Each
 // top-level test starts its own swtpm and opens no backend itself; each
 // leaf makes its own state directory, opens one backend, provisions the
-// five genesis keys, and closes every backend before it opens the next,
-// because swtpm serves one client connection at a time. Every refusal leaf
-// also runs its legitimate case, which must succeed.
+// five genesis keys, and closes every backend before it opens the next.
+// go-tpm's socket transport connects for each command and disconnects
+// after the answer, so swtpm does not keep a second backend out. Every
+// refusal leaf also runs its legitimate case, which must succeed.
 
 // genSetup opens a backend on sock over a fresh state directory and
 // provisions the five genesis keys. The backend is closed when t ends.
@@ -1001,6 +1002,39 @@ func TestTPMKeyAtExact(t *testing.T) {
 			t.Fatalf("KeyAt(user, 3) on a key without noDA: %v, want a refusal naming lacks noDA", err)
 		}
 	})
+	t.Run("noda_refused_before_any_tpm_command", func(t *testing.T) {
+		// A key without noDA whose auth file holds a wrong value: the
+		// refusal comes before the test signature, so the wrong value never
+		// reaches the TPM and its dictionary-attack counter stays (03-12f).
+		b, state, _, pub2 := setup(t)
+		k := createKeyWithoutNoDA(t, b, bytes.Repeat([]byte{5}, authSize))
+		cpub, err := k.PublicKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub3, err := ssh.NewPublicKey(cpub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(state, "tpm")
+		if err := os.WriteFile(filepath.Join(dir, "user-g3.tpmkey"), k.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "user-g3.auth"), bytes.Repeat([]byte{6}, authSize), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before := lockoutCounter(t, b)
+		_, err = b.KeyAt(keystore.RoleUser, 3, ssh.FingerprintSHA256(pub3), "")
+		if err == nil || !strings.Contains(err.Error(), "lacks noDA") || errors.Is(err, keystore.ErrCredentialRefused) {
+			t.Fatalf("KeyAt(user, 3) on a key without noDA and a wrong auth value: %v, want a refusal naming lacks noDA and not ErrCredentialRefused", err)
+		}
+		if after := lockoutCounter(t, b); after != before {
+			t.Fatalf("the lockout counter went from %d to %d, want no change", before, after)
+		}
+		if err := signAt(b, keystore.RoleUser, 2, pub2, ""); err != nil {
+			t.Fatalf("the noDA key of generation 2: %v", err)
+		}
+	})
 	t.Run("location_ignored", func(t *testing.T) {
 		b, _, _, pub2 := setup(t)
 		k1, err := b.KeyAt(keystore.RoleUser, 2, ssh.FingerprintSHA256(pub2), "87")
@@ -1317,5 +1351,26 @@ func TestTPMRemoveGeneration(t *testing.T) {
 		if err := b.RemoveGeneration(keystore.RoleUser, 2, ssh.FingerprintSHA256(pub2), ""); err == nil || !strings.Contains(err.Error(), "sync") || !strings.Contains(err.Error(), "injected fsync failure") {
 			t.Fatalf("RemoveGeneration(user, 2) with a failing directory sync: %v, want the sync error", err)
 		}
+	})
+	t.Run("key_directory_mode_refused", func(t *testing.T) {
+		b, state, _ := genSetup(t, sock)
+		pub2 := provisionGen(t, b, keystore.RoleUser, 2)
+		dir := filepath.Join(state, "tpm")
+		before := regularFiles(t, dir)
+		if err := os.Chmod(dir, 0o750); err != nil { //nolint:gosec // G302: the test opens the directory on purpose
+			t.Fatal(err)
+		}
+		if err := b.RemoveGeneration(keystore.RoleUser, 2, ssh.FingerprintSHA256(pub2), ""); err == nil || !strings.Contains(err.Error(), "want 0700") {
+			t.Fatalf("RemoveGeneration(user, 2) in a 0750 key directory: %v, want a refusal naming want 0700", err)
+		}
+		present(t, dir, "user-g2.tpmkey", "user-g2.auth")
+		sameFiles(t, dir, before)
+		if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: the key directory's own mode, restored
+			t.Fatal(err)
+		}
+		if err := b.RemoveGeneration(keystore.RoleUser, 2, ssh.FingerprintSHA256(pub2), ""); err != nil {
+			t.Fatalf("RemoveGeneration(user, 2) in the 0700 key directory: %v", err)
+		}
+		absent(t, dir, "user-g2.tpmkey", "user-g2.auth")
 	})
 }

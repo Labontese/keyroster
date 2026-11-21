@@ -590,8 +590,8 @@ func lastGenerated(t *testing.T, c *fakeCard, id uint32) {
 // slot from 0x87 to 0x95 that no generation row records, by the rows and
 // never by occupancy; it refuses before any card write when every slot is
 // recorded, when an entry of used is malformed or repeated, when the
-// candidate already holds a key that no row records, and without the
-// management key.
+// candidate already holds a key that no row records or cannot be read,
+// and without the management key.
 func TestPIVGenerationAllocator(t *testing.T) {
 	t.Run("first_generation_slot_is_87", func(t *testing.T) {
 		c, b, _ := genBackend(t, 5, 7, 0)
@@ -669,6 +669,24 @@ func TestPIVGenerationAllocator(t *testing.T) {
 				}
 			}
 			unchanged(t, "never_overwrites", before, c)
+		}
+	})
+	t.Run("candidate_unreadable_refused", func(t *testing.T) {
+		// A candidate slot that cannot be read is refused with the read
+		// error, never taken for empty and never generated into (03-12f).
+		c, b, _ := genBackend(t, 5, 7, 0)
+		readErr := errors.New("fake card: transmit failed")
+		c.infoErr = map[uint32]error{0x87: readErr}
+		before := stateOf(c)
+		_, _, err := b.ProvisionGeneration(keystore.RoleUser, 2, nil)
+		if !errors.Is(err, readErr) || errors.Is(err, ErrSlotOccupied) {
+			t.Fatalf("ProvisionGeneration with slot 0x87 unreadable: got %v, want the read error and not ErrSlotOccupied", err)
+		}
+		unchanged(t, "candidate_unreadable", before, c)
+		c.infoErr = nil
+		pub, loc, err := b.ProvisionGeneration(keystore.RoleUser, 2, nil)
+		if err != nil || loc != "87" || !slotHolds(c, 0x87, pub) {
+			t.Fatalf("ProvisionGeneration with slot 0x87 readable again: location %q, %v; want 87 holding its key", loc, err)
 		}
 	})
 	t.Run("used_malformed_refused", func(t *testing.T) {
