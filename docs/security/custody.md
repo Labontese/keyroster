@@ -128,9 +128,12 @@ has `<role>-g<N>.age` in the same directory, mode 0600, created by
 `keyroster-signer ca-rotate prepare` and opened only through generation
 addressing (03-12); one that no generation row names is, unless you placed
 it for a `--key` prepare, a key from a lost prepare, to be destroyed and
-not recorded again (run in CI: TestProvisionGeneration; UNVERIFIED on the
-homelab signer). The bundle, `ca-pubkeys.json` and the
-`ca_init` log entry record custody `software` for every key.
+not recorded again, but after a restore only once the restore section of
+[signer-install.md](../runbooks/signer-install.md) has run to its end,
+because where that section stops on a lost generation the file may hold
+that generation's key (run in CI: TestProvisionGeneration; UNVERIFIED on
+the homelab signer). The bundle, `ca-pubkeys.json` and the `ca_init` log
+entry record custody `software` for every key.
 
 **This custody is for evaluation only.** It does not protect against:
 

@@ -286,10 +286,10 @@ needs no wait), and the agents' host-certificate and probe answer checks
 refuse the key. Then destroy the aborted key by hand, because retire-key
 removes draining keys only, never an aborted one: delete
 `software/user-g2.age` in the state directory as the signer's user for
-the software backend (`runuser -u keyroster-signer -- rm -f "$S/software/user-g2.age"`);
+the software backend (`runuser -u keyroster-signer -- rm -f /var/lib/keyroster-signer/software/user-g2.age`);
 remove it from the ssh-agent with `ssh-add -d` for the agent backend; for
 the tpm backend delete `tpm/user-g2.tpmkey` and `tpm/user-g2.auth` as the
-signer's user (`runuser -u keyroster-signer -- rm -f "$S/tpm/user-g2.tpmkey" "$S/tpm/user-g2.auth"`),
+signer's user (`runuser -u keyroster-signer -- rm -f /var/lib/keyroster-signer/tpm/user-g2.tpmkey /var/lib/keyroster-signer/tpm/user-g2.auth`),
 which removes the wrapped key and destroys nothing inside the TPM. With
 the piv backend the key stays in its slot, which the bundle in force no
 longer trusts: the slot is the `location:` line the transcript recorded
@@ -512,8 +512,12 @@ directory.
 
 With the signer still stopped, the old key leaves the backend. Until it
 has, `serve` refuses `draining_key_still_usable` and doctor reports
-`FAIL draining_key_still_usable`. Run retire-key as the signer's user, in
-the same pinned form as the install:
+`FAIL draining_key_still_usable`. On the piv backend doctor does not read
+the card: it reports `WARN draining_key_unchecked` for the draining entry
+whether or not the key is still in its slot. There retire-key and serve's
+start check read the recorded slot by its key, so retire-key's report and
+serve's refusal, not doctor, show whether the key is still held. Run
+retire-key as the signer's user, in the same pinned form as the install:
 
 ```
 S=/var/lib/keyroster-signer
@@ -596,12 +600,14 @@ runuser -u keyroster-signer -- rm -f /tmp/ca-switch.jsonl
 keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold <N> --installation-id <installation id> /media/transfer/export.jsonl
 ```
 
-doctor prints no `draining_key_still_usable` line, and its
-`OK switch_floor` line now names generation 2. The export is copied onto
-the medium at once, as the signer's user, and its copy under `/tmp` is
-removed, as after ceremony 1's install. This copy stays off the signer
-box: it is the `--previous` of the next switch. From now on every
-certificate the signer issues is signed by generation 2.
+doctor prints no `draining_key_still_usable` line (on the piv backend the
+`WARN draining_key_unchecked` line is still printed after retire-key,
+because doctor does not read the card), and its `OK switch_floor` line
+now names generation 2. The export is copied onto the medium at once, as
+the signer's user, and its copy under `/tmp` is removed, as after
+ceremony 1's install. This copy stays off the signer box: it is the
+`--previous` of the next switch. From now on every certificate the
+signer issues is signed by generation 2.
 
 ## The drain
 

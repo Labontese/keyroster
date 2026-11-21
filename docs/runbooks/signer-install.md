@@ -361,9 +361,9 @@ asks the agent's own Unix socket whether it still lists the draining key.
 | `WARN tpm_unavailable` | doctor could not read the TPM, or keys are recorded with TPM custody but the TPM was not inspected | Check `/dev/tpmrm0` and group `tss`, and that the recorded backend is `tpm`. Until then the TPM custody is unconfirmed. |
 | `FAIL restore_recovery_pending` | the marker `restore-recovery-pending` exists in the state directory: a restore was not recovered or ruled out | Follow the restore section (step 2b). `serve`, `ca-init`, `install-bundle` and `ca-rotate prepare` refuse until then. |
 | `WARN installed_issued_at_after_now` | the installed bundle is dated after this clock | It blocks every later successor until real time catches up. Check the clock. |
-| `WARN unrecorded_generation_file` | a `<role>-g<N>.age` file in the state directory's `software` directory that no generation row names | See [Prepare a CA key generation](#prepare-a-ca-key-generation). |
-| `FAIL draining_key_still_usable` | the backend still holds the key of a draining CA entry: the software backend has a file at its generation's name, or the agent lists it | See [Remove the old key after a switch](#remove-the-old-key-after-a-switch). `serve` refuses to start until then. |
-| `WARN draining_key_unchecked` | doctor could not ask whether the backend still holds a draining key (the agent did not answer, or no generation row names the key) | Check the backend by hand; `serve` refuses to start while the key is held. |
+| `WARN unrecorded_generation_file` | a `<role>-g<N>.age` file in the state directory's `software` directory, or a `<role>-g<N>.tpmkey` or `<role>-g<N>.auth` file in its `tpm` directory, that no generation row names | See [Prepare a CA key generation](#prepare-a-ca-key-generation). |
+| `FAIL draining_key_still_usable` | the backend still holds the key of a draining CA entry: the software backend has a file at its generation's name, the tpm backend has the key file or the auth file at its generation's name, or the agent lists it | See [Remove the old key after a switch](#remove-the-old-key-after-a-switch). `serve` refuses to start until then. |
+| `WARN draining_key_unchecked` | doctor could not ask whether the backend still holds a draining key (for example, the agent did not answer, the software or tpm key files could not be examined, or no generation row names the key), or the backend is piv, whose card doctor does not read: there the line is printed for every draining entry | Check the backend by hand; `serve` refuses to start while the key is held. |
 
 `OK generations` lists each role's active and prepared CA key
 generations with their fingerprints (03-12). `OK switch_floor` names, per
@@ -1927,7 +1927,12 @@ structurally (see the warning above).
      with that bundle (see
      [Install a successor bundle](#install-a-successor-bundle-stop-install-start)),
      and start it again only if a lost directory version follows.
-     (UNVERIFIED: no test replays a lost bundle.)
+     (UNVERIFIED: no test replays a lost bundle.) If `install-bundle`
+     refuses that bundle with `no stored generation`, stop: the bundle
+     names a CA key generation that the restored database lacks (a lost
+     generation, which is 03-13's case), this restore has not run to its
+     end, and a key file or a PIV slot key that no generation row names is
+     kept, not destroyed.
    - **A lost `directory_install`:** write it back as a proposal from the
      saved export, which step 2 verified, and install it with `keyroster
      directory install`, one version at a time, in log order:
