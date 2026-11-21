@@ -523,6 +523,7 @@ func TestDoctorGenerationFiles(t *testing.T) {
 		r := requireOne(t, Run(f), WARN, "unrecorded_generation_file")
 		for _, want := range []string{
 			"no generation row names this file", "unless you placed it for a --key prepare",
+			"if no prepare is running and a restore preceded it", "it is a key from a lost prepare",
 			"once the restore section of docs/runbooks/signer-install.md has run to its end, destroy it",
 			"where that section stops on a lost generation, keep it", "never record it again with --key",
 		} {
