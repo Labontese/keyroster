@@ -121,12 +121,17 @@ func TestHostTrustRunbooks(t *testing.T) {
 		htrbWant(t, "item 9, the home", sec, "account database", "$HOME", "QB-5", "NSS or LDAP", "home_differs_from_account_refuses")
 		htrbWant(t, "Logging in", htrbSection(doc, "## Logging in"), "--no-known-hosts", "(#trusting-hosts-without-tofu)")
 		// Item 4a is read in the section, as every other item is (03-12f2):
-		// its marker occurs there once and item 5's marker follows it, so a
-		// moved or a repeated item 4a fails.
+		// its marker `**4a. ` occurs there once, item 4's marker `**4. `
+		// (once in the section) comes before it, and item 5's marker
+		// `**5. The costs.**` comes after it.
 		if n := strings.Count(sec, "**4a. "); n != 1 {
 			t.Fatalf("item 4a, host-CA rotation: the section holds `**4a. ` %d times, want once", n)
 		}
-		if !strings.Contains(sec[strings.Index(sec, "**4a. "):], "**5. The costs.**") {
+		at := strings.Index(sec, "**4a. ")
+		if n := strings.Count(sec, "**4. "); n != 1 || strings.Index(sec, "**4. ") > at {
+			t.Fatalf("item 4a, host-CA rotation: the section holds `**4. ` %d times, want once and before `**4a. `", n)
+		}
+		if !strings.Contains(sec[at:], "**5. The costs.**") {
 			t.Fatal("item 4a, host-CA rotation: no `**5. The costs.**` follows it in the section")
 		}
 		htrbWant(t, "item 4a, host-CA rotation", htrbBetween(sec, "**4a. ", "**5. The costs.**"),
@@ -134,8 +139,8 @@ func TestHostTrustRunbooks(t *testing.T) {
 			"an account has refreshed once its managed `keyroster_known_hosts` holds the new host CA's line", "narrowing never adds one", "Each host whose certificate keyroster-agent renews",
 			"at most about 20 days after the switch", "moves only when an admin issues it a new certificate", "refuses each host from that host's move on", "cannot be rotated safely",
 			"unless an admin runs `keyroster known-hosts sync` as that account",
-			"after ceremony 1's install and before ceremony 2's install", "and the file then holds the new host CA's line", "so a refresh that wrote only the old line is repeated", "`TestHostCARotation`", "UNVERIFIED on a real client and on Windows",
-			"and a host certificate issued by hand across a host-CA switch")
+			"after ceremony 1's install and before ceremony 2's install", "and the file then holds the new host CA's line", "so a refresh that wrote only the old line is repeated", "`TestHostCARotation`",
+			"UNVERIFIED on a real client and on Windows, and so are a sync that an admin runs for another account and a host certificate issued by hand across a host-CA switch")
 	})
 	t.Run("revoke_revoking_a_host", func(t *testing.T) {
 		doc := htrbDoc(t, "revoke.md")
