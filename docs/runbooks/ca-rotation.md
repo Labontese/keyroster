@@ -678,7 +678,9 @@ the managed files has refreshed, a user who always passes
 `~/.ssh/keyroster_known_hosts` holds the new host CA's line: the
 `@cert-authority` line that ends `keyroster host CA generation <g>`, g
 being the host generation that ceremony 1 added (its CA-change line
-`CA host gen <g> SHA256:...: none -> next`). The ways to refresh:
+`CA host gen <g> SHA256:...: none -> next`). An account that runs ssh
+from several computers has refreshed when the file on each of them
+holds the line. The ways to refresh:
 
 - A user refreshes with a `keyroster login` without
   `--no-known-hosts`, run as the account ssh runs as and on the computer
@@ -696,7 +698,13 @@ being the host generation that ceremony 1 added (its CA-change line
   `keyroster known-hosts sync` as that account after ceremony 1's
   install and before ceremony 2's install, and who then checks that
   account's file for the line. If nobody does, it is a client that
-  never refreshes. (UNVERIFIED: no test runs sync for another account.)
+  never refreshes. That sync signs with the admin key through the
+  ssh-agent the account reaches (its fingerprint given with
+  `--admin-key`), so for as long as the account reaches that agent
+  every one of its processes can ask it to sign as the admin: run the
+  sync while nothing else runs as that account, and end the agent's
+  reach right after. (UNVERIFIED: no test runs sync for another
+  account.)
 
 Whichever way, the line is the check. A login or a sync writes the
 host CAs of the trust bundle the server gave it when it started, and

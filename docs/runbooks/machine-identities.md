@@ -116,7 +116,7 @@ account whose ssh reads them is refreshed only by an admin who runs
 needs one after ceremony 1's install and before ceremony 2's install,
 checked by the new host CA's line in that account's
 `keyroster_known_hosts` ([ca-rotation.md](ca-rotation.md), "The host
-CA").
+CA"). UNVERIFIED: no test runs sync for another account.
 
 Exit codes: 0 when the certificate was written or is not due, 1 for any
 refusal or failure, 2 for a usage error. A timer cannot tell

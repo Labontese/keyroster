@@ -679,7 +679,8 @@ install and the file then holds the new host CA's line
 ([ca-rotation.md](ca-rotation.md), "The host CA"). Run in CI
 e2e: `TestHostCARotation` (OpenSSH 9.5p1 and 10.5p1, one host and two
 clients on loopback). UNVERIFIED on a real client and on Windows, and
-so is a sync that an admin runs for another account.
+so are a sync that an admin runs for another account and a host
+certificate issued by hand across a host-CA switch.
 
 **5. The costs.** A managed name is unreachable until its host has a host
 certificate. Disabled and removed names stay refused. Names removed

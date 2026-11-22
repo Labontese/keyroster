@@ -636,7 +636,7 @@ verified log records, the certificates a revocation recovery carries
 included, revoked or not, and requires that the draining key's
 `trusted_until` is at least 300 s after the largest ValidBefore among
 that key's certificates, so that no certificate the signer issued under
-the old key outlives the hosts' trust in it. The refusals, by name, and
+the old key outlives the trust in that key. The refusals, by name, and
 what to do (each writes nothing; destroy the refused switch files and
 never use them again):
 
