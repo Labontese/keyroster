@@ -701,10 +701,12 @@ holds the line. The ways to refresh:
   never refreshes. That sync signs with the admin key through the
   ssh-agent the account reaches (its fingerprint given with
   `--admin-key`), so for as long as the account reaches that agent
-  every one of its processes can ask it to sign as the admin: run the
-  sync while nothing else runs as that account, and end the agent's
-  reach right after. (UNVERIFIED: no test runs sync for another
-  account.)
+  every one of its processes can ask it to sign with any key it holds,
+  and at an admin quorum of 1, the default, one admin signature
+  authorises a new directory: use an agent that holds the admin key
+  alone, run the sync while nothing else runs as that account, and end
+  the agent's reach right after. (UNVERIFIED: no test runs sync for
+  another account.)
 
 Whichever way, the line is the check. A login or a sync writes the
 host CAs of the trust bundle the server gave it when it started, and
