@@ -11,12 +11,13 @@ key-files:
   modified: [internal/serverclient/client_test.go, internal/serverclient/admin_test.go]
 decisions:
   - "The check for the peer's zeros runs on the message with the request's URL removed (strings.ReplaceAll(msg, url, \"\")), not on a longer run of zeros or a pattern for the whole message: three zeros anywhere outside the URL still fail it, and the only text taken out is text whose place the test chose."
+  - "The second test's check for the peer's nines is made the same way, on the message with the client's server URL removed (strings.ReplaceAll(err.Error(), c.Server(), \"\")), in one expression in the old order, so a nil error still ends at the first clause."
 requirements: []
 metrics:
   completed: 2026-11-22
 actuals:
   tasks: 1
-  commits: 5
+  commits: 6
 plan_head_before: e8e8fe5
 ---
 
@@ -144,6 +145,7 @@ Narrow command: `go test -count=1 -timeout 5m -v -run '^TestAdminJSONClockSkewHi
 - `docs(quick-261122-qcp): record the test fix` (this SUMMARY)
 - `test(serverclient): look for the peer's nines outside the request URL` (admin_test.go)
 - `docs(quick-261122-qcp): record the second test and correct the port figures` (this SUMMARY)
+- `docs(quick-261122-qcp): record the pre-merge review` (this SUMMARY)
 
 ## Not changed here
 
@@ -153,3 +155,45 @@ Narrow command: `go test -count=1 -timeout 5m -v -run '^TestAdminJSONClockSkewHi
 ## Deviations from Plan
 
 - The PLAN names one test. A second test of the package, TestAdminJSONClockSkewHint/malformed_date_no_hint in internal/serverclient/admin_test.go, had the same defect and is changed here.
+
+## Pre-merge review
+
+The orchestrator ran the review on the open pull request at head 6c23b4b (2026-11-22), in a read-only detached worktree of that head, and a check of the fix round at head 9bba25d. This section is written from the two runs' records, not from a description of what they were meant to do.
+
+### Who reviewed what
+
+Two agents in the first run, and no Codex lens (the change was one condition in a test file):
+
+- One lens on Opus at high effort. It read the diff, the test function and its helpers, the code that words the error, this task's PLAN, this SUMMARY as it then was and the pull request's text, and it read the failing line in the CI job's log. On a private copy of the tree it ran the narrow run, the package with the race detector, `go vet`, `gofmt` and golangci-lint for linux, windows and darwin; repeated R1 on 40005 and 40006 and ran it again on 51000 and 60000, each with the old and the new assertion; repeated Q1; ran six mutants of the client of its own; ran the subtest 2000 times with the new assertion and 2000 times with the old one; recomputed the port counts; measured the parity of the ports the kernel gives a listener; and searched the test files with a wider pattern, pinning the listener of the test it met to port 32999. It reported seven items.
+- One skeptic on Sonnet at high effort judged all seven, with runs of its own for five of them.
+
+The two agents used about 236,000 tokens. The orchestrator had read the whole diff, the PLAN, the SUMMARY and the pull request's text before the review, and read every item and the skeptic's reasons after it.
+
+### Result
+
+Seven items. The skeptic upheld all seven: two at low weight and five as notes. None is a defect of the changed assertion. The lens's statement, which its mutants bear out, is that the new check is the old check minus text inside the URL, so it is as strong as before for the peer's text: a mutant that prints a second copy of the URL directly followed by the peer's zeros is still caught.
+
+Its runs on the first test: with the listeners pinned to 40005 and 40006, and to 51000 and 60000, the old assertion fails for both bodies and the new one passes; 2000 runs with the new assertion, none failed; 2000 runs with the old one, one failed, on port 40009; Q1 failed on the number-literal body; all six of its own mutants of the client failed the subtest.
+
+### The items and the rulings
+
+1. **The first sweep pattern cannot see a call in the first argument** (low weight), so it had missed the same defect in internal/serverclient/admin_test.go:112, which the lens showed by pinning that test's listener to port 32999. Ruling: taken up. The second test is changed in this task, and "Sweep for the same defect" now gives the wider pattern, its lines and what it does not see.
+2. **"About 0.4 %" assumed an even pick over all ports** (low weight). Ruling: taken up. The figures are now marked as measured, counted or computed.
+3. **The sentence on odd ports** (a note; the executor had reported the sentence itself before the review). The first round's SUMMARY said that every port seen in the runs was odd, although R1 pins the even port 40006 by hand. Ruling: replaced by the executor's own measurement of 10,000 binds.
+4. **The second test has the same defect** (a note, the same place as item 1). Ruling: as item 1.
+5. **The count's wording** (a note): "without 40000, 50000 and 60000", where 60000 is outside the range named. Ruling: corrected.
+6. Two notes are about tests as they were before this change, in places that this change does not alter. They are kept for a later task and are not described here.
+
+### The fix round and its check
+
+The fix round is the two commits after 6c23b4b: the second test's assertion, and this SUMMARY's corrected figures, its sweep section and the section on the second test.
+
+One verifier on Sonnet at high effort (about 110,000 tokens) checked it at head 9bba25d on a private copy: the narrow run of the second test and the package with the race detector; R3 itself (port 32999: the old assertion fails, the new one passes); Q2 itself (fails, with the nines after the URL); five mutants of its own, of which the four that print the peer's Date, add nines or print a clock hint failed the subtest, and the one that repeats the client's own URL passed, as it should, because that is not the peer's text; 2000 runs with the new assertion, none failed; the counts by a script of its own (55 and 15, 56 and 41, 14,116); the parity (10,000 of 10,000 binds gave odd ports); both patterns at the base and at the head; the line references. It confirmed that the new condition keeps its order, so a nil error ends at the first clause, and that `c.Server()` is the text the message begins with.
+
+It reported two notes. The front matter's `decisions` entry named only the first test: taken up in the commit that adds this section. A client that printed its own URL a second time would pass: that is the boundary the check is meant to have, and nothing changes for it.
+
+### Recorded, not changed
+
+- The lens did not check: the validity of the commit signatures (it saw that each commit carries one), the lint pass with the piv tags, the race run over all packages, capslock and the firewalls. It could not confirm from the job's log alone what change the failing CI run was on.
+- The verifier did not repeat R4's 2000 runs on the base, the lint passes, `gofmt` or `go vet` on the head, and could not check the executor's sha256 statements or the message it read on port 35481.
+- The commit that adds this section and widens the `decisions` entry was read by the orchestrator and not reviewed by an agent.
