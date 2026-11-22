@@ -109,6 +109,15 @@ attempt does not count; an answer that is lost on the way and retried costs
 one. Log in with the key and the certificate:
 `ssh -i /path/to/id_ci -o CertificateFile=/path/to/id_ci-cert.pub user@host`.
 
+`keyroster machine renew` does not refresh the host trust files that
+`keyroster login` and `keyroster known-hosts sync` write. An automation
+account whose ssh reads them is refreshed only by an admin who runs
+`keyroster known-hosts sync` as that account; in a host-CA rotation it
+needs one after ceremony 1's install and before ceremony 2's install,
+checked by the new host CA's line in that account's
+`keyroster_known_hosts` ([ca-rotation.md](ca-rotation.md), "The host
+CA").
+
 Exit codes: 0 when the certificate was written or is not due, 1 for any
 refusal or failure, 2 for a usage error. A timer cannot tell
 `machine_disabled` from a server that is down by the exit code alone: read

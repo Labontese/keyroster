@@ -599,8 +599,10 @@ signer.)
 
 The second ceremony of a CA rotation (docs/runbooks/ca-rotation.md)
 signs a switch: a successor in which a role's `next` key becomes
-`active` and its old `active` key becomes `draining`, trusted by hosts
-until the entry's `trusted_until`. A switch install needs `--previous`,
+`active` and its old `active` key becomes `draining`, trusted until the
+entry's `trusted_until` (by the hosts for the user and machine roles;
+for the host role by the clients, and by the agents, which accept host
+certificates signed by it until then). A switch install needs `--previous`,
 an export-log file of this log kept off the box: the newest export you
 saved, taken right after the last install. The signer reads only the
 file's last line, the `{"checkpoint":...}` line that `export-log`
