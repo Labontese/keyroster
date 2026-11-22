@@ -523,8 +523,11 @@ func (l *caRotLoop) stopped(t *testing.T, env *serverEnv, what string, notAfter 
 	t.Logf("%s: the signer was down for %s", what, down.Round(time.Millisecond))
 }
 
-// caRotDrainRE is install-bundle's drain line (03-12e).
-var caRotDrainRE = regexp.MustCompile(`(?m)^drain user generation 1 until (\S+); the last certificate the log records for it is valid until (\S+)$`)
+// caRotDrainRE is install-bundle's drain line for the role's generation 1
+// (03-12e, 03-12f2).
+func caRotDrainRE(role string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^drain ` + regexp.QuoteMeta(role) + ` generation 1 until (\S+); the last certificate the log records for it is valid until (\S+)$`)
+}
 
 // caRotRevoke revokes serial through keyroster-server and waits until the
 // host's heartbeat reports the KRL that carries it.
@@ -537,23 +540,23 @@ func caRotRevoke(t *testing.T, eh *enrolledHost, kr func(args ...string) string,
 	})
 }
 
-// caRotRetireKey runs retire-key for the user role with the signer stopped
-// (03-12e): it must exit 1 with retire_key_incomplete and print, for the
+// caRotRetireKey runs retire-key for the role with the signer stopped
+// (03-12e, 03-12f2): it must exit 1 with retire_key_incomplete and print, for the
 // generation-1 key the role agent holds, the ssh-add line with the key's
 // public key line and one more pair per certificate identity of that key.
 // Each printed line is written into a file of a private directory under
 // its absolute path and the printed command is run on that path, in the
 // printed order; any other line fails the test. Then retire-key exits 0.
 // It returns the printed agent socket.
-func caRotRetireKey(t *testing.T, sg *signerEnv, fp1 string) string {
+func caRotRetireKey(t *testing.T, sg *signerEnv, role, fp1 string) string {
 	t.Helper()
-	code, out := sg.signerCmd(t, "ca-rotate", "retire-key", "--state-dir", sg.StateDir, "--role", "user")
+	code, out := sg.signerCmd(t, "ca-rotate", "retire-key", "--state-dir", sg.StateDir, "--role", role)
 	if code != 1 || !strings.Contains(out, "retire_key_incomplete") {
 		t.Fatalf("retire-key with the key in the agent exited %d, want 1 and retire_key_incomplete:\n%s", code, out)
 	}
-	head := "role user generation 1 " + fp1 + ": "
-	keyCmd := head + "still held by the agent; write this public key line into retire-user-g1 and run: SSH_AUTH_SOCK="
-	certCmd := head + "write this certificate line into retire-user-g1-cert.pub and run: SSH_AUTH_SOCK="
+	head := "role " + role + " generation 1 " + fp1 + ": "
+	keyCmd := head + "still held by the agent; write this public key line into retire-" + role + "-g1 and run: SSH_AUTH_SOCK="
+	certCmd := head + "write this certificate line into retire-" + role + "-g1-cert.pub and run: SSH_AUTH_SOCK="
 	dir := t.TempDir()
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	var socket string
@@ -563,10 +566,10 @@ func caRotRetireKey(t *testing.T, sg *signerEnv, fp1 string) string {
 		var rest, file string
 		switch {
 		case strings.HasPrefix(ln, keyCmd):
-			rest, file = strings.TrimPrefix(ln, keyCmd), "retire-user-g1"
+			rest, file = strings.TrimPrefix(ln, keyCmd), "retire-"+role+"-g1"
 			keys++
 		case strings.HasPrefix(ln, certCmd):
-			rest, file = strings.TrimPrefix(ln, certCmd), "retire-user-g1-cert.pub"
+			rest, file = strings.TrimPrefix(ln, certCmd), "retire-"+role+"-g1-cert.pub"
 			certs++
 		case ln == "run retire-key again", strings.Contains(ln, "retire_key_incomplete"):
 			continue
@@ -596,8 +599,8 @@ func caRotRetireKey(t *testing.T, sg *signerEnv, fp1 string) string {
 		t.Fatalf("retire-key printed %d key commands for the agent socket %q, want one for %s:\n%s", keys, socket, sg.RoleAgent, out)
 	}
 	t.Logf("retire-key printed the key line and %d certificate lines; each was removed with ssh-add -d", certs)
-	if code, out := sg.signerCmd(t, "ca-rotate", "retire-key", "--state-dir", sg.StateDir, "--role", "user"); code != 0 ||
-		!strings.Contains(out, "retire-key: no draining key of role user is held") {
+	if code, out := sg.signerCmd(t, "ca-rotate", "retire-key", "--state-dir", sg.StateDir, "--role", role); code != 0 ||
+		!strings.Contains(out, "retire-key: no draining key of role "+role+" is held") {
 		t.Fatalf("retire-key after ssh-add -d exited %d, want 0:\n%s", code, out)
 	}
 	return socket
@@ -784,7 +787,7 @@ func TestCARotationNoFailedLogin(t *testing.T) {
 	l.stopped(t, env, "the switch", issuedAt.Add(50*time.Second), func() {
 		code, out := sg.signerCmd(t, "install-bundle", "--state-dir", sg.StateDir,
 			"--bundle", filepath.Join(sw, "bundle.json"), "--policy", filepath.Join(sw, "policy.json"), "--previous", previous)
-		m := caRotDrainRE.FindStringSubmatch(out)
+		m := caRotDrainRE("user").FindStringSubmatch(out)
 		if code != 0 || !strings.Contains(out, "installed bundle version 3") || m == nil || m[1] != trustedUntil {
 			t.Fatalf("install-bundle --previous of the switch exited %d, want version 3 and the drain line until %s:\n%s", code, trustedUntil, out)
 		}
@@ -803,7 +806,7 @@ func TestCARotationNoFailedLogin(t *testing.T) {
 		if err == nil || ctx.Err() != nil || !strings.Contains(string(b), "draining_key_still_usable") {
 			t.Fatalf("serve with the old key in the agent: %v (deadline %v), want a refusal naming draining_key_still_usable:\n%s", err, ctx.Err(), b)
 		}
-		sock := caRotRetireKey(t, sg, fp1)
+		sock := caRotRetireKey(t, sg, "user", fp1)
 		caRotAgentHolds(t, sock, fp1)
 		code, out = sg.signerCmd(t, "doctor", "--state-dir", sg.StateDir)
 		if strings.Contains(out, "draining_key_still_usable") {
