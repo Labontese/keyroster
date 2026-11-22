@@ -120,6 +120,10 @@ func TestHostTrustRunbooks(t *testing.T) {
 		htrbWant(t, "item 8, starting over", sec, "delete the three files and the state file", "4 MiB")
 		htrbWant(t, "item 9, the home", sec, "account database", "$HOME", "QB-5", "NSS or LDAP", "home_differs_from_account_refuses")
 		htrbWant(t, "Logging in", htrbSection(doc, "## Logging in"), "--no-known-hosts", "(#trusting-hosts-without-tofu)")
+		htrbWant(t, "item 4a, host-CA rotation", htrbBetween(doc, "**4a. ", "**5. The costs.**"),
+			"T-03-417", "only through a refresh", "an account has refreshed once its managed `keyroster_known_hosts` holds the new host CA's line", "narrowing never adds one", "Each host whose certificate keyroster-agent renews",
+			"at most about 20 days after the switch", "moves only when an admin issues it a new certificate", "refuses each host from that host's move on", "cannot be rotated safely",
+			"after ceremony 1's install and before ceremony 2's install", "and the file then holds the new host CA's line", "so a refresh that wrote only the old line is repeated", "`TestHostCARotation`", "UNVERIFIED on a real client and on Windows")
 	})
 	t.Run("revoke_revoking_a_host", func(t *testing.T) {
 		doc := htrbDoc(t, "revoke.md")

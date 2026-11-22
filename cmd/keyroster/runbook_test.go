@@ -1123,10 +1123,142 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 		}
 		bare := inlineSpan.ReplaceAllString(prose.String(), "")
 		for _, m := range planNumber.FindAllStringSubmatch(bare, -1) {
-			// 03-12f is described in its end state; 03-12f2 (the host-CA
-			// test), 03-13 and 03-16 are still to come (03-12f).
-			if !slices.Contains([]string{"03-12f2", "03-13", "03-16"}, m[1]) {
+			// 03-12f and 03-12f2 are described in their end state; 03-13 and
+			// 03-16 are still to come (03-12f2).
+			if !slices.Contains([]string{"03-13", "03-16"}, m[1]) {
 				t.Errorf("ca-rotation.md names plan %s outside a code span; describe the rotation in its end state", m[1])
+			}
+		}
+	})
+	// The host-CA gate in its end state (03-12f2): every new sentence of
+	// ca-rotation.md on the host role, and the sentences of
+	// machine-identities.md and signer-install.md that agree with it, each
+	// in its own window; and none of the earlier wordings.
+	t.Run("host_ca_gate", func(t *testing.T) {
+		head := data
+		if i := strings.Index(data, "\n## "); i >= 0 {
+			head = data[:i]
+		}
+		window := func(e *signingSection) string {
+			w, err := sectionWindow(string(readTestFile(t, filepath.Join("..", "..", "docs", "runbooks", e.file))), e)
+			if err != nil {
+				t.Fatalf("%s: %v", e.id, err)
+			}
+			return w
+		}
+		machine := window(&signingSection{id: "machine_identities_host_trust", file: "machine-identities.md", section: "Renew a machine certificate"})
+		switchTrust := window(&signingSection{id: "signer_install_switch_trust", file: "signer-install.md", section: "Install a successor bundle", start: "### Install a CA switch"})
+		for _, w := range []struct {
+			name, text      string
+			holds, holdsNot []string
+		}{
+			{"ca-rotation.md \"The host CA\"", caRotationWindow(t, data, "The host CA"), []string{
+				"clients have refreshed",
+				"The gate concerns every account whose ssh reads keyroster's managed trust files",
+				"into the `~/.ssh` of the account they run as",
+				"before its first Host or Match line",
+				"Such an account gains a host CA line only when it refreshes",
+				"one `@cert-authority` line for each host CA the trust bundle trusts at the client's clock",
+				"An account that never had these files keeps its own configuration",
+				"no earlier than ceremony 1's install plus the user profile's max TTL",
+				"of the policy in force at ceremony 1's install and of every policy installed since",
+				"every user certificate issued before ceremony 1's install under the policy then in force has expired",
+				"one issued before the install under an earlier policy with a larger user cap may still be valid",
+				"so a user whose only certificates were issued before that install under the policy then in force needs a new one, from a login or from an admin",
+				"The wait does not show that a login refreshed",
+				"Before ceremony 2's install, every account whose ssh reads the managed files has refreshed",
+				"a user who always passes `--no-known-hosts` included",
+				"An account has refreshed when its managed `~/.ssh/keyroster_known_hosts` holds the new host CA's line",
+				"the `@cert-authority` line that ends `keyroster host CA generation <g>`",
+				"The file shows whether it wrote the line",
+				"the login succeeds whatever its host trust outcome",
+				"run as the account ssh runs as and on the computer it runs from",
+				"one that ran with `--no-known-hosts` adds no host CA line: it only narrows the file",
+				"(a bundle installed in between still lists it when its ceremony printed no `CA host` line",
+				"A user who always passes `--no-known-hosts` runs one `keyroster login` without it",
+				"which exits 0 when it refreshed",
+				"the file, not the exit, shows the new line",
+				"Whichever way, the line is the check",
+				"so a refresh that wrote only the old line is repeated until the file holds the new one",
+				"It needs an admin key from the root-signed policy, loaded in ssh-agent",
+				"is refreshed only by an admin who runs `keyroster known-hosts sync` as that account after ceremony 1's install and before ceremony 2's install",
+				"who then checks that account's file for the line",
+				"it is a client that never refreshes",
+				"no test runs sync for another account",
+				"No tool counts the clients that have refreshed",
+				"the gate is the operator's",
+				"which a bundle that changes only the host role leaves as it is",
+				"`bundle v<N> on <X>/<M> hosts` of `keyroster host status`",
+				"a host removed from the directory stays in M until `keyroster host forget`",
+				"refuses the certificate the signer issues it after the switch (`answer_unpinned_ca`",
+				"`TestDecide/backoff_schedule`",
+				"no test shows a kept certificate surviving that refusal",
+				"until it takes that bundle or the old certificate runs out, after which clients refuse it",
+				"uses the host profile's `max_ttl_seconds`",
+				"each host whose certificate keyroster-agent renews keeps serving its certificate by the old host CA",
+				"unless the agent replaces it earlier",
+				"A certificate the agent obtains lives the smaller of 30 days and the host cap",
+				"at most about 20 days after the switch, and for many hosts sooner",
+				"moves to the new host CA only when an admin issues it a new one after the switch",
+				"no test issues a host certificate by hand across a host-CA switch",
+				"holds both host CA lines and accepts either certificate",
+				"holds only the old host CA's line: it reaches each host until that host moves",
+				"`Host key verification failed` from then on",
+				"Watching for failures right after the switch shows little",
+				"is never rewritten by a full refresh cannot be rotated safely",
+				"No file that sshd reads lists a host CA key",
+				"removes its line from `keyroster_known_hosts` once its `trusted_until` has passed on the client's clock",
+				"each agent stops accepting answers signed by it at its `trusted_until`",
+				"key's `trusted_until`, the earliest moment a client stops trusting it",
+				"Run in CI: `TestHostCARotation`",
+				"waits for the host's heartbeat to report ceremony 1's bundle before the switch",
+				"the host asks for no certificate, installs no other and its agent refuses no answer",
+				"is refused with `Host key verification failed` after the renewal",
+				"The test does not wait the gate's time",
+				"the host drain's end on a real host and client",
+				"and a sync run for another account",
+			}, []string{"UNVERIFIED until"}},
+			{"ca-rotation.md before its first \"## \" line", head, []string{
+				"`TestHostCARotation` for what the host CA's gate prevents",
+			}, nil},
+			{"ca-rotation.md \"Run in CI\"", caRotationWindow(t, data, "Run in CI"), []string{
+				"`TestHostCARotation` (the same job: what the host CA's gate prevents",
+				"the host drain's end on a real host and client",
+			}, []string{"the host CA end to end"}},
+			{"ca-rotation.md \"Before ceremony 2\"", caRotationWindow(t, data, "Before ceremony 2"), []string{
+				"at least the user profile's max TTL after ceremony 1's install",
+				"a user who always passes `--no-known-hosts` included",
+				"gets the line from an admin who runs `keyroster known-hosts sync` as that account",
+				"`bundle v<N> on <M>/<M> hosts` for the server's current bundle N",
+				"ceremony 1's or a later one that still lists the new host CA",
+				"no earlier than the gate of \"The host CA\" allows",
+				"of every account whose ssh reads the managed files holds the new host CA's line",
+				"`keyroster ca issue --ca host` lives as long as its `--ttl`, up to the host profile's `max_ttl_seconds`, which the floor of \"Ceremony 2\" covers",
+				"lies past a role's floor only when a certificate was issued under an earlier policy whose cap for its role was larger",
+			}, []string{"has no cap on its validity", "can make the switch of the host role wait"}},
+			{"ca-rotation.md \"What changes for nobody\"", caRotationWindow(t, data, "What changes for nobody"), []string{
+				"a client must have refreshed first",
+			}, nil},
+			{"machine-identities.md \"Renew a machine certificate\"", machine, []string{
+				"`keyroster machine renew` does not refresh the host trust files",
+				"is refreshed only by an admin who runs",
+				"checked by the new host CA's line in that account's",
+				"after ceremony 1's install and before ceremony 2's install",
+			}, []string{"before a host-CA rotation"}},
+			{"signer-install.md \"Install a CA switch\"", switchTrust, []string{
+				"for the host role by the clients, and by the agents, which accept host certificates signed by it until then",
+			}, []string{"trusted by hosts until"}},
+		} {
+			flat := normalizeSpace(w.text)
+			for _, want := range w.holds {
+				if !strings.Contains(flat, want) {
+					t.Errorf("%s lacks %q", w.name, want)
+				}
+			}
+			for _, gone := range w.holdsNot {
+				if strings.Contains(flat, gone) {
+					t.Errorf("%s still holds %q", w.name, gone)
+				}
 			}
 		}
 	})
