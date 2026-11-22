@@ -271,10 +271,9 @@ func hcrNoRefusal(t *testing.T, eh *enrolledHost) {
 // commit and before the earliest renewal request at plus 52 s, the host has
 // asked for nothing since it applied the switch (hcrAttempts), its drop-in
 // names r1 alone, the refreshed client still reaches the host by a
-// certificate of generation 1 (loginA, after the commit wait's keyroster
-// calls have narrowed its file under bundle 3, 03-12f2), sshd serves r1 (by
-// plus 50 s, so a login that returns later fails the keyscan's bound), and
-// the agent has refused no answer.
+// certificate of generation 1 (loginA, after the commit wait's host status
+// polls have narrowed its live file, 03-12f2) and returns before plus 50 s,
+// sshd serves r1 (by plus 50 s), and the agent has refused no answer.
 func hcrQuietCheck(t *testing.T, eh *enrolledHost, prev, r1 *ssh.Certificate, loginA func()) {
 	t.Helper()
 	at := hcrIssued(r1).Add(hcrQuiet)
@@ -293,6 +292,9 @@ func hcrQuietCheck(t *testing.T, eh *enrolledHost, prev, r1 *ssh.Certificate, lo
 		t.Fatalf("step 6a: the drop-in names serials [%s], want r1's %d alone", strings.Join(serials, " "), r1.Serial)
 	}
 	loginA()
+	if now := time.Now(); !now.Before(hcrIssued(r1).Add(hcrQuietEnd)) {
+		t.Fatalf("step 6a: client A's login returned at %s, after r1 + 50 s (%s)", now.UTC().Format(hcrClock), hcrIssued(r1).Add(hcrQuietEnd).UTC().Format(hcrClock))
+	}
 	hcrServes(t, eh.agentHost, r1, time.Until(hcrIssued(r1).Add(hcrQuietEnd)))
 	hcrNoRefusal(t, eh)
 	t.Logf("step 6a: the host stayed quiet; the check ended at r1 + %s", time.Since(hcrIssued(r1)).Round(time.Millisecond))
@@ -619,11 +621,14 @@ func TestHostCARotation(t *testing.T) {
 	t.Logf("step 6 ended at r1 + %s", time.Since(hcrIssued(r1)).Round(time.Millisecond))
 	hcrCommitted(t, eh, kr, 3, installed3, served3, hcrIssued(r1).Add(hcrCommit3), "bundle 3 not committed by r1 + 44 s, which the quiet check at r1 + 45 s needs")
 
-	// 6a. The host stays quiet between the switch and its own renewal. Every
-	// keyroster call since the switch (the host status polls of the commit
-	// wait) has narrowed A's live file under bundle 3; A logs in once more
-	// and still meets a certificate by generation 1, so the old host CA's
-	// line is still there while generation 1 is trusted (03-12f2).
+	// 6a. The host stays quiet between the switch and its own renewal. Each
+	// host status poll of the commit wait verifies the trust bundle, and
+	// narrows A's live file under it, before it asks for the host status;
+	// the server answers /trust from a signer status it caches for up to 5 s,
+	// so a poll soon after the switch may still have verified bundle 2. A
+	// logs in once more and still meets a certificate by generation 1: the
+	// old host CA's line survived those narrowings while generation 1 is
+	// trusted (03-12f2).
 	hcrQuietCheck(t, eh, r1prev, r1, func() {
 		hcrAccepted(t, cfgA, login, "127.0.0.1", c, gen1, "client A after the host committed the switch")
 	})
