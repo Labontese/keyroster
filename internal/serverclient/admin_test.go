@@ -109,7 +109,10 @@ func TestAdminJSONClockSkewHint(t *testing.T) {
 	t.Run("malformed_date_no_hint", func(t *testing.T) {
 		c := adminServer(t, statusAnswer(http.StatusUnauthorized, "", map[string]string{"Date": "not a date " + strings.Repeat("9", 60)}))
 		err := c.AdminJSON(context.Background(), http.MethodPost, AdminUsersPath, AddUserRequest{Name: "carol"}, nil, admin)
-		if !errors.Is(err, ErrAdminAuth) || strings.Contains(err.Error(), "clock") || strings.Contains(err.Error(), "999") {
+		// The message begins with the client's server URL, whose port is
+		// the test listener's and can hold "999" itself (39991, 45999):
+		// the peer's nines are looked for in the rest.
+		if !errors.Is(err, ErrAdminAuth) || strings.Contains(err.Error(), "clock") || strings.Contains(strings.ReplaceAll(err.Error(), c.Server(), ""), "999") {
 			t.Fatalf("error %v", err)
 		}
 	})
