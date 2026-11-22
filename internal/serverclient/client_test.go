@@ -1173,7 +1173,11 @@ func TestConnectErrorTransport(t *testing.T) {
 				t.Errorf("body %.20q... accepted", body)
 				continue
 			}
-			if msg := err.Error(); !strings.Contains(msg, want) || strings.Contains(msg, "peer text") || strings.Contains(msg, "000") {
+			// The message begins with the request's URL, whose port is
+			// the test listener's and can hold "000" itself (40005,
+			// 51000): the peer's zeros are looked for in the rest.
+			msg := err.Error()
+			if !strings.Contains(msg, want) || strings.Contains(msg, "peer text") || strings.Contains(strings.ReplaceAll(msg, url, ""), "000") {
 				t.Errorf("body %.20q...: err = %.300q, want %q in the CLI's own words", body, msg, want)
 			}
 		}
