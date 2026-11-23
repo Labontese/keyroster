@@ -12,9 +12,9 @@ key-files:
   modified: [test/e2e/ca_rotation_test.go, .github/workflows/e2e.yml, CONTRIBUTING.md, docs/runbooks/ca-rotation.md, docs/runbooks/enroll-user.md, docs/runbooks/machine-identities.md, docs/runbooks/signer-install.md, cmd/keyroster/runbook_test.go, cmd/keyroster/hosttrust_runbook_test.go, .planning/phases/03-linux-agent-and-revocation/03-12f2-PLAN.md, .planning/ROADMAP.md, .planning/STATE.md]
 requirements-completed: []
 actuals:
-  tokens: 124700   # chars/4 over the realized diff against c6c632d without this SUMMARY (106,543) plus this SUMMARY (about 18,200)
-  tasks: 4         # Tasks 1 to 4 up to the green PR; Task 4's step 6 (the pre-merge review) is the orchestrator's and Task 5 the owner's merge
-  commits: 5       # git rev-list --count c6c632d..HEAD with this commit: G2, R3, W3, P4 and this commit
+  tokens: 137400   # chars/4 over the realized diff against c6c632d without this SUMMARY (107,710) plus this SUMMARY (about 29,700)
+  tasks: 4         # Tasks 1 to 4 up to the green PR and its fix round; Task 4's step 6 (the pre-merge review) is the orchestrator's and Task 5 the owner's merge
+  commits: 12      # git rev-list --count c6c632d..HEAD with this commit: G2, R3, W3, P4, the first SUMMARY commit, X1 to X6 and this commit
 plan_head_before: c6c632d130450e24fe432dfd68bcf00420dc2231
 ---
 
@@ -29,7 +29,8 @@ TestHostCARotation runs in the e2e-rotation lane against real sshd, a real keyro
 
 - **Sessions 1 and 2:** Task 1 (preconditions, branch, base values, test-time base, anchors), Task 2 (the wrapper and its self-check, local check 1, the pre-check on 10.5p1 and 9.5p1 with the fourth verify command, G2, Task 2's five verify commands, M371, M372 and M373 with M373's unit run, and the PASS loop's negative proof) and Task 3 (its precondition, the anchors read before any sentence was written, R3 and its RED from a detached worktree of R3, W3, Task 3's four verify commands, and the 70 document mutants, all killed by their named leaf). The orchestrator's check of G2 and its rulings on deviations 1 to 5 are recorded where they belong.
 - **Session 3 (2026-11-22): Task 4, steps 1 to 5.** The precondition; P4 4e058f8073494945f774db64cf07ff3fe11cdc89 after a full read of its staged diff and the publish scan; the test-time base re-measured and replaced in place; the delta gate; the full gate (one unchanged re-run under the clock-flake rule, deviation 6); the push; PR #118 without auto-merge; the tracking update; this SUMMARY's commit. See "Task 4 (session 3)".
-- **Left:** CI on this SUMMARY's commit and Task 4's verify commands on it (their results cannot be named in the commit they are about), then the pre-merge review (Task 4, step 6, the orchestrator's) and Task 5 (the owner's merge).
+- **Session 4 (2026-11-22 and 2026-11-23): the pre-merge review recorded, its fix round, and this record.** The orchestrator's pre-merge review of head 4869fde, recorded from its run record; the fix round X1 to X6 (part A: X1 to X3, part A2: X4 to X6, each read and checked by the orchestrator before the next part), with two REDs, 34 document mutants, the end-to-end runs at X3 and X6 and the narrowing mutant; part B: the test-time base re-measured in place, the delta and full gates, this record's commit, the push and the PR text. See "Pre-merge review", "The fix round" and "The check of the fix round".
+- **Left:** CI on this record's commit and Task 4's verify commands on it (a commit cannot name its own runs; their results go in the orchestrator's record), then Task 5 (the owner's merge).
 
 ## Task 1
 
@@ -51,9 +52,9 @@ TestHostCARotation runs in the e2e-rotation lane against real sshd, a real keyro
   - ROADMAP: `**Plans:** 39/44 plans executed in 43 waves.`; `| 3. Linux Agent and Revocation | 39/44 |`; `- [ ] 03-12f2-PLAN.md — CA rotation, host-CA end-to-end test (D-14, KEY-08): TestHostCARotation in the e2e-rotation lane and the host-CA runbook gate` under `**Wave 39** *(blocked on Wave 38 completion)*`.
   - STATE: `stopped_at: "Completed 03-12f-PLAN.md (PR #113)"`, `  total_plans: 79`, `  completed_plans: 74`, `Plan: 39 of 44`.
 
-test-time base: keyroster=281.238 at=1795377427
+test-time base: keyroster=303.005 at=1795391117
 
-- The base above was re-measured in session 3 (2026-11-22, Task 4), replacing in place session 1's line (keyroster=299.632 at=1795370396), because Task 4 runs in another session than the one that measured it: a detached worktree of origin/main c6c632d130450e24fe432dfd68bcf00420dc2231 outside the repository, the Budget command `bash scripts/linux.sh 'exec 2>&1; go test -race -count=1 -timeout 15m ./cmd/keyroster/'` run from it in the background with nothing else running in WSL; exit 0, one `ok` line, no FAIL, DATA RACE or SKIP; `at=` is `date +%s` at its end. The worktree was removed afterwards. Session 1 had measured its base the same way on the unchanged tree (exit 0).
+- The base above was re-measured in session 4 (2026-11-23, the fix round's part B), replacing in place session 3's line (keyroster=281.238 at=1795377427), which had replaced session 1's (keyroster=299.632 at=1795370396), each time because the gates ran in another session than the one that measured the line before; session 4 measured it the same way as session 3, on origin/main c6c632d130450e24fe432dfd68bcf00420dc2231, under a temporary directory of its own. Session 3's measurement, for the record: a detached worktree of origin/main c6c632d130450e24fe432dfd68bcf00420dc2231 outside the repository, the Budget command `bash scripts/linux.sh 'exec 2>&1; go test -race -count=1 -timeout 15m ./cmd/keyroster/'` run from it in the background with nothing else running in WSL; exit 0, one `ok` line, no FAIL, DATA RACE or SKIP; `at=` is `date +%s` at its end. The worktree was removed afterwards. Session 1 had measured its base the same way on the unchanged tree (exit 0).
 - Anchors of "Anchors re-read at c6c632d", re-read at origin/main by content (`git grep -n -F` of each quoted fragment in its file): 196 anchors, 196 at their stated line, 0 moved, 0 gone. No task text needs a corrected line.
 
 ## Task 2
@@ -270,13 +271,13 @@ Under the mutant rule, at W3 (136163f6da3f70081c48cd4e358e89ff84d90e9e), each wi
 
 **The orchestrator's corrections, first.** Before anything else in session 3, the orchestrator's twelve corrections to the draft were applied by its script, which refuses unless each old text occurs exactly once: a dry run reported 12 replacements, then the applied run wrote them; the draft went from 52,456 bytes (sha256 eca08fab63ec7eeca530c42e7f7487e06fe3408deb1548fea4d63490d5263788) to 58,339 bytes (sha256 d799e04d4269f1978daad08c7083a9c168e67e0cf6a4603ffcfd9cc4d3cb133a), the expected values. The corrected sentences stand word for word.
 
-**Precondition** (2026-11-22): HEAD was W3 136163f6da3f70081c48cd4e358e89ff84d90e9e on `p03/12f2-ca-rotation-host-ca-e2e`, equal to the remote head; after `git fetch origin`, origin/main was still BASE c6c632d130450e24fe432dfd68bcf00420dc2231; Task 1's first three checks (plan lines 673, 675 and 677, each extracted byte for byte from the plan file read in binary mode; `D` filled with the dispatch's sha256, the placeholder asserted present once before and gone after) exit 0, the third printing `stopped_at: "Completed 03-12f-PLAN.md (PR #113)"`. Every verify command of Task 4 (plan lines 922 to 942) was extracted the same way and run unchanged from the repository's root, with the owner's two pattern files named through their variables on the command line where a command reads them.
+**Precondition** (2026-11-22): HEAD was W3 136163f6da3f70081c48cd4e358e89ff84d90e9e on `p03/12f2-ca-rotation-host-ca-e2e`, equal to the remote head; after `git fetch origin`, origin/main was still BASE c6c632d130450e24fe432dfd68bcf00420dc2231; Task 1's first three checks (plan lines 673, 675 and 677, each extracted byte for byte from the plan file read in binary mode; `D` filled with the dispatch's sha256, the placeholder asserted present once before and gone after) exit 0, the third printing `stopped_at: "Completed 03-12f-PLAN.md (PR #113)"`. Every verify command of Task 4 (plan lines 922 to 942) was extracted the same way and is run unchanged from the repository's root, with the owner's two pattern files named through their variables on the command line where a command reads them; which of them ran before this SUMMARY's first commit and which after its push is under "Verify commands of Task 4".
 
 ### P4 (4e058f8)
 
 - The placement check and the stop guard were run again first: exit 0.
 - Only 03-12f2-PLAN.md was staged; `git show :<path> | sha256sum` equals the `plan file sha256:` line above (8e735928...).
-- The staged diff (1,498 lines; 1,316 insertions and 82 deletions) was saved to a file outside the repository, folded at 1,400 columns (1,542 lines) and read whole, every added, removed and context line, after the last edit.
+- The staged diff (1,498 lines; 1,316 insertions and 82 deletions) was saved to a file outside the repository, folded at 1,400 columns (1,541 lines) and read whole, every added, removed and context line, after the last edit.
 - The publish scan: the seventh verify command, run verbatim and in full (deviation 7), exited 0 before the commit; its whole-file legs on the plan file are its first legs. After the commit it was run again, its `git cat-file` leg then reading the new text at HEAD: exit 0.
 - Committed signed, authored as Daniel; one file, no deletion. The plan file at HEAD hashes to the dispatch's value.
 
@@ -308,6 +309,7 @@ Staged by path: .planning/ROADMAP.md, .planning/STATE.md and this SUMMARY. `git 
 
 - Before this commit: the 5th (delta gate) exited 0; the 6th (full gate) exited 0 on its second run (deviation 6); the 7th (publish scan) exited 0 before P4, after P4 and before the push; the 8th (authorship) exited 0 before the push.
 - The 1st (required checks, the five named checks and the house e2e gate in MODE=pr), the 2nd (the lane gate), the 3rd (ROADMAP and STATE), the 4th (files, plan bytes, mutant and threat rows) and the 9th to 11th run on this commit's head after its push; their results cannot be named in the commit they are about and enter this SUMMARY with the review's record. Nothing outside .planning changed after the 5th and the 6th, so they need no second run.
+- Since then: session 3 ran the 1st to 4th and the 9th to 11th on head 4869fde after its push and CI. Its saved logs show two things: the 1st exited 0 (its log lists every required check as `pass`, names the E2E run 45067471042 and both probe lanes' `go test` times, 300.039 s and 281.009 s, and ends `exit 0`); and the 2nd's readings of the four rotation and main lanes (`go test` 660.758 s, 657.877 s, 737.658 s and 773.829 s), with no exit code in that log. The 2nd's exit code and the results of the 3rd, 4th, 9th, 10th and 11th exist only as that session's report: no log of them was saved. The fix round changed files outside .planning, so the 5th and the 6th ran again in part B (under "The fix round"), and every verify command of Task 4 runs again on the fix round's head after its push and CI, with the results in the orchestrator's record, because a commit cannot name its own runs.
 
 ### What stays UNVERIFIED (in the words of the plan)
 
@@ -317,7 +319,225 @@ The test does not wait for the gate's own time (the user profile's max TTL): it 
 
 ## Pre-merge review
 
-Pending. The orchestrator runs it on the green PR (Task 4, step 6), before Task 5; its results, any fix round and their checks are added here from the review's run record.
+**The run.** On 2026-11-22 the orchestrator had the green PR read at head 4869fde5904361f44e8d71ea13b90a716841ccee against base c6c632d130450e24fe432dfd68bcf00420dc2231 (workflow wf_42dd7384-2bf: seven agents, 1,249,643 tokens, 255 tool calls, about 21 minutes). Before it the orchestrator ran TestHostCARotation once from a plain copy of that head's tree, through the namespace wrapper, on OpenSSH 10.5p1: PASS in 143.38 s. The readers, each read-only on a detached worktree of the head:
+
+- **The test** (Opus, high effort): the test, its helpers, the lane and both rotation job logs. It ran the test twice on a private copy of the tree, each time with a mutant of its own (below).
+- **The runbook text** (Opus, high effort): the changed sections of the four runbooks against the code, the pins and the sweep. It ran eight document mutants of its own on a private copy.
+- **This record** (Sonnet, high effort): this SUMMARY's text on Tasks 3 and 4, the commits table and the PR text against the saved logs, the git log and the job logs.
+- **Codex** (gpt-6-astra, high effort; 324 s, 143,975 tokens), started by a thin runner agent (Sonnet, low effort): the diff outside .planning and the PR text.
+- **The skeptics** (Sonnet, high effort): two for the one item rated high, one batch skeptic for the other fourteen.
+
+**Results: 15 items; 8 upheld, none split, 7 refuted.** None says that the test passes while a client that did not refresh is accepted, and none is about product code. One item came from the test reader, ten from the runbook reader, two from the record reader and two from Codex. The batch skeptic upheld eight and rated each of them low (the readers had rated five of them medium).
+
+Upheld, and acted on in the fix round below:
+
+1. (Codex) The item-4a pin read the whole of enroll-user.md, so the paragraph could leave its section unnoticed.
+2. (Runbook reader; its mutants Ma2 and Mb survived) Item 4a's two mentions of the admin were held by no pin.
+3. (Runbook reader; its mutant Mh survived) "the largest user `max_ttl_seconds`" in the gate's wait was held by no pin: "smallest" passed.
+4. (Runbook reader; its mutant Mc survived) The first refresh route, "A user refreshes with a `keyroster login` without `--no-known-hosts`", was held by no pin.
+5. (Runbook reader) Item 4a stated a hand-issued host's move with no UNVERIFIED label, beside its "Run in CI" line.
+6. (Runbook reader; its mutants Mp and Mg survived) Four entries of the UNVERIFIED list of "The host CA" and the words "possibly weeks after the switch" were held by no pin.
+7. (Runbook reader) signer-install.md, in the subsection this plan corrected, still said that the switch binding keeps a certificate from outliving "the hosts' trust" in the old key, which is false for the host role; the plan's sweep had not listed that sentence.
+8. (Record reader) The folded staged diff of P4 has 1,541 lines, not 1,542.
+
+Refuted:
+
+9. (Codex, rated high; both skeptics refuted it) A renewal request made after the quiet check at r1 + 45 s and before the scheduled renewal's earliest moment at r1 + 52 s is not told apart from a scheduled one.
+10. (Test reader, rated medium; its mutant MN survived) Client A is not checked between the first keyroster command after the switch, which narrows its file, and the host's renewal.
+11. (Runbook reader, rated medium) The route "an admin runs `keyroster known-hosts sync` as that account" names no flag and does not say what that run opens to the account.
+12. (Runbook reader) machine-identities.md gives that route with no UNVERIFIED label of its own.
+13. (Runbook reader) Only the login route says that a refresh is per computer.
+14. (Runbook reader) The corrected "Pre-switch check" sentence ("only when") does not hold when the ceremony machine's clock is behind the signer's.
+15. (Record reader) Deviation 6 states the cause of the first full-gate failure where the log shows the error's name.
+
+**The test reader's two mutants** (each one run of the test on OpenSSH 10.5p1, on its private copy):
+
+- MF, a host that asks at the switch with its trust set intact (`hostcert.Due` renews whenever a draining host CA is in force): killed by step 6a's attempts check (the call at hostca_rotation_test.go:619 of that head, the check at :231) with `step 6a: the host asked for a certificate at 2026-11-22T21:42:30Z, after r1's issuance 1795383744`, the attempts file holding `failures` 1 and `last_code` `answer_not_newer`. It is a second product mutant, beside M373, that this check kills.
+- MN, narrowing that drops a draining host CA's line at once (cmd/keyroster/narrow.go made to skip draining entries): **it survived**, PASS in 130.87 s, with client A's live file holding one CA line after the bundle-3 commit. That is item 10.
+
+**Rulings (the orchestrator).**
+
+- Items 1 to 8 are acted on.
+- Item 10 is taken up although refuted. The survivor is a fact, and that a client which refreshed keeps reaching a host that still serves the old host CA's certificate is the gate's promise to the operator. The skeptic's reasons stand as far as they go: narrowing's handling of a draining host CA is unit-tested in cmd/keyroster, and the plan's step table does not name this misbehaviour. The test gains one login of client A in step 6a.
+- Item 11 is taken up although refuted. The route is the orchestrator's own ruling of 2026-11-21, and by the code the account reaches an ssh-agent that holds the admin key for that run: `known-hosts sync` opens an admin session (cmd/keyroster/knownhosts.go:1059), which finds the key named by `--admin-key` in the agent at `SSH_AUTH_SOCK` (cmd/keyroster/user.go:203-224, agentconn_unix.go:12-17), and a `$HOME` that is not the account's home is refused (knownhosts.go:120-141), so the command runs as that account. "The host CA" now says what follows from that.
+- Items 12 and 13 are taken up although refuted, each with one sentence: the label, as in item 5, and the check of the file on each computer.
+- Item 9 stands refuted, no change. Its mechanics are as Codex says, but the misbehaviour that step 6a names is a request at the switch, which M373 and MF show caught; the agent's own schedule is unit-tested (`TestDecide`, `TestJitter`), and the issuance gap of 51 s to 75 s bounds the rest.
+- Items 14 and 15 stand refuted, no change: for item 14 the text's instruction is to wait in either case, and for item 15 `clock_regression` is the signer's own name for a clock that read earlier than before.
+
+**Not checked by that run.** The CI runners' wall clock against their monotonic clock, and OpenSSH's penalty thresholds on runners; signer-install.md and enroll-user.md outside the sections around this plan's edits (the runbook reader read those two files in sections); the plan's anchors line by line (the runbook reader opened the code instead, and the record reader compared about 12 of the 196); the run IDs of head 4e058f8 (the record reader had no access to them); and what this record says without a saved log (that staged diffs were read in full, and the lint and vet legs inside verify commands). The skeptics were brief (36 s and 42 s for the item rated high, 86 s for the other fourteen), so the orchestrator read every item itself and checked in the files what it relies on: items 1, 7 and 8, the code behind item 11, and the helpers of step 6a for item 10.
+
+### The fix round
+
+The fix round ran in session 4 (2026-11-22 and 2026-11-23), in three parts: part A (X1 to X3) and part A2 (X4 to X6) as local commits, each read and checked by the orchestrator before the next part; part B (this record, the gates, the push). No product code changed in it: every product mutant was restored before anything else happened.
+
+**The six commits**, each signed (SSH signature present), authored as Daniel Gustafsson, committed by keyroster-bot, with no message body. Before each, `git diff --cached` of every staged file was read in full, one file at a time, after the last edit (for X6 see deviation 10), and the staged-lines scan of plan line 902 (the owner's two pattern files passed through their variables) exited 0.
+
+| Name | SHA | Subject | Files |
+|------|-----|---------|-------|
+| X1 | c824af94bfda26cf8cddcb4f8681548a929c1074 | test(cli): pin the rest of the host-CA gate and hold item 4a to its section | cmd/keyroster/runbook_test.go, cmd/keyroster/hosttrust_runbook_test.go |
+| X2 | 029da1b17bb0606417ddffa5b4197f1124b05d49 | docs(runbooks): say what an admin's sync for another account opens, and label what no test shows | docs/runbooks/ca-rotation.md, enroll-user.md, machine-identities.md, signer-install.md |
+| X3 | 459b8260b4e204cbad0702c1f293796efaff5956 | test(e2e): log the refreshed client in after the host committed the host-CA switch | test/e2e/hostca_rotation_test.go |
+| X4 | ace104b28c5cd20820ae8ce5cd8e805b49d500bd | test(cli): pin the UNVERIFIED labels with their sentences and item 4a between its neighbours | cmd/keyroster/runbook_test.go, cmd/keyroster/hosttrust_runbook_test.go |
+| X5 | 80fd108431eef948da72603eb1f2217f17dddfc6 | docs(runbooks): say what the admin's agent signs and what one admin signature authorises | docs/runbooks/ca-rotation.md |
+| X6 | 85d0ec4206e31d6295a25b069f564420c019df97 | test(e2e): say which polls narrowed the file and name a late login | test/e2e/hostca_rotation_test.go |
+
+**The items and what each answers** (the review's items are numbered as above; the round check's as under "The check of the fix round"):
+- F1 (review item 1): the item-4a pin reads the section "Trusting hosts without TOFU", not the whole file; `**4a. ` must occur once there and `**5. The costs.**` follow it (X1).
+- F2 (item 2): two more item-4a tokens, the admin's sync in the item's first sentence and in its last but one (X1).
+- F3 (item 3): the gate's wait pinned from `the largest user `max_ttl_seconds`` on (X1).
+- F4 (item 4): the first refresh route pinned (X1); G1 completes it.
+- F5 (item 6): the UNVERIFIED list of "The host CA" and `possibly weeks after the switch, until it refreshes` pinned (X1).
+- F6 (item 5): item 4a's UNVERIFIED sentence also names a host certificate issued by hand across a host-CA switch (X1 pin, X2 text).
+- F7 (item 7): signer-install.md says `outlives the trust in that key`, and `the hosts' trust in it` is a forbidden phrase (X1 pin, X2 text).
+- F8 (item 12): machine-identities.md labels the admin's sync for another account UNVERIFIED (X1 pin, X2 text).
+- F9 (item 11): "The host CA" says what that sync opens to the account: it signs with the admin key through the ssh-agent the account reaches, given with `--admin-key`, and every process of the account can ask that agent to sign (X1 pin, X2 text); G5 and G6 complete it.
+- F10 (item 13): an account that runs ssh from several computers has refreshed when the file on each of them holds the line (X1 pin, X2 text).
+- F11 (item 10): step 6a logs client A in once more, between the drop-in check and the keyscan, after the commit wait's host status polls have narrowed its live file (X3).
+- Review item 8 (the folded P4 diff has 1,541 lines) is corrected in "P4" above.
+- G1 (the orchestrator's own: F4's pin stopped before the flag): the route's pin ends with ``without `--no-known-hosts` `` (X4).
+- G2 (the round check's item 1): every UNVERIFIED statement of the windows is pinned together with its label: item 4a's one sentence, "The host CA"'s list, its three bracketed labels and the label after `hostcert_answer_drained_ca_refused`, and "Run in CI"'s sentence (X4).
+- G3 (its item 3): F7's phrase is the whole clause `so that no certificate the signer issued under the old key outlives the trust in that key` (X4).
+- G4 (its item 4): item 4's marker `**4. ` must occur once in the section and come before `**4a. ` (X4).
+- G5 and G6 (its item 2): the sentence says that the agent signs with any key it holds, that at an admin quorum of 1, the default, one admin signature authorises a new directory, and that the agent should hold the admin key alone (X4 pins, X5 text).
+- G7 (its item 5): the two comments of step 6a say only what the code shows (deviation 9), and a login that returns after r1 + 50 s fails with a message of its own (X6).
+
+**The REDs.**
+- At X1 (HEAD X1, `git status --short -- cmd internal test docs .github` empty; part A's RED command `bash scripts/linux.sh 'exec 2>&1; go test -count=1 -timeout 15m -v -run "^(TestCARotationSwitchRunbook|TestHostTrustRunbooks)$" ./cmd/keyroster/'`): exactly `--- FAIL: TestCARotationSwitchRunbook`, `--- FAIL: TestCARotationSwitchRunbook/host_ca_gate`, `--- FAIL: TestHostTrustRunbooks` and `--- FAIL: TestHostTrustRunbooks/enroll_user_trusting_hosts`, with nine messages: `hosttrust_runbook_test.go:132: item 4a, host-CA rotation lacks "and a host certificate issued by hand across a host-CA switch"` (F6); at runbook_test.go:1264 seven `lacks`, five of "The host CA" (F10's sentence and F9's four phrases), machine-identities.md's `UNVERIFIED: no test runs sync for another account` (F8) and signer-install.md's `outlives the trust in that key` (F7); and `runbook_test.go:1269: signer-install.md "Install a CA switch" still holds "the hosts' trust in it"` (F7). The F1 to F5 pins passed on the unchanged text. Controls: every other leaf of both tests passed. No build failure, setup failure or SKIP.
+- At X4 (HEAD X4, the status empty; the same command): exactly `--- FAIL: TestCARotationSwitchRunbook` and `--- FAIL: TestCARotationSwitchRunbook/host_ca_gate`, with three messages, `runbook_test.go:1264: ca-rotation.md "The host CA" lacks` `every one of its processes can ask it to sign with any key it holds`, `at an admin quorum of 1, the default, one admin signature authorises a new directory` and `use an agent that holds the admin key alone, run the sync while nothing else runs as that account, and end the agent's reach right after` (G5). TestHostTrustRunbooks passed with all six leaves (G2's token and G4's check held on the text as it was), and so did the other six leaves of TestCARotationSwitchRunbook. No build failure, setup failure or SKIP. (The same command was also run once on X4's staged tree before its commit, with the same three messages.)
+
+**The text and the GREEN runs.** X2 and X5 were applied by the orchestrator's applier (a dry run, then `--apply`; it refuses unless each old text occurs exactly once), from the repository's root, with nothing edited by hand; each `git diff` was read in full.
+- X2: ca-rotation.md 51,430 bytes, sha256 7005d4c1371e91706cf2c6fb65da613b96678cdedc519c47f077db5c4b9678fa; enroll-user.md 46,799 bytes, a1cf47059d947cc8e1ac452cb12721d829ddb64b1a0a9d7e7794ec1ad1af0a56; machine-identities.md 13,279 bytes, 66a56ef1e8ddb191fcc7dbea9ece8bbc7adcdd1a19f6d97cc6236f6d04dd309a; signer-install.md 133,574 bytes, 5a3ad62726dc2eeddb79cdfb79ed362578fa6201e31fe9f28f35d593af4bdae3; no carriage return.
+- X5: ca-rotation.md 51,578 bytes, sha256 c9ad26e38a9e81f9328111986b5a235cd17f587e92373df88cde08d5ff0e34bf; no carriage return.
+- GREEN on X2's and on X5's tree: the RED command exited 0 with every leaf of both tests passing (15 PASS lines), and `bash scripts/linux.sh 'exec 2>&1; go test -count=1 -timeout 15m -run "Runbook|CARotation|HostTrust|SignerInstall|MoveAside|Restore|SecurityDocs|Docs" ./cmd/keyroster/'` printed `ok`.
+- gofmt and `go vet ./cmd/keyroster/` were clean before X1 and X4; gofmt and `go vet -tags "e2e e2erotation" ./test/e2e/` before X3 and X6, and the plan's goroutine and `t.Parallel` grep found nothing in the test file.
+
+**The document mutants.** Under the mutant rule, with `bash scripts/linux.sh 'exec 2>&1; go vet ./cmd/keyroster/ && go test -count=1 -timeout 5m -v -run "^(TestCARotationSwitchRunbook|TestHostTrustRunbooks)$" ./cmd/keyroster/'`, the unmutated run first (at X2 and again at X5: exit 0, 15 PASS lines), then each mutant as one exact replacement of the raw text whose old text occurs exactly once (all checked before the first run and again at each apply), vet passing on the mutated tree, the file restored with `git checkout --`, its sha256 equal to the one before and `git status --short -- cmd internal test docs .github` empty after each. Each was killed by its named leaf with exactly the parent test's FAIL line and the leaf's, and no other FAIL, build failure, setup failure or SKIP. XM1 to XM20 ran at X2; XM21 to XM34 at X5. `gate` is TestCARotationSwitchRunbook/host_ca_gate, `item` is TestHostTrustRunbooks/enroll_user_trusting_hosts; the messages of XM1 to XM20 are those of the run at X2.
+
+| Name | Item | File | Replacement | Leaf | Message |
+|------|------|------|-------------|------|---------|
+| XM1 | F1 | enroll-user.md | item 4a's paragraph moved to the end of the file (one replacement of the span from its marker to the end) | item | hosttrust_runbook_test.go:127 the section holds `**4a. ` 0 times, want once |
+| XM2 | F1 | enroll-user.md | a second line `**4a. A second item 4a.** Added after item 5.` inserted after item 5's paragraph | item | :127 the section holds `**4a. ` 2 times, want once |
+| XM3 | F2 | enroll-user.md | `or an admin's` becomes `or a` in item 4a | item | :132 lacks "a `keyroster login` without `--no-known-hosts` or an admin's `keyroster known-hosts sync` writes its `@cert-authority` line" |
+| XM4 | F2 | enroll-user.md | `unless an admin runs` becomes `unless it runs` | item | :132 lacks "unless an admin runs `keyroster known-hosts sync` as that account" |
+| XM5 | F2 | enroll-user.md | in item 4a, `` `keyroster login` without `` becomes `` `keyroster login` with `` (anchored on `only through a refresh: a`) | item | :132 lacks the F2 token of XM3 |
+| XM6 | F3 | ca-rotation.md | `the largest user` becomes `the smallest user` | gate | runbook_test.go:1264 "The host CA" lacks the F3 phrase |
+| XM7 | F4 | ca-rotation.md | the first refresh route's `without` becomes `with` (anchored on `A user refreshes with a`) | gate | :1264 "The host CA" lacks "A user refreshes with a `keyroster login` without" |
+| XM8 | F5 | ca-rotation.md | `a client on Windows, clients older than OpenSSH 8.5, ` deleted from the UNVERIFIED list (with the line break inside it) | gate | :1264 "The host CA" lacks the F5 list phrase |
+| XM9 | F5 | ca-rotation.md | `a real fleet, ` deleted there | gate | :1264 "The host CA" lacks the F5 list phrase |
+| XM10 | F5 | ca-rotation.md | `possibly weeks after` becomes `right at` | gate | :1264 "The host CA" lacks "`Host key verification failed` from then on, possibly weeks after the switch, until it refreshes" |
+| XM11 | F6 | enroll-user.md | ` and a host certificate issued by hand across a host-CA switch` deleted (with its line break) | item | :132 lacks "and a host certificate issued by hand across a host-CA switch" |
+| XM12 | F7 | signer-install.md | `outlives the trust in that key` put back to `outlives the hosts' trust in it` | gate | :1264 lacks "outlives the trust in that key" and :1269 still holds "the hosts' trust in it" |
+| XM13 | F8 | machine-identities.md | ` UNVERIFIED: no test runs sync for another account.` deleted | gate | :1264 machine-identities.md lacks "UNVERIFIED: no test runs sync for another account" |
+| XM14 | F9 | ca-rotation.md | the sentence from `That sync signs` to `reach right after.` deleted | gate | :1264 four `lacks`, F9's four phrases |
+| XM15 | F9 | ca-rotation.md | `every one of its processes can ask it to sign as the admin` becomes `no other process can use it` | gate | :1264 lacks "every one of its processes can ask it to sign as the admin" |
+| XM16 | F9 | ca-rotation.md | `while nothing else runs as that account` becomes `at any time` | gate | :1264 lacks "run the sync while nothing else runs as that account, and end the agent's reach right after" |
+| XM17 | F9 | ca-rotation.md | `` `--admin-key` `` becomes `` `--key` `` | gate | :1264 lacks "its fingerprint given with `--admin-key`" |
+| XM18 | F10 | ca-rotation.md | the several-computers sentence deleted | gate | :1264 lacks the F10 sentence |
+| XM19 | F10 | ca-rotation.md | `the file on each of them` becomes `the file on one of them` (`on each of them` alone also occurs at :247) | gate | :1264 lacks the F10 sentence |
+| XM20 | F1 | enroll-user.md | item 4a moved after item 5 inside the section (an addition: the only mutant that reaches F1's second check) | item | :130 no `**5. The costs.**` follows it in the section |
+| XM21 | G1 | ca-rotation.md | in the first refresh route, `--no-known-hosts` becomes `--known-hosts` | gate | :1264 lacks "A user refreshes with a `keyroster login` without `--no-known-hosts`" |
+| XM22 | G2 | enroll-user.md | `, and so are a sync that an admin runs for another account and a host certificate` becomes `, and a host certificate` | item | hosttrust_runbook_test.go:137 lacks the merged UNVERIFIED token |
+| XM23 | G2 | enroll-user.md | the two entries moved in front of the label: the sentence before it ends `clients on loopback), a sync that an admin runs for another account and a host certificate issued by hand across a host-CA switch.` and the label reads `UNVERIFIED on a real client and on Windows.` | item | :137 lacks the merged UNVERIFIED token |
+| XM24 | G2 | ca-rotation.md | in "The host CA", `UNVERIFIED: the host drain's` becomes `It also shows the host drain's` | gate | :1264 "The host CA" lacks "UNVERIFIED: the host drain's end on a real host and client (unit-tested only), a real fleet, a client on Windows, clients older than OpenSSH 8.5, real clients that never refresh, and a sync run for another account" |
+| XM25 | G2 | ca-rotation.md | `(UNVERIFIED: no test runs sync for another account.)` becomes `(No test runs sync for another account.)` | gate | :1264 lacks "(UNVERIFIED: no test runs sync for another account.)" |
+| XM26 | G2 | ca-rotation.md | `(UNVERIFIED: no test shows` becomes `(no test shows` | gate | :1264 lacks "(UNVERIFIED: no test shows a kept certificate surviving that refusal)" |
+| XM27 | G2 | ca-rotation.md | `(UNVERIFIED: no test issues` becomes `(no test issues` | gate | :1264 lacks "(UNVERIFIED: no test issues a host certificate by hand across a host-CA switch)" |
+| XM28 | G2 | ca-rotation.md | `; UNVERIFIED end to end` deleted | gate | :1264 lacks "an answer by a host CA outside the agent's trusted set; UNVERIFIED end to end" |
+| XM29 | G2 | ca-rotation.md | in "Run in CI", `UNVERIFIED: the drain on` becomes `Also run: the drain on` | gate | :1264 "Run in CI" lacks "UNVERIFIED: the drain on real hosts of a fleet, the machine CA, the host drain's end on a real host and client (unit-tested only)" |
+| XM30 | G3 | signer-install.md | `so that no certificate the signer issued` becomes `so that a certificate the signer issued` | gate | :1264 lacks "so that no certificate the signer issued under the old key outlives the trust in that key" |
+| XM31 | G4 | enroll-user.md | item 4a moved, whole, to before item 4 inside the section (one replacement of the span from item 4's marker to item 5's) | item | hosttrust_runbook_test.go:132 the section holds `**4. ` 1 times, want once and before `**4a. ` |
+| XM32 | G5 | ca-rotation.md | `with any key it holds` becomes `with the admin key only` | gate | :1264 lacks "every one of its processes can ask it to sign with any key it holds" |
+| XM33 | G6 | ca-rotation.md | `at an admin quorum of 1, the default, one admin signature` becomes `at any admin quorum, two admin signatures` | gate | :1264 lacks "at an admin quorum of 1, the default, one admin signature authorises a new directory" |
+| XM34 | G5 | ca-rotation.md | `use an agent that holds the admin key alone, ` deleted | gate | :1264 lacks "use an agent that holds the admin key alone, run the sync while nothing else runs as that account, and end the agent's reach right after" |
+
+XM1 to XM20 ran again at X5, each killed by its named leaf with exactly the expected FAIL lines (the hosttrust messages now at :128, :135 and :137, the runbook ones at :1264 and :1269). Two were adapted to X5's text, which changed the words they mutate: XM14 deletes X5's whole sentence, from `That sync signs` to `the agent's reach right after.`, and five `lacks` fire (F9's first two phrases and G5's three); XM15 turns `every one of its processes can ask it to sign with any key it holds` into `no other process can use it`. XM16 is unchanged and is now caught by G5's third phrase; XM7 by G1's phrase; XM8 and XM9 by G2's merged list; XM11 by G2's merged item-4a token. XM31's message names the count and the order in one sentence; it stays so (the orchestrator's ruling).
+
+**The end-to-end runs**, each through the orchestrator's runner of the namespace wrapper (`-timeout 12m`, TestHostCARotation alone), in the background, one at a time, nothing else running in WSL.
+
+| Tree | Build | Result | Test (s) | `go test` (s) | Step 6a's logged end | r1, r2 gap | Bundle 2, bundle 3 committed after the install (s) |
+|------|-------|--------|----------|---------------|----------------------|------------|-----------------------------------------------------|
+| X3 (deviation 8) | 10.5p1 | PASS | 155.03 | 188.691 | r1 + 43.157 s | 64 s, 54 s | 10.373, 10.844 |
+| X3 (deviation 8) | 9.5p1 | PASS | 148.08 | 166.734 | r1 + 43.166 s | 55 s, 56 s | 10.159, 8.863 |
+| X6 | 10.5p1 | PASS | 179.36 | 202.274 | r1 + 43.117 s | 62 s, 62 s | 10.665, 15.087 |
+| X6 | 9.5p1 | PASS | 145.56 | 162.379 | r1 + 43.238 s | 56 s, 53 s | 10.219, 8.832 |
+
+- In each passing run the new login's line names generation 1's CA as expected and as served, for example at X3 on 10.5p1 `client A after the host committed the switch: ssh exited 0; expected CA SHA256:HQCgqSUdc8rv5Ns9JbYp4SFC3T+HhkBQxY5+ahWfsQA; debug1: Server host certificate: ... serial 1795387188549602 ... CA ssh-ed25519 SHA256:HQCgqSUdc8rv5Ns9JbYp4SFC3T+HhkBQxY5+ahWfsQA` (r1); each logged `re-anchored: false` and the fixed last line once, with no SKIP or FAIL line.
+- **The narrowing mutant** (the review's MN): in cmd/keyroster/narrow.go, `if ca.State == "draining" { continue }` as the first statement of the loop over `trust.TrustedCAs(b, trust.RoleHost, now)`, one exact replacement asserted unique; `go vet ./cmd/keyroster/` exit 0 on the mutated tree. At X3 on 10.5p1: `--- FAIL: TestHostCARotation (132.64s)`, after step 6a's attempts and drop-in checks passed, at the new login: `client A after the host committed the switch: ssh to web1 exited 255, want 0 with Server host certificate by SHA256:DP1dQr33O7Ozyy6YkbrrnY1sKDN4XEIlWKQS/98vCWA`, ssh printing `No matching CA found. Retry with plain key` and `Host key verification failed.` At head 4869fde the same mutant had survived (the review's run). At X6 on 10.5p1 its first try stopped earlier, at step 5: `doctor after retire-key exited 1`, doctor printing `FAIL clock_regression: the wall clock is 1s (1 s) behind the serial high-water mark` (89.42 s); under the plan's rule for clock flakes, as the orchestrator ruled, it was re-run once unchanged (the same replacement, vet again exit 0; deviation 11) and was killed as at X3: `--- FAIL: TestHostCARotation (137.32s)`, the same message at the new login with that run's generation-1 fingerprint (SHA256:GGq5KYSQjj386ZsZuXGAQUtltakv9H29WGDdar1LMCI), and the same two ssh lines. After each run narrow.go was restored (sha256 0b31b3750c50da575aa8de6d5ea19de8a4dfd74fb31b605dc20a5aa48f3b068e before and after) and the status was empty.
+- **M373 again** at X3 on 10.5p1 (its replacement as in Task 2; `go vet ./internal/agent/apply/` exit 0): `--- FAIL: TestHostCARotation (135.78s)` at step 6a's attempts check, `step 6a: the host asked for a certificate at 2026-11-22T22:50:04Z, after r1's issuance 1795387798`, before the new login (the log has no line of it). Restored: sha256 da93def1aa4a33c6a34f7f8d0d5bac256986e0dd989e50845853c375d58428c0 before and after; the status empty. M373 was not run at X6, which changes nothing before the login.
+- M371 and M372 were not run again: their assertions are step 8's, which neither X3 nor X6 touches.
+- A login that returns after r1 + 50 s: at X3 it failed inside `hcrServes`, whose time left is worked out after the login returns and which makes no try once it is at or below zero (hostca_rotation_test.go:110-113) and then fails (:148); since X6 it fails at once with `step 6a: client A's login returned at <t>, after r1 + 50 s (<bound>)`, the check `!now.Before(...)` matching `hcrServes`'s treatment of no time left. That branch is read, not run: no run here reaches it without a changed bound.
+- **What the local readings of step 6a's end show.** The check sleeps until r1 + 45 s by the monotonic clock and logs its end by the wall clock. These four runs logged its end at about r1 + 43.1 s to 43.2 s, so the WSL wall clock fell about 1.8 s to 1.9 s behind the monotonic clock during the sleep, a larger lag than the 1.1 s recorded above for the earlier local runs, and still far below the 4.17 s that the attempts check's whole seconds allow for. No assertion failed on it, and no bound was changed.
+
+**What `/trust` answers from** (read for G7): `handleTrust` (internal/server/server.go:323-324) answers from `currentStatus`, which serves a cached signer status younger than `statusTTL`, 5 s (internal/server/signer.go:372, :435-443), timed from the moment its refresh started; a failed refresh is never cached. `keyroster host status` verifies the bundle and narrows (cmd/keyroster/hoststatus.go:130, through `verifiedTrust`, narrow.go:61-66) before it asks for the host status (:134).
+
+**The counts of the leaf's phrases** (required, then forbidden, by window: "The host CA", the header, "Run in CI", "Before ceremony 2", "What changes for nobody", machine-identities.md, signer-install.md; holds counted by a parser of the leaf's table, forbidden phrases by a grep of its `holdsNot` lists, both checked against the base first):
+
+| | Required | Forbidden | Item-4a tokens |
+|---|---|---|---|
+| Before the round (4869fde) | 82 (64, 1, 2, 9, 1, 4, 1) | 6 (1, 0, 1, 2, 0, 1, 1) | 14 |
+| After X3 | 91 (71, 1, 2, 9, 1, 5, 2) | 7 (1, 0, 1, 2, 0, 1, 2) | 17 |
+| After X6 | 91 (71, 1, 2, 9, 1, 5, 2) | 7 (1, 0, 1, 2, 0, 1, 2) | 16 |
+
+"The host CA" stays at 71 from X3 to X6 because X4's changes cancel: G5 adds one phrase, the new label phrase one, and G2's merge of three phrases into one removes two. Item 4a loses one token by G2's merge of two into one. Besides the tokens, item 4a's window is held by three checks: `**4a. ` once in the section, `**4. ` once and before it, `**5. The costs.**` after it.
+
+**Lint.** After X3 and again after X6: `$HOME/go/bin/golangci-lint run ./cmd/keyroster/` and `$HOME/go/bin/golangci-lint run --build-tags "e2e,e2erotation" --new-from-rev=origin/main ./test/e2e/` (origin/main c6c632d), each `0 issues.`; `gofmt -l cmd/keyroster test/e2e` empty. The full gate below runs every leg of the sixth verify command.
+
+**The gates of part B** (each in the background with nothing else running in WSL; origin/main c6c632d130450e24fe432dfd68bcf00420dc2231 after `git fetch origin` at the start of part B, so no rebase):
+- **The base**, re-measured in place (see "Task 1"): `keyroster=303.005 at=1795391117`, from a detached worktree of origin/main under a temporary directory outside the repository, removed afterwards (`git worktree list` then lists no temporary worktree).
+- **The delta gate** (the fifth verify command, extracted byte for byte from plan line 930 and run unchanged): exit 0, `ok  	github.com/Labontese/keyroster/cmd/keyroster	284.858s`, 18.147 s under the base, no FAIL or DATA RACE.
+- **The full gate** (the sixth verify command, plan line 932, extracted byte for byte and run unchanged). The first run exited 1 after 670 s with two failing packages, neither touched by this branch: internal/signer, `--- FAIL: TestCheckLogAgainstLiveSigner (0.65s)` with `log_test.go:454: unavailable: clock_regression`, and internal/agent/fetch, `--- FAIL: TestFetch/more_repolls_immediately (1.89s)` with `fetch_test.go:278: requests ["GET /api/v1/agent/state" "GET /api/v1/agent/state?bundle=1"] in 1.456053679s, want two at once, the second with the new bundle version` (the pre-existing timing flake under whole-module `-race` load of deferred-items.md and 03-14b); the other 34 packages `ok`, and the command's chain stopped at the failing `go test`. Under the plan's rule for clock flakes it was run again once, unchanged (deviations 11 and 12): exit 0 after 799 s, 36 `ok` lines (cmd/keyroster 322.607 s, internal/signer 508.358 s, internal/agent/apply 621.126 s, internal/agent/fetch 44.569 s), no FAIL, DATA RACE or SKIP; every `go vet` tag set clean; gofmt clean; golangci-lint `0 issues.` under linux, windows, darwin and the `e2e,e2erotation` pass on the new lines; capslock v0.3.3: keyroster-signer 97 pairs (baseline 97), keyroster-agent 37 (37), keyroster-agent-fetch 23 (23), no pair new against a baseline; dep-firewall clean (EXEC leaves keyroster-agent only through internal/agent/execsite; `os/exec <- modernc.org/libc` the documented exception for keyroster-signer; no banned packages); testonly-firewall clean (6 GOOS/tag combinations); check-pinned-actions: all 55 `uses:` references pinned to commit SHAs.
+
+### The check of the fix round
+
+After X1 to X3 existed as local commits, and before anything was pushed, the orchestrator read their whole diff, recounted the RED, the twenty mutant logs and the four e2e logs, and had the round read once more: one reader (Opus, high effort; 249,152 tokens, 60 tool calls, about 12 minutes), read-only on a detached worktree of X3, with a private copy of the tree for the pins. No skeptic judged its items: each came with a mutant of the reader's own that survived, or with the code lines, and the orchestrator checked the code it relies on itself. No Codex.
+
+What the reader found to hold: the RED and the kills of XM1 to XM20 are in the logs as recorded; "outlives the trust in that key" is true for every role (internal/signer/drain.go:250-287 applies the binding to every newly draining entry); between the switch install and the new login the only keyroster calls are the commit wait's `host status` polls, and each narrows A's live file; the narrowing mutant fails at the new login and M373 at the attempts check before it; one login takes about 0.1 s to 0.3 s, which by the CI readings of 4869fde leaves about 4.5 s before the keyscan's bound; and the login cannot pass wrongly, because the managed file holds `@cert-authority` lines only.
+
+Its five items, all acted on in X4 to X6:
+
+1. UNVERIFIED labels were pinned by their words and not as labels: its mutants RM1 and RM2 (item 4a) and RM3 ("The host CA") survived. Answered by G2.
+2. The new sentence on an admin's sync as another account was true by the code and incomplete: an agent signs with every key it holds, and the text did not say what one admin signature is worth. Answered by G5 and G6; the orchestrator read both facts in the code (`--admin-quorum` defaults to 1 in `root genesis-policy`, cmd/keyroster/root.go:142; a directory needs that many admin signatures, internal/directory/verify.go:34).
+3. The pin of "outlives the trust in that key" was met by the negated sentence: RM4 survived. Answered by G3.
+4. Item 4a moved to before item 4, inside its section, passed: RM5 survived. Answered by G4.
+5. Two comments of the new login said more than the code shows, and a login that returned late failed with a message that blames sshd. Answered by G7; the executor then found that the clause the orchestrator dictated for the comment said more than the code shows as well, and wrote what the code shows (deviation 9).
+
+G1 is the orchestrator's own: the login route's pin stopped before its flag, because the brief's markup was ambiguous.
+
+Not taken from item 2: what the reader says of the Windows OpenSSH agent rests on that agent's behaviour, which this repository does not show; a client on Windows stays UNVERIFIED. Not checked by the reader: it ran no e2e test, the round was not pushed and had no CI, and nothing on Windows. X4 to X6 were read by the orchestrator (their whole diff, the RED, the 34 mutant logs and the e2e logs) and by no further reader.
+
+### CI on 4869fde, the head the review read
+
+Every run of that head succeeded at its first attempt and none was run again: CI 45067470990, E2E 45067471042, E2E TPM 45067470971, PIV 45067470980, E2E distro 45067471131, E2E PKCS#11 45067471059, Systemd 45067470972, CodeQL 45067470987, Workflow lint 45067471013, PR title 45067470967. All 30 required checks passed. The orchestrator read the figures below from the six job logs of the E2E run.
+
+`go test` in each lane, beside the larger of the two base readings of that lane (the plan's "The budget"):
+
+| Lane | Base (s) | 4869fde (s) | Difference (s) |
+|------|----------|-------------|----------------|
+| e2e-rotation (9.5p1) | 540.411 | 660.758 | +120.347 |
+| e2e-rotation (10.5p1) | 530.958 | 657.877 | +126.919 |
+| e2e (9.5p1) | 787.868 | 737.658 | -50.210 |
+| e2e (10.5p1) | 798.716 | 773.829 | -24.887 |
+| e2e-probe (9.5p1) | 292.476 | 300.039 | +7.563 |
+| e2e-probe (10.5p1) | 290.372 | 281.009 | -9.363 |
+
+Both rotation lanes are under the owner's 900 s and under the plan's typical figures (about 681 s and 672 s). The main and probe lanes compile nothing of this plan, so their differences are run-to-run spread; neither main lane's log names TestHostCARotation.
+
+TestHostCARotation in the two rotation lanes:
+
+| | 9.5p1 | 10.5p1 |
+|---|---|---|
+| Duration | 131.97 s | 125.75 s |
+| c1 observed after its issuance (bound 15 s) | 1.698 s | 1.674 s |
+| Signer down: prepare, the install of ceremony 1, the switch | 28, 27 and 51 ms | 28, 27 and 50 ms |
+| Bundle 2 committed after its install, and after the signer served again (bound 45 s) | 14.097 s, 14.077 s | 16.110 s, 16.089 s |
+| r1 and r2, each after the previous issuance (51 s to 75 s) | 56 s, 59 s | 55 s, 54 s |
+| Step 6 ended at (bound r1 + 28 s) | r1 + 1.549 s | r1 + 2.162 s |
+| Bundle 3 committed after its install, and after the signer served again | 10.622 s, 10.579 s | 10.435 s, 10.393 s |
+| Step 6a ended at (bound r1 + 50 s) | r1 + 45.107 s | r1 + 45.053 s |
+| Re-anchored | no | no |
+| Client B after the renewal, then after its remedy | exit 255, then exit 0 | exit 255, then exit 0 |
+
+In both lanes every login's `Server host certificate` line names the expected host CA: generation 1 for A and B after ceremony 1 and right after the switch, generation 2 for A after the renewal, for B's refused login and for B after its remedy. Step 6a ended at about r1 + 45.1 s in both lanes, without the shortfall of about 1.1 s that the local runs show; that is one observation, not a measurement of the runners' clock. `login failures: 0` stands in both lanes' TestCARotationNoFailedLogin.
 
 ## Commits
 
@@ -327,11 +547,20 @@ Pending. The orchestrator runs it on the green PR (Task 4, step 6), before Task 
 | R3 | ce7f58416fdc1f289bdb99efd0556a45e720c838 | test(cli): pin the host-CA gate, its test and the end-state plan numbers of the rotation runbook | yes, both files, one at a time, after the last edit |
 | W3 | 136163f6da3f70081c48cd4e358e89ff84d90e9e | docs(runbooks): state the host-CA rotation gate, who can refresh, and what a client that never refreshes meets | yes, all four files, one at a time, after the last edit |
 | P4 | 4e058f8073494945f774db64cf07ff3fe11cdc89 | docs(03-12f2): plan out the host-CA end-to-end test | yes, the one file, after the last edit (the staged diff saved outside the repository and read whole, folded at 1,400 columns) |
-| this commit | (cannot name itself) | docs(03-12f2): complete ca-rotation-host-ca-e2e plan | yes, ROADMAP.md, STATE.md and this SUMMARY, one at a time, after the last edit |
+| the first SUMMARY commit | 4869fde5904361f44e8d71ea13b90a716841ccee | docs(03-12f2): complete ca-rotation-host-ca-e2e plan | yes, ROADMAP.md, STATE.md and this SUMMARY, one at a time, after the last edit |
+| X1 | c824af94bfda26cf8cddcb4f8681548a929c1074 | test(cli): pin the rest of the host-CA gate and hold item 4a to its section | yes, both files, one at a time, after the last edit |
+| X2 | 029da1b17bb0606417ddffa5b4197f1124b05d49 | docs(runbooks): say what an admin's sync for another account opens, and label what no test shows | yes, all four files, one at a time, after the last edit |
+| X3 | 459b8260b4e204cbad0702c1f293796efaff5956 | test(e2e): log the refreshed client in after the host committed the host-CA switch | yes, the one file, after the last edit |
+| X4 | ace104b28c5cd20820ae8ce5cd8e805b49d500bd | test(cli): pin the UNVERIFIED labels with their sentences and item 4a between its neighbours | yes, both files, one at a time, after the last edit |
+| X5 | 80fd108431eef948da72603eb1f2217f17dddfc6 | docs(runbooks): say what the admin's agent signs and what one admin signature authorises | yes, the one file, after the last edit |
+| X6 | 85d0ec4206e31d6295a25b069f564420c019df97 | test(e2e): say which polls narrowed the file and name a late login | the working-tree diff in full right before `git add`, with no edit between, and the committed diff in full right after the commit (deviation 10) |
+| this commit | (cannot name itself) | docs(03-12f2): record the pre-merge review and its fix round | yes, this SUMMARY, after the last edit |
 
 Every commit is signed with keyroster-bot's SSH key (a `gpgsig` header in each), authored as Daniel Gustafsson and committed by keyroster-bot.
 
 ## Mutants
+
+The fix round's mutants (the document mutants XM1 to XM34, the narrowing mutant at X3 and X6, and M373's second run at X3) are recorded in one place, under "The fix round" above. What follows are Task 2's.
 
 Under the mutant rule, at G2, on 10.5p1 through the wrapper, each with the action's e2e command (`-timeout 12m`), applied by one exact replacement asserted unique, vetted, restored with `git checkout --` and hash-checked.
 
@@ -370,3 +599,8 @@ Under the mutant rule, at G2, on 10.5p1 through the wrapper, each with the actio
 
 6. **[Clock flake, the plan's rule] The full gate's first run failed on `clock_regression` and was re-run once, unchanged.** The sixth verify command's first run exited 1 on `--- FAIL: TestCheckLogAgainstLiveSigner (0.30s)` with `log_test.go:454: unavailable: clock_regression`, in internal/signer, a package this branch does not touch; the WSL clock read earlier than a moment before it (03-12f's deviations 6, 11 and 19). The plan's "One rule for clock flakes" covers a first failure of the full gate whose message names `clock_regression`: the same command was run again unchanged and exited 0 (both runs under "Gates"). No bound, timeout or assertion was changed.
 7. **[Form, nothing loosened] The publish scan before P4 ran in full.** Task 4's action asks for the whole-file legs of the publish scan, the seventh verify command up to its `git cat-file` leg, before P4. The command was run verbatim and in full rather than cut at that leg, so that no plan command was edited: its whole-file legs on the plan file come first and its exit 0 covers them; its later legs read main's early text at HEAD and the added lines of G2 to W3, and passed as well. After P4 it ran again in full, its `git cat-file` leg then reading the committed text.
+8. **[Order, fix round part A] X3's two unmutated end-to-end runs ran before X3 was committed.** They ran on the working tree, and the file was then committed with no edit between: the staged diff read `index 9a48989..5274c34`, and `git rev-parse HEAD:test/e2e/hostca_rotation_test.go` is 5274c348e6298e387a14ae4ab3a587ba802c4db9, so both runs ran X3's text. The two product mutants of part A ran after the commit. **Ruling** (the orchestrator): accepted; the unmutated runs ran on the file as committed.
+9. **[A comment says less than dictated, fix round part A2] Step 6a's comments do not say that the last poll narrowed under bundle 3.** The dispatch for X6 asked the comments to say that the commit wait's polls narrowed A's live file, "the last of them at least under bundle 3 (the host took bundle 3 from the same server before it could commit it)". The code does not order it so: `keyroster host status` verifies the bundle and narrows (cmd/keyroster/hoststatus.go:130, through `verifiedTrust`, narrow.go:61-66) before it asks for the host status (:134), and `/trust` answers from a signer status cached for up to 5 s (internal/server/server.go:323-324, internal/server/signer.go:372, :435-443); so the poll that saw the commit narrowed under whatever `/trust` gave it when it started, which can, by the code, come before the host fetched bundle 3. The comments say instead that each poll verifies the bundle and narrows A's live file under it before it asks for the host status, that a poll soon after the switch may still have verified bundle 2, and that A's login shows the old host CA's line survived those narrowings. That a narrowing under bundle 3 did come before the login in these runs is shown by the narrowing mutant's kill, not by the code. **Ruling** (the orchestrator): accepted; the comment says what the code shows, the orchestrator read `statusTTL` at internal/server/signer.go:372 itself, and the clause it had dictated said more than the code shows.
+10. **[Staged read, fix round part A2] X6's staged diff was not read with `git diff --cached` before its commit.** Its `git diff` was read in full right before `git add`, with no edit between, and before the commit only the line count of `git diff --cached` (48 lines) was printed; right after the commit `git show HEAD` was read in full: the same diff, `index 5274c34..bfd2793`. **Ruling** (the orchestrator): accepted; the diff was read in full before the add and again in the commit, recorded as it happened.
+11. **[Clock flake, the plan's rule] The narrowing mutant's first try at X6 stopped at step 5 on `clock_regression` and was re-run once, unchanged.** Doctor after retire-key exited 1 with `FAIL clock_regression: the wall clock is 1s (1 s) behind the serial high-water mark`, the WSL clock having read earlier than a moment before it, as in deviation 6. The plan's "One rule for clock flakes" lists a mutant's unmutated run, not its mutated one; the orchestrator ruled that this first try falls under the rule all the same. The same mutant was applied again by the same replacement, vetted and run unchanged, and was killed at the new login (both runs under "The fix round"). No bound, timeout or assertion was changed. **Ruling** (the orchestrator): it falls under the plan's clock rule; both runs are recorded.
+12. **[Clock flake and a known timing flake in one run] The full gate of part B was re-run once, unchanged, after a first run with two failures.** One failure named `clock_regression` (internal/signer, `TestCheckLogAgainstLiveSigner`), which the plan's rule for clock flakes covers; the other was `TestFetch/more_repolls_immediately` in internal/agent/fetch, a wall-clock bound that whole-module `-race` load exceeds, recorded as a pre-existing flake in deferred-items.md and met before in 03-08c, 03-09, 03-10b and 03-14b, and not a clock reading the rule names. Both packages are untouched by this branch. The re-run the clock rule asks for was the one re-run: it exited 0 (both runs under "The fix round"). No bound, timeout or assertion was changed. Not yet ruled on: whether the rule's one re-run may cover a failure in the same run that its text does not name.
