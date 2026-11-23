@@ -851,10 +851,18 @@ func knownHostsFile(cas []trust.CAEntry, active []string, st *hostTrustState) []
 	if len(active) > 0 {
 		names := strings.Join(active, ",")
 		for _, ca := range cas {
-			fmt.Fprintf(&b, "@cert-authority %s %s keyroster host CA generation %d\n", names, ca.Key, ca.Generation)
+			b.WriteString(hostCALine(names, ca))
 		}
 	}
 	return []byte(b.String())
+}
+
+// hostCALine is the managed file's @cert-authority line for ca over names,
+// a comma-joined list (03-12g): knownHostsFile writes every CA line with
+// it, and keyroster machine renew adds its lines with it, so the two cannot
+// disagree on the form.
+func hostCALine(names string, ca trust.CAEntry) string {
+	return fmt.Sprintf("@cert-authority %s %s keyroster host CA generation %d\n", names, ca.Key, ca.Generation)
 }
 
 // sshConfigFile returns keyroster_ssh_config: the header, the Include

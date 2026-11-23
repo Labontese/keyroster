@@ -71,6 +71,7 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 	var expect stringList
 	fset.Var(&expect, "expect-principal", "a principal the certificate must carry (repeatable)")
 	ifDue := fset.Bool("if-due", false, "renew only when CERTFILE is missing, does not verify, is for another key, name or CA, lacks an expected principal, or is due")
+	_ = fset.Bool("no-known-hosts", false, "do not add host CA lines to ~/.ssh/keyroster_known_hosts or move its bundle floor; CA lines the trust bundle no longer trusts are still removed from it")
 	pos, err := parseInterspersed(fset, args)
 	if err != nil {
 		return errUsage

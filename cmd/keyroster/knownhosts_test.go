@@ -2749,7 +2749,8 @@ func narrowCommandCases(t *testing.T) {
 			e.mu.Unlock()
 			sshDir, before, drained := dirRotated(t, e, drainedAt)
 			key, _ := machineKeyFile(t)
-			_, _, errOut := run(t, "machine", "renew", "ci", "--key", key, "--out", filepath.Join(t.TempDir(), "ci-cert.pub"))
+			// --no-known-hosts: the narrowing runs without the step, which would also move the floor (03-12g).
+			_, _, errOut := run(t, "machine", "renew", "ci", "--key", key, "--out", filepath.Join(t.TempDir(), "ci-cert.pub"), "--no-known-hosts")
 			requireNarrowed(t, sshDir, before, drained, errOut)
 		})
 	})
