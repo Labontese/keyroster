@@ -12,9 +12,9 @@ key-files:
   modified: [cmd/keyroster/machinerenew.go, cmd/keyroster/knownhosts.go, cmd/keyroster/knownhosts_test.go, cmd/keyroster/runbook_test.go, cmd/keyroster/hosttrust_runbook_test.go, test/e2e/hostca_rotation_test.go, docs/runbooks/ca-rotation.md, docs/runbooks/enroll-user.md, docs/runbooks/machine-identities.md, .planning/phases/03-linux-agent-and-revocation/03-12d-PLAN.md, .planning/phases/03-linux-agent-and-revocation/03-13-PLAN.md, .planning/phases/03-linux-agent-and-revocation/03-14-PLAN.md, .planning/phases/03-linux-agent-and-revocation/03-15-PLAN.md, .planning/phases/03-linux-agent-and-revocation/03-16-PLAN.md, .planning/ROADMAP.md, .planning/STATE.md]
 requirements-completed: []
 actuals:
-  tokens: 94489    # chars/4 over the realized diff against a49a214 without this SUMMARY (321,184) plus this SUMMARY (56,772)
-  tasks: 5         # Tasks 1 to 5 up to the green PR; Task 5's step 6 (the pre-merge review) is the orchestrator's and Task 6 the owner's merge
-  commits: 7       # git rev-list --count a49a214..HEAD with this commit: R2, G2, C3, R4, W4, P5 and this commit
+  tokens: 96994    # chars/4 over the realized diff against a49a214 without this SUMMARY (322,016) plus this SUMMARY (65,963), at S7
+  tasks: 5         # Tasks 1 to 5 up to the PR, its red rotation lanes on the first two heads and the fix round; Task 5's step 6 (the pre-merge review) is the orchestrator's and Task 6 the owner's merge
+  commits: 9       # git rev-list --count a49a214..HEAD with S7: R2, G2, C3, R4, W4, P5, the first SUMMARY commit, F6 and S7
 plan_head_before: a49a214604600c3bc2818584acdde47c5bf2315c
 ---
 
@@ -47,9 +47,12 @@ are never staged.
 After session 3 (Task 5, steps 1 to 5). Done: the precondition; P5 after a full read of its
 staged diff and the publish scan; the test-time base re-measured and replaced in place; the
 delta gate and the full gate (each exit 0 on its first run); the push; PR #120 opened by
-keyroster-bot without auto-merge; the tracking update; this SUMMARY's commit, pushed. See
-"Task 5 (session 3)". Next: the orchestrator's pre-merge review (Task 5, step 6), then the
-owner's merge gate (Task 6).
+keyroster-bot without auto-merge; the tracking update; the first SUMMARY commit, pushed. See
+"Task 5 (session 3)". The e2e-rotation lanes were red on the PR's first two heads (P5 and the
+first SUMMARY commit), so step 5 was not complete there; on the orchestrator's ruling the fix
+round added F6 (a fixed wait after client C's setup) and S7 (this record). See "The rotation
+lanes' red runs on the first two heads, and the fix". Next: the orchestrator's pre-merge review
+(Task 5, step 6) on a green PR, then the owner's merge gate (Task 6).
 
 ## Task 1: preconditions and base
 
@@ -88,8 +91,8 @@ owner's merge gate (Task 6).
   1795458749 on, after the test binary had been built (the run's test time is 280.23 s of its
   292 s): the measured binary is a49a214's.
 
-test-time base: keyroster=271.776 at=1795464358
-Re-measured in session 3 (Task 5) and replaced in place, because session 1's base (280.230 s at epoch 1795458760) came from another session and another WSL boot: on origin/main a49a214 in a detached worktree outside the repository, removed afterwards; Budget's command (`bash scripts/linux.sh 'exec 2>&1; go test -race -count=1 -timeout 15m ./cmd/keyroster/'`, with a read of the WSL boot id put before it), in the background with nothing else running in WSL; started at epoch 1795464069, `ok  github.com/Labontese/keyroster/cmd/keyroster 271.776s`, exit 0; WSL boot id 4974cc49-ddca-4836-a015-2032127a83e3 before and after the run.
+test-time base: keyroster=264.218 at=1795469558
+Re-measured in session 3 (Task 5) and replaced in place, because session 1's base (280.230 s at epoch 1795458760) came from another session and another WSL boot: on origin/main a49a214 in a detached worktree outside the repository, removed afterwards; Budget's command (`bash scripts/linux.sh 'exec 2>&1; go test -race -count=1 -timeout 15m ./cmd/keyroster/'`, with a read of the WSL boot id put before it), in the background with nothing else running in WSL; started at epoch 1795464069, `ok  github.com/Labontese/keyroster/cmd/keyroster 271.776s`, exit 0; WSL boot id 4974cc49-ddca-4836-a015-2032127a83e3 before and after the run. For the fix round WSL had booted again (boot id 011372f6-9963-4a98-9bdb-83ce959b9cce), so the base was measured once more the same way and replaced in place: started at epoch 1795469275, `ok  github.com/Labontese/keyroster/cmd/keyroster 264.218s`, exit 0, the same boot id before and after the run.
 
 ## Task 2
 
@@ -642,10 +645,119 @@ The open questions of the planning work, each carried: whether OpenSSH falls bac
    and a body; the command run added `--base main --head p03/12g-machine-renew-host-trust` and
    `--body-file <the body file>`, and read its stdin from `/dev/null` so that it could not wait on
    a prompt. The title and the body are the plan's.
+9. **F6 changes test text the plan dictates.** The plan's C3 table (plan line 251) places client
+   C's setup between `hostTrustKR` and `joinHostCert` and adds no wait. F6 inserts, on the
+   orchestrator's ruling after the red rotation lanes, the constant `hcrSetupPayback` with its
+   comment and one `time.Sleep(hcrSetupPayback)` with its comment right after the setup's log
+   line, so the host joins with the admin bucket it has on main (see "The rotation lanes' red
+   runs on the first two heads, and the fix"). Nothing else in the file changes; the setup's
+   logged duration stays the duration of the work, without the wait.
+10. **There is now one fixed wait in the e2e test.** The plan's "The budget" says the e2e
+    additions add no wait, and the PR text said "no new wait in the e2e test". There is now one
+    fixed wait of 4 s in the setup, outside every window. The budget, plainly: the plan's
+    slowest passing figures (about 878 s and 874 s) include an allowance of 15 s for tool time;
+    the lanes measured the setup additions at 34 ms, 30 ms and 32 ms and step 3's two runs at
+    12 ms, so the 4 s wait fits inside that allowance, and the figures and the 900 s rule stand;
+    the typical figure moves by about 4 s.
+11. **The PR body's budget line was replaced.** After F6 and S7 were pushed, the bot replaced
+    only the body's line that began `- the budget: no new wait in the e2e test;` with
+    `- the budget: one new fixed wait of 4 s in the e2e test's setup, outside every window (it pays back the admin requests the third client's setup spends before the host joins); the rotation lanes' slowest passing figure stays about 874 s to 878 s against the owner's 900 s, which applies to the measured run.`
+    (`scripts/gh-as-bot.sh pr edit 120 --body-file <file>`); every other line of the body is
+    unchanged.
 
 ### The plan's wording of one owner decision
 
 The owner's answer of 2026-11-23 on the directory was the option text that the plan quotes in "Owner decisions": `machine renew` only adds the new host CA's line for the host names the account's file already trusts; no new way in; a stolen machine key gains nothing new; a brand-new automation account still needs a first sync by an admin, and hosts added later do not reach it until an admin syncs again. The sentence that follows the quotation in the plan ("So: no new route, credential, wire change, server or signer change; no bootstrap and no new host names through this path") and the same words in the plan's first truth are the plan's reading of the design that option describes, not the owner's words. The delivered change agrees with both: it changes the CLI only. The plan file is not edited for this; this paragraph is the correction.
+
+## The rotation lanes' red runs on the first two heads, and the fix
+
+**The red runs.** No CI re-run was made on either head.
+
+| Run (head) | Lane | `go test` | TestHostCARotation | Readings |
+|---|---|---|---|---|
+| E2E 45259204738 (P5, 1c2c3e0) | e2e-rotation (9.5p1) | FAIL, 547.552 s | FAIL, 15.99 s | refused at `joinHostCert`'s `keyroster host approve` (below) |
+| E2E 45259204738 (P5, 1c2c3e0) | e2e-rotation (10.5p1) | ok, 668.170 s | PASS, 138.92 s | setup 32 ms; step 3's two runs 12 ms; c1 observed 1.832 s and r1 1.924 s after issuance; `re-anchored: false`; both fixed lines once; client C right after the switch and after the renewal `ssh exited 0`, client B after the renewal `ssh exited 255` |
+| E2E 45259904937 (first SUMMARY commit, 07a7a2e) | e2e-rotation (9.5p1) | FAIL, 545.296 s | FAIL, 15.98 s | setup 34 ms; refused at `keyroster host approve` |
+| E2E 45259904937 (first SUMMARY commit, 07a7a2e) | e2e-rotation (10.5p1) | FAIL, 542.230 s | FAIL, 16.47 s | setup 30 ms; refused at `keyroster host approve` |
+
+TestCANextAndAbort and TestCARotationNoFailedLogin passed in every one of these lanes. On
+07a7a2e every other required check passed; its main lanes read 774.532 s and 777.342 s and its
+probe lanes 278.300 s and 280.183 s.
+
+**The cause.** Each failing log shows `keyroster host approve web1 ... exit 1` at
+hostca_rotation_test.go:494 with `the server is rate-limiting requests from this address; try
+again in 1 s`, and the server logged `rate limited` for `POST /api/v1/admin/directory` from
+127.0.0.1 every 2 s, while `pending hosts listed` kept succeeding.
+- `keyroster host approve` spends three admin requests: GET hosts/pending
+  (cmd/keyroster/host.go:577), GET directory (cmd/keyroster/dirpipe.go:137), POST directory. A
+  directory change (`role add`, `machine add`, `host-group add`, `host-group map`) spends two:
+  the GET and the POST. `machine renew` is on its own limiter (internal/server/server.go:248) and
+  spends none.
+- The admin bucket is per client, 20 requests, one more a second
+  (internal/server/ratelimit.go:60-61, server.go:189).
+- The 9.5p1 lane of 07a7a2e: the first admin request at 20:44:13.9, the approval's POST at
+  20:44:19.632. Before that POST the test had sent 25 admin requests: client C's setup 4,
+  joinHostCert's three directory changes 6, the join token 1, twelve polls of host pending, the
+  approval's two reads. 20 + 5.73 refilled - 25 = 0.73, under one request: refused. Without
+  client C's four it is 4.73: main's state, which passes.
+- The retry cannot recover: its 2 s wait refills two requests, the retry's two reads spend them,
+  and the POST is refused again with 0.7 left; the log shows six refusals 2.01 s apart.
+- The server binary has no setting for the limit (Limits is set in-process only), so the test
+  cannot raise it. It passed locally (three times in session 2) and on P5's 10.5p1 lane because
+  the count depends on how many polls run before the host enrolls; the branch's four requests
+  are what took the margin away.
+
+**The fix (F6).** The orchestrator ruled the fix: F6 50bc0df33ea4deaf096dc5537e7f2642bf7ac3a7,
+`test(e2e): pay back the admin requests of the third client's setup before the host joins`,
+two insertions in test/e2e/hostca_rotation_test.go only (14 added lines, none removed): in the
+const block, between `hcrMachineLine` and the comment of `hcrClock`, the constant
+`hcrSetupPayback = 4 * time.Second` with its eight-line comment; and right after the setup's
+`t.Logf("setup: ...")` line, before the comment of `joinHostCert`, a four-line comment and
+`time.Sleep(hcrSetupPayback)`. The wait is outside every window, so the host joins with the
+bucket it has on main. The helpers hostTrustKR and hostCertKR are not changed. `git diff` of the
+file was read in full before staging (exactly the two insertions); gofmt clean, `go vet` with the
+rotation tags exit 0, carriage returns 0. No mutant is added: no test can tell the wait from its
+absence except the CI lanes.
+
+**The local pre-check** (not the proof), through the namespace wrapper only (session 2's
+wrapper copied unchanged into this session's scratch directory, sha256 begins
+bd0d87c0cee3c9c9; the corrected self-check of deviation 4 exit 0 first), nothing else running in
+WSL, TestHostCARotation alone (`-run "^TestHostCARotation$"`, the plan's line 673 command form)
+on 10.5p1 and then on 9.5p1, started at epoch 1795468917, ended at 1795469252:
+
+| Reading | 10.5p1 | 9.5p1 |
+|---|---|---|
+| exit | `exit 0` | `exit 0` |
+| `go test` | `ok ... 176.555s` | `ok ... 152.147s` |
+| PASS | `--- PASS: TestHostCARotation (155.82s)` (session 2: 149.20 s) | `--- PASS: TestHostCARotation (137.84s)` (session 2: 132.05 s) |
+| setup line | 72 ms | 76 ms |
+| step 3's two runs | 29 ms | 31 ms |
+| c1 / r1 observed after issuance | 841 ms / 1.177 s | 925 ms / 1.475 s |
+| re-anchored | false | false |
+| both fixed lines | once each | once each |
+| client C right after the switch / after the renewal | `ssh exited 0` / `ssh exited 0` | `ssh exited 0` / `ssh exited 0` |
+| client B after the renewal | `ssh exited 255` | `ssh exited 255` |
+
+No SKIP, FAIL, build or setup failure, and no `WARNING host certificate answer for` line.
+
+**The gates, re-run on F6's tree** (the working tree equal to F6, before its commit). WSL had
+booted again (boot id 011372f6-9963-4a98-9bdb-83ce959b9cce), so the base was re-measured first
+and replaced in place (see "Task 1"): 264.218 s. The fifth verify command (delta gate): exit 0,
+`ok  github.com/Labontese/keyroster/cmd/keyroster 262.677s`, -1.541 s against the base, the same
+boot id after it. The sixth verify command (full gate): exit 0 on its first run, 754 s (epoch 1795469846 to
+1795470600); 36 `ok` lines (cmd/keyroster 298.101 s, internal/agent/apply 563.190 s,
+internal/signer 453.168 s), no FAIL, DATA RACE or SKIP; every `go vet` tag set clean; gofmt
+clean; golangci-lint `0 issues.` under linux, windows, darwin and the `e2e,e2erotation` pass;
+capslock keyroster-signer 97 (baseline 97), keyroster-agent 37 (37), keyroster-agent-fetch 23
+(23), no new pair; dep-firewall, testonly-firewall and check-pinned-actions clean. No clock flake
+and no re-run.
+
+**The proof** of the wait is the rotation lanes of the heads from F6 on; their readings enter
+the section "Pre-merge review" when it is written.
+
+**Open item.** The retry of hostTrustKR (test/e2e/hosttrust_test.go:104-107) and hostCertKR
+(test/e2e/hostcert_test.go:36-39) cannot recover a drained bucket for a command of three
+requests; it is on main, and this plan does not change it.
 
 ## Pre-merge review
 
