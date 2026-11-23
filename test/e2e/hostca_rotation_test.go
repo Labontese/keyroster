@@ -90,6 +90,15 @@ const (
 	hcrLine = "host CA rotation: the refreshed client accepted generation 1 and generation 2, the client that did not refresh was refused"
 	// hcrMachineLine is the line the test logs for client C, which the lane gate counts (03-12g).
 	hcrMachineLine = "host CA rotation: machine renew added the generation 2 line to the third client, which accepted generation 1 and generation 2"
+	// hcrSetupPayback is the wait after client C's setup (03-12g). The role
+	// and the machine each spend two requests of the admin routes'
+	// per-client bucket (a GET and a POST of the directory), which holds 20
+	// requests and gains one a second (internal/server/ratelimit.go);
+	// joinHostCert's poll of host pending and its approval draw on the same
+	// bucket. Four seconds pay the four requests back, so the host joins
+	// with the bucket it has without client C. The wait is outside every
+	// window.
+	hcrSetupPayback = 4 * time.Second
 	// hcrClock is the layout of the times the test logs.
 	hcrClock = "15:04:05.000"
 )
@@ -489,6 +498,11 @@ func TestHostCARotation(t *testing.T) {
 		}
 	}
 	t.Logf("setup: the machine key, the role, the machine and the first machine renew took %s", time.Since(setupAt).Round(time.Millisecond))
+	// Pay the setup's four admin requests back before the host joins
+	// (hcrSetupPayback): in CI the approval's POST found the bucket empty,
+	// and a retry of the approval spends on its two reads the two requests
+	// that its 2 s wait refills.
+	time.Sleep(hcrSetupPayback)
 	// joinHostCert's fetcher polls every 5 s (hostCertPoll): a 1 s fetcher
 	// would exhaust the agent's request rate in a test this long.
 	eh := joinHostCert(t, env, kr, "web1")
