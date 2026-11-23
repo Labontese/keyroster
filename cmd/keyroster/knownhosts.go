@@ -40,6 +40,9 @@ import (
 //
 // A name in the block without a CA line is refused, never prompted; a
 // name outside the block keeps the user's own configuration.
+//
+// keyroster machine renew adds the line of a new host CA on its own, over
+// the names the file already holds (machinehosttrust.go, 03-12g).
 func init() {
 	register(command{
 		Name: "known-hosts",
@@ -413,9 +416,12 @@ func verifyHostTrustDirectory(in hostTrustInput, st *hostTrustState) (*verifiedH
 	return &verifiedHostTrustDir{dir: d, sha: sha, active: active, all: all}, ""
 }
 
-// writeHostTrust is the one writer of the host trust files. It verifies
-// everything first, then writes, in this order, the state, the KRL,
-// keyroster_known_hosts and keyroster_ssh_config, each atomically, and
+// writeHostTrust is the one full writer of the host trust files (03-12g:
+// the narrowing, narrow.go, only removes CA lines, and keyroster machine
+// renew, machinehosttrust.go, only adds the line of an active or next host
+// CA over the names the file already holds and moves the bundle floor). It
+// verifies everything first, then writes, in this order, the state, the
+// KRL, keyroster_known_hosts and keyroster_ssh_config, each atomically, and
 // prints its outcome line on stdout (warnings and the Include advice on
 // stderr):
 //
