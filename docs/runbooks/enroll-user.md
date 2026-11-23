@@ -650,6 +650,38 @@ revoked certificate is refused through the KRL. Run in CI e2e (03-09b):
 `TestHostCertNoTOFU/refused_through_krl_alone` and
 `TestHostCertNoTOFU/refused_through_missing_ca_line_alone`.
 
+**4a. A host-CA rotation (T-03-417).** A new host CA reaches a client
+only through a refresh: a `keyroster login` without `--no-known-hosts`
+or an admin's `keyroster known-hosts sync` writes its `@cert-authority`
+line (for the rotation's gate, an account has refreshed once its
+managed `keyroster_known_hosts` holds the new host CA's line, the one
+that ends `keyroster host CA generation <g>`), and narrowing never adds
+one. A refresh writes the host CAs of the trust bundle the server gave
+it when it started, which shortly after ceremony 1's install can still
+be the earlier one, so a refresh that wrote only the old line is
+repeated. Each host whose
+certificate keyroster-agent renews moves to the new host CA when its
+certificate is next replaced: at its own renewal, counted from its own
+last certificate, so at most about 20 days after the switch at the
+default host cap and for many hosts sooner, or earlier when its
+certificate is replaced for another reason; a host that keyroster-agent
+does not manage moves only when an admin issues it a new certificate
+with `keyroster ca issue --ca host`. A client whose managed
+`keyroster_known_hosts` has not been refreshed since the new host CA
+was added (ceremony 1 of the rotation) holds only the old host CA's
+line, so it refuses each host from that host's move on, with
+`Host key verification failed`, until it refreshes. A client whose
+managed file is never refreshed (an account with no login of its own
+and no admin key, such as automation that only runs `ssh`) cannot be
+rotated safely, unless an admin runs `keyroster known-hosts sync` as
+that account after ceremony 1's install and before ceremony 2's
+install and the file then holds the new host CA's line
+([ca-rotation.md](ca-rotation.md), "The host CA"). Run in CI
+e2e: `TestHostCARotation` (OpenSSH 9.5p1 and 10.5p1, one host and two
+clients on loopback). UNVERIFIED on a real client and on Windows, and
+so are a sync that an admin runs for another account and a host
+certificate issued by hand across a host-CA switch.
+
 **5. The costs.** A managed name is unreachable until its host has a host
 certificate. Disabled and removed names stay refused. Names removed
 before the client's first verified refresh are not covered. Explicit

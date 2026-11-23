@@ -11,7 +11,8 @@ every agent drops it.
 > names its test; "Run in CI" at the end lists them. The end-to-end proof
 > runs against real sshd on OpenSSH 9.5p1 and 10.5p1 in the
 > `e2e-rotation` job: `TestCANextAndAbort` for ceremony 1 and the abort,
-> `TestCARotationNoFailedLogin` for the whole rotation.
+> `TestCARotationNoFailedLogin` for the whole rotation, and
+> `TestHostCARotation` for what the host CA's gate prevents.
 
 ## Scope
 
@@ -314,6 +315,17 @@ agent's version in its AGENT column; do not go on while one is older.
 bundle in force, and every host that keyroster-agent does not manage
 holds every line of `keyroster host ca-key`.
 
+**The clients, for the host role.** Install ceremony 2 of the host role
+no earlier than the gate of "The host CA" allows: at least the user
+profile's max TTL after ceremony 1's install, once the managed
+`keyroster_known_hosts` of every account whose ssh reads the managed
+files holds the new host CA's line (a user who always passes
+`--no-known-hosts` included; an account that cannot refresh itself
+gets the line from an admin who runs `keyroster known-hosts sync` as
+that account), and once `keyroster host status` reads
+`bundle v<N> on <M>/<M> hosts` for the server's current bundle N,
+ceremony 1's or a later one that still lists the new host CA.
+
 ### Pre-switch check
 
 On the signer, as the signer's user:
@@ -330,9 +342,13 @@ the earliest trusted_until a switch could carry is serial <s> (key ID
 certificate of this key; the earliest is the floor`) names the
 certificate the switch must outlast. Write `<e>` in the transcript: the
 switch's `trusted_until` must be at or after it, or the install refuses
-`drain_window_too_short`. A host certificate that an admin issues has no
-cap on its validity, so a long one can make the switch of the host role
-wait. Then wait until it expires, or switch the other roles first. A revoked
+`drain_window_too_short`. A host certificate that an admin issues with
+`keyroster ca issue --ca host` lives as long as its `--ttl`, up to the
+host profile's `max_ttl_seconds`, which the floor of "Ceremony 2" covers
+(for the host role that floor counts the host cap, "The host CA"). The
+`<e>` read here lies past a role's floor only when a certificate was
+issued under an earlier policy whose cap for its role was larger. Then
+wait until it expires, or switch the other roles first. A revoked
 certificate still counts, because the hosts drop the old key on time
 only if every certificate it signed is dead by then: revoking does not
 help, waiting does.
@@ -630,11 +646,161 @@ trusts it until its agent runs again.
 ## The host CA
 
 The same steps switch the host role, with one more gate: ceremony 2 for
-the host role waits until clients have refreshed. A client gains a host
-CA line only from `keyroster login` or `keyroster known-hosts sync`, so a
-client that has not run either since ceremony 1 knows only the old host
-CA and refuses the hosts' new host certificates after the switch
-(UNVERIFIED until 03-12f2's host-CA test).
+the host role waits until clients have refreshed. What differs for the
+host role is below.
+
+**Which clients.** The gate concerns every account whose ssh reads
+keyroster's managed trust files for the enrolled hosts. `keyroster login`
+and `keyroster known-hosts sync` write them into the `~/.ssh` of the
+account they run as, and ssh reads them through the
+`Include ~/.ssh/keyroster_ssh_config` line at top level of
+`~/.ssh/config`, before its first Host or Match line
+([enroll-user.md](enroll-user.md#trusting-hosts-without-tofu), item 1).
+Such an account gains a host CA line only when it refreshes: a refresh
+writes one `@cert-authority` line for each host CA the trust bundle
+trusts at the client's clock, and narrowing never adds one. An account
+that never had these files keeps its own configuration: keyroster
+writes nothing that its ssh reads.
+
+**The gate.** Install ceremony 2 for the host role no earlier than
+ceremony 1's install plus the user profile's max TTL: the largest user
+`max_ttl_seconds` of the policy in force at ceremony 1's install and of
+every policy installed since (`--user-max-ttl` at genesis, 12 h by
+default). By the end of the wait every user certificate issued before
+ceremony 1's install under the policy then in force has expired; one
+issued before the install under an earlier policy with a larger user
+cap may still be valid; so a user whose only certificates were issued
+before that install under the policy then in force needs a new one,
+from a login or from an admin. The wait does not show that a login
+refreshed. Before ceremony 2's install, every account whose ssh reads
+the managed files has refreshed, a user who always passes
+`--no-known-hosts` included. An account has refreshed when its managed
+`~/.ssh/keyroster_known_hosts` holds the new host CA's line: the
+`@cert-authority` line that ends `keyroster host CA generation <g>`, g
+being the host generation that ceremony 1 added (its CA-change line
+`CA host gen <g> SHA256:...: none -> next`). An account that runs ssh
+from several computers has refreshed when the file on each of them
+holds the line. The ways to refresh:
+
+- A user refreshes with a `keyroster login` without
+  `--no-known-hosts`, run as the account ssh runs as and on the computer
+  it runs from. The file shows whether it wrote the line: the login
+  succeeds whatever its host trust outcome, and one that ran with
+  `--no-known-hosts` adds no host CA line: it only narrows the file
+  (enroll-user.md, "Narrowing"). A user who always passes
+  `--no-known-hosts` runs one `keyroster login` without it.
+- An admin refreshes with `keyroster known-hosts sync`, which exits 0
+  when it refreshed; the file, not the exit, shows the new line. It
+  needs an admin key from the root-signed policy, loaded in ssh-agent.
+- An account that has the managed files and neither a login of its own
+  nor an admin key (an automation account, or a host that ssh connects
+  onward from) is refreshed only by an admin who runs
+  `keyroster known-hosts sync` as that account after ceremony 1's
+  install and before ceremony 2's install, and who then checks that
+  account's file for the line. If nobody does, it is a client that
+  never refreshes. That sync signs with the admin key through the
+  ssh-agent the account reaches (its fingerprint given with
+  `--admin-key`), so for as long as the account reaches that agent
+  every one of its processes can ask it to sign with any key it holds,
+  and at an admin quorum of 1, the default, one admin signature
+  authorises a new directory: use an agent that holds the admin key
+  alone, run the sync while nothing else runs as that account, and end
+  the agent's reach right after. (UNVERIFIED: no test runs sync for
+  another account.)
+
+Whichever way, the line is the check. A login or a sync writes the
+host CAs of the trust bundle the server gave it when it started, and
+for a short time after ceremony 1's install the server can still give
+the earlier bundle, so a refresh that wrote only the old line is
+repeated until the file holds the new one.
+
+No tool counts the clients that have refreshed, and none holds the
+switch of the host role back: `root sign` and the install check a host
+switch as they check any other, so the gate is the operator's.
+
+**The hosts before the switch.** "Wait for the hosts" counts each
+host's `user_ca_keys` file, which a bundle that changes only the host
+role leaves as it is. For the host role read instead the line
+`bundle v<N> on <X>/<M> hosts` of `keyroster host status`: before
+ceremony 2 it reads M/M, with N the server's current bundle, ceremony
+1's or a later one that still lists the new host CA (a bundle installed
+in between still lists it when its ceremony printed no `CA host` line
+in the CA-change section, as `root sign` and `keyroster trust verify`
+print it), and a host removed from the directory stays in M until
+`keyroster host forget`. A host that has not taken a bundle that
+names the new host CA refuses the certificate the signer issues it
+after the switch (`answer_unpinned_ca`; Run in CI: `TestVerifyAnswer`,
+its `unpinned_ca` case, and
+`TestHostCertStep/hostcert_answer_drained_ca_refused`, an answer by a
+host CA outside the agent's trusted set; UNVERIFIED end to end) and
+asks again after a back-off of 60 s up to an hour (Run in CI:
+`TestDecide/backoff_schedule`). It keeps the certificate it has
+(UNVERIFIED: no test shows a kept certificate surviving that refusal).
+So it stays on its old certificate until it takes that bundle or the
+old certificate runs out, after which clients refuse it.
+
+**The switch.** For the host role the floor of "Ceremony 2" uses the
+host profile's `max_ttl_seconds` (720 h by default), not the user one:
+the old host CA is trusted until the ceremony's issued_at plus the
+larger host `max_ttl_seconds` of the two policies, plus 300 s, plus the
+allowance.
+
+**What the hosts do.** After the switch each host whose certificate
+keyroster-agent renews keeps serving its certificate by the old host CA
+and moves to the new host CA when that certificate is next replaced:
+normally at its own next renewal, at two thirds of its certificate's
+lifetime, up to an hour early, unless the agent replaces it earlier
+because it is missing or near its end, the host's principals in the
+directory changed, its CA is no longer trusted, or the KRL revokes it.
+A certificate the agent obtains lives the smaller of 30 days and the
+host cap, so at the default cap of 720 h such a host renews about 20
+days after its own last certificate, host by host: at most about 20
+days after the switch, and for many hosts sooner. A host that
+keyroster-agent does not manage, whose certificate an admin issued with
+`keyroster ca issue --ca host`, keeps that certificate for as long as
+its `--ttl`, up to the host cap, and moves to the new host CA only when
+an admin issues it a new one after the switch (UNVERIFIED: no test
+issues a host certificate by hand across a host-CA switch).
+
+**What a client meets.** A client whose managed file holds the new host
+CA's line holds both host CA lines and accepts either certificate,
+before and after each host's move. A client whose managed file has not
+been refreshed since before ceremony 1's install holds only the old host
+CA's line: it reaches each host until that host moves, and refuses it
+with `Host key verification failed` from then on, possibly weeks after
+the switch, until it refreshes. Watching for failures right after the
+switch shows little, because most hosts move only at their renewals. A
+client whose managed `keyroster_known_hosts` is never rewritten by a
+full refresh cannot be rotated safely.
+
+**The drain.** No file that sshd reads lists a host CA key. The old host
+CA drains in the agents and on the clients: each agent stops accepting
+answers signed by it at its `trusted_until` (an agent's answer set is
+the host CAs the bundle trusts at the agent's clock), and every
+keyroster command that verifies the trust bundle removes its line from
+`keyroster_known_hosts` once its `trusted_until` has passed on the
+client's clock (enroll-user.md, "Narrowing"). For the host role the
+guarantee of "What this guarantees and what it does not" reads against
+the clients: every certificate the signer issued with the old host CA
+key and the verified log records expires at least 300 s before that
+key's `trusted_until`, the earliest moment a client stops trusting it.
+
+Run in CI: `TestHostCARotation` (the `e2e-rotation` job, OpenSSH 9.5p1
+and 10.5p1, one host at a host cap of 90 s and two clients on
+loopback). The test waits for the host's heartbeat to report ceremony
+1's bundle before the switch. A client whose managed file holds both
+host CA lines after a sync the test checks line by line reaches the
+host by the old host CA's certificate right after the
+switch and by the new one's after the host's renewal; in between the
+host asks for no certificate, installs no other and its agent refuses
+no answer; a client that did not refresh reaches it
+right after the switch, is refused with `Host key verification failed`
+after the renewal, and reaches it again once its known_hosts file holds
+the lines a fresh refresh writes. The test does not wait the gate's
+time and does not wait for the host drain. UNVERIFIED: the host drain's
+end on a real host and client (unit-tested only), a real fleet, a
+client on Windows, clients older than OpenSSH 8.5, real clients that
+never refresh, and a sync run for another account.
 
 ## What this guarantees and what it does not
 
@@ -682,7 +848,9 @@ An emergency retire, the only early end of a draining key, is 03-13's.
 `TestRootSignSwitchFlags` and `TestCARotationNoFailedLogin` (the
 `e2e-rotation` job, OpenSSH 9.5p1 and 10.5p1: a certificate login every
 second through prepare, ceremony 1, the switch, the removal of the old
-key, the drain and the host's drop), with `TestCANextAndAbort`,
+key, the drain and the host's drop), `TestHostCARotation` (the same
+job: what the host CA's gate prevents, a client that refreshed and one
+that did not across the host's renewal), with `TestCANextAndAbort`,
 `TestRootSignSuccessor`, `TestCeremonyGolden` and
 `TestRootCeremonyPolicyChecks`. The TPM and PIV backends: the `tpm` leg of
 `TestSignerRestartMixedBundle` and `TestTPMCARotation` (the `e2e-tpm`
@@ -692,9 +860,10 @@ job, on swtpm), the `piv` leg of `TestSignerRestartMixedBundle` (the
 `TestTPMRemoveGeneration` in `e2e-tpm`; `TestPIVGenerationAllocator`,
 `TestPIVHolds`, `TestPIVRemoveGeneration` and
 `TestPIVManagementKeyAtUse` in `build-piv`). UNVERIFIED: the drain on
-real hosts of a fleet, the machine CA, the host CA end to end (03-12f2),
-every physical TPM, the homelab vTPM signer, every YubiKey, and every
-homelab signer; a real client run is 03-16's.
+real hosts of a fleet, the machine CA, the host drain's end on a real
+host and client (unit-tested only), every physical TPM, the homelab
+vTPM signer, every YubiKey, and every homelab signer; a real client run
+is 03-16's.
 
 CI runs the TPM path on swtpm over a Unix socket (custody `vtpm`) and the
 PIV path on an in-memory fake card. Real hardware is not exercised. In
@@ -742,4 +911,6 @@ Neither ceremony changes a root or the installation ID, so no CLI pin
 changes, and the clients keep their configuration as it is. A user's
 next login fetches a certificate signed by the new key; a certificate
 issued before the switch keeps working until it expires, because the
-hosts trust the old key until its end.
+hosts trust the old key until its end. A switch of the host role needs
+no configuration change either, but a client must have refreshed
+first, as "The host CA" says.
