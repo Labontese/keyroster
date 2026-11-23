@@ -320,9 +320,11 @@ no earlier than the gate of "The host CA" allows: at least the user
 profile's max TTL after ceremony 1's install, once the managed
 `keyroster_known_hosts` of every account whose ssh reads the managed
 files holds the new host CA's line (a user who always passes
-`--no-known-hosts` included; an account that cannot refresh itself
-gets the line from an admin who runs `keyroster known-hosts sync` as
-that account), and once `keyroster host status` reads
+`--no-known-hosts` included; an automation account that runs
+`keyroster machine renew` gets the line from it, and an account that
+has neither a login of its own nor a `keyroster machine renew` that
+runs gets the line from an admin who runs `keyroster known-hosts sync`
+as that account), and once `keyroster host status` reads
 `bundle v<N> on <M>/<M> hosts` for the server's current bundle N,
 ceremony 1's or a later one that still lists the new host CA.
 
@@ -658,7 +660,9 @@ account they run as, and ssh reads them through the
 ([enroll-user.md](enroll-user.md#trusting-hosts-without-tofu), item 1).
 Such an account gains a host CA line only when it refreshes: a refresh
 writes one `@cert-authority` line for each host CA the trust bundle
-trusts at the client's clock, and narrowing never adds one. An account
+trusts at the client's clock, `keyroster machine renew` adds the line
+of an active or next host CA that the file lacks (below), and
+narrowing never adds one. An account
 that never had these files keeps its own configuration: keyroster
 writes nothing that its ssh reads.
 
@@ -692,10 +696,27 @@ holds the line. The ways to refresh:
 - An admin refreshes with `keyroster known-hosts sync`, which exits 0
   when it refreshed; the file, not the exit, shows the new line. It
   needs an admin key from the root-signed policy, loaded in ssh-agent.
-- An account that has the managed files and neither a login of its own
-  nor an admin key (an automation account, or a host that ssh connects
-  onward from) is refreshed only by an admin who runs
-  `keyroster known-hosts sync` as that account after ceremony 1's
+- An automation account that has the managed files refreshes itself
+  with `keyroster machine renew`, run as the account ssh runs as, with
+  `$HOME` its home, and without `--no-known-hosts`. Every run, whether
+  it renews the certificate or finds it not due, adds to the account's
+  `keyroster_known_hosts` the line of each active or next host CA of
+  the trust bundle that the file lacks, over the host names that the
+  file's lines for the host CAs the bundle trusts already name, in the
+  form a refresh writes. It adds no host name, writes no revocation and
+  never creates the file: an admin's `keyroster known-hosts sync` as
+  that account is its first refresh, and it brings new host names and
+  revocations. When the certificate is written or not due but host
+  trust could not be refreshed, it exits 4 (machine-identities.md,
+  "Renew a machine certificate"). Such an account has refreshed once a
+  run after ceremony 1's install has left the new line in its file, so the
+  time between two of its runs bounds how soon that happens: check the
+  file before ceremony 2's install.
+- An account that has the managed files and neither a login of its
+  own, nor an admin key, nor a `keyroster machine renew` that runs (a
+  host that ssh connects onward from, or an automation account that
+  runs it with `--no-known-hosts`) is refreshed only by an admin who
+  runs `keyroster known-hosts sync` as that account after ceremony 1's
   install and before ceremony 2's install, and who then checks that
   account's file for the line. If nobody does, it is a client that
   never refreshes. That sync signs with the admin key through the
@@ -705,8 +726,9 @@ holds the line. The ways to refresh:
   and at an admin quorum of 1, the default, one admin signature
   authorises a new directory: use an agent that holds the admin key
   alone, run the sync while nothing else runs as that account, and end
-  the agent's reach right after. (UNVERIFIED: no test runs sync for
-  another account.)
+  the agent's reach right after. The same holds for the first sync of
+  an automation account. (UNVERIFIED: no test runs sync for another
+  account.)
 
 Whichever way, the line is the check. A login or a sync writes the
 host CAs of the trust bundle the server gave it when it started, and
@@ -770,8 +792,9 @@ CA's line: it reaches each host until that host moves, and refuses it
 with `Host key verification failed` from then on, possibly weeks after
 the switch, until it refreshes. Watching for failures right after the
 switch shows little, because most hosts move only at their renewals. A
-client whose managed `keyroster_known_hosts` is never rewritten by a
-full refresh cannot be rotated safely.
+client whose managed `keyroster_known_hosts` never gains the new host
+CA's line, from a refresh or from `keyroster machine renew`, cannot be
+rotated safely.
 
 **The drain.** No file that sshd reads lists a host CA key. The old host
 CA drains in the agents and on the clients: each agent stops accepting
@@ -786,7 +809,7 @@ key and the verified log records expires at least 300 s before that
 key's `trusted_until`, the earliest moment a client stops trusting it.
 
 Run in CI: `TestHostCARotation` (the `e2e-rotation` job, OpenSSH 9.5p1
-and 10.5p1, one host at a host cap of 90 s and two clients on
+and 10.5p1, one host at a host cap of 90 s and three clients on
 loopback). The test waits for the host's heartbeat to report ceremony
 1's bundle before the switch. A client whose managed file holds both
 host CA lines after a sync the test checks line by line reaches the
@@ -796,11 +819,19 @@ host asks for no certificate, installs no other and its agent refuses
 no answer; a client that did not refresh reaches it
 right after the switch, is refused with `Host key verification failed`
 after the renewal, and reaches it again once its known_hosts file holds
-the lines a fresh refresh writes. The test does not wait the gate's
-time and does not wait for the host drain. UNVERIFIED: the host drain's
-end on a real host and client (unit-tested only), a real fleet, a
-client on Windows, clients older than OpenSSH 8.5, real clients that
-never refresh, and a sync run for another account.
+the lines a fresh refresh writes. A third client's file starts as the
+second's: `keyroster machine renew`, run after ceremony 1's install
+and not due, adds to it exactly the new host CA's line for the host's
+name (with `--no-known-hosts` it changes nothing), and with that file
+the client reaches the host right after the switch and after the
+renewal. The test does not wait the gate's time and does not wait for
+the host drain. UNVERIFIED: the host drain's end on a real host and
+client (unit-tested only), a real fleet, a client on Windows, clients
+older than OpenSSH 8.5, real clients that never refresh, a
+`keyroster machine renew` that a real cron job or timer runs, and a
+sync run for another account. The test renews from an account that
+also holds an administrator's configuration, not from an automation
+account of its own.
 
 ## What this guarantees and what it does not
 
@@ -850,7 +881,8 @@ An emergency retire, the only early end of a draining key, is 03-13's.
 second through prepare, ceremony 1, the switch, the removal of the old
 key, the drain and the host's drop), `TestHostCARotation` (the same
 job: what the host CA's gate prevents, a client that refreshed and one
-that did not across the host's renewal), with `TestCANextAndAbort`,
+that did not across the host's renewal, and one that
+`keyroster machine renew` refreshed), with `TestCANextAndAbort`,
 `TestRootSignSuccessor`, `TestCeremonyGolden` and
 `TestRootCeremonyPolicyChecks`. The TPM and PIV backends: the `tpm` leg of
 `TestSignerRestartMixedBundle` and `TestTPMCARotation` (the `e2e-tpm`
