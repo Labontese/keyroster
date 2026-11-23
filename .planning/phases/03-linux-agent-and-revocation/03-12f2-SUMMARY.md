@@ -12,9 +12,9 @@ key-files:
   modified: [test/e2e/ca_rotation_test.go, .github/workflows/e2e.yml, CONTRIBUTING.md, docs/runbooks/ca-rotation.md, docs/runbooks/enroll-user.md, docs/runbooks/machine-identities.md, docs/runbooks/signer-install.md, cmd/keyroster/runbook_test.go, cmd/keyroster/hosttrust_runbook_test.go, .planning/phases/03-linux-agent-and-revocation/03-12f2-PLAN.md, .planning/ROADMAP.md, .planning/STATE.md]
 requirements-completed: []
 actuals:
-  tokens: 137400   # chars/4 over the realized diff against c6c632d without this SUMMARY (107,710) plus this SUMMARY (about 29,700)
+  tokens: 138100   # chars/4 over the realized diff against c6c632d without this SUMMARY (107,710) plus this SUMMARY (about 30,400)
   tasks: 4         # Tasks 1 to 4 up to the green PR and its fix round; Task 4's step 6 (the pre-merge review) is the orchestrator's and Task 5 the owner's merge
-  commits: 12      # git rev-list --count c6c632d..HEAD with this commit: G2, R3, W3, P4, the first SUMMARY commit, X1 to X6 and this commit
+  commits: 13      # git rev-list --count c6c632d..HEAD with this commit: G2, R3, W3, P4, the first SUMMARY commit, X1 to X6, the record's commit and this commit
 plan_head_before: c6c632d130450e24fe432dfd68bcf00420dc2231
 ---
 
@@ -29,8 +29,8 @@ TestHostCARotation runs in the e2e-rotation lane against real sshd, a real keyro
 
 - **Sessions 1 and 2:** Task 1 (preconditions, branch, base values, test-time base, anchors), Task 2 (the wrapper and its self-check, local check 1, the pre-check on 10.5p1 and 9.5p1 with the fourth verify command, G2, Task 2's five verify commands, M371, M372 and M373 with M373's unit run, and the PASS loop's negative proof) and Task 3 (its precondition, the anchors read before any sentence was written, R3 and its RED from a detached worktree of R3, W3, Task 3's four verify commands, and the 70 document mutants, all killed by their named leaf). The orchestrator's check of G2 and its rulings on deviations 1 to 5 are recorded where they belong.
 - **Session 3 (2026-11-22): Task 4, steps 1 to 5.** The precondition; P4 4e058f8073494945f774db64cf07ff3fe11cdc89 after a full read of its staged diff and the publish scan; the test-time base re-measured and replaced in place; the delta gate; the full gate (one unchanged re-run under the clock-flake rule, deviation 6); the push; PR #118 without auto-merge; the tracking update; this SUMMARY's commit. See "Task 4 (session 3)".
-- **Session 4 (2026-11-22 and 2026-11-23): the pre-merge review recorded, its fix round, and this record.** The orchestrator's pre-merge review of head 4869fde, recorded from its run record; the fix round X1 to X6 (part A: X1 to X3, part A2: X4 to X6, each read and checked by the orchestrator before the next part), with two REDs, 34 document mutants, the end-to-end runs at X3 and X6 and the narrowing mutant; part B: the test-time base re-measured in place, the delta and full gates, this record's commit, the push and the PR text. See "Pre-merge review", "The fix round" and "The check of the fix round".
-- **Left:** CI on this record's commit and Task 4's verify commands on it (a commit cannot name its own runs; their results go in the orchestrator's record), then Task 5 (the owner's merge).
+- **Session 4 (2026-11-22 and 2026-11-23): the pre-merge review recorded, its fix round, and this record.** The orchestrator's pre-merge review of head 4869fde, recorded from its run record; the fix round X1 to X6 (part A: X1 to X3, part A2: X4 to X6, each read and checked by the orchestrator before the next part), with two REDs, 34 document mutants, the end-to-end runs at X3 and X6 and the narrowing mutant; part B: the test-time base re-measured in place, the delta and full gates, the record's commit 134d4a6, the push and the PR text. See "Pre-merge review", "The fix round" and "The check of the fix round".
+- **Left:** Task 5 (the owner's merge). CI on 134d4a6, the fix round's head, is under "Pre-merge review"; the runs of the one commit after it, which changes this SUMMARY alone, are in the orchestrator's record, because a commit cannot name its own runs.
 
 ## Task 1
 
@@ -539,6 +539,37 @@ TestHostCARotation in the two rotation lanes:
 
 In both lanes every login's `Server host certificate` line names the expected host CA: generation 1 for A and B after ceremony 1 and right after the switch, generation 2 for A after the renewal, for B's refused login and for B after its remedy. Step 6a ended at about r1 + 45.1 s in both lanes, without the shortfall of about 1.1 s that the local runs show; that is one observation, not a measurement of the runners' clock. `login failures: 0` stands in both lanes' TestCARotationNoFailedLogin.
 
+### CI on 134d4a6, the fix round's head
+
+Every run of that head succeeded at its first attempt and none was run again: CI 45087973726, E2E 45087973732, E2E TPM 45087973775, PIV 45087973702, E2E distro 45087973693, E2E PKCS#11 45087973708, Systemd 45087973700, CodeQL 45087973758, Workflow lint 45087973707, PR title 45087973795 (and 45087981326, started by the edit of the PR's text). All 30 required checks passed. The orchestrator read the figures below from the six job logs of the E2E run.
+
+| Lane | 4869fde (s) | 134d4a6 (s) |
+|------|-------------|-------------|
+| e2e-rotation (9.5p1) | 660.758 | 665.203 |
+| e2e-rotation (10.5p1) | 657.877 | 662.575 |
+| e2e (9.5p1) | 737.658 | 791.447 |
+| e2e (10.5p1) | 773.829 | 785.324 |
+| e2e-probe (9.5p1) | 300.039 | 288.114 |
+| e2e-probe (10.5p1) | 281.009 | 273.600 |
+
+Both rotation lanes stay under the owner's 900 s. Neither main lane's log names TestHostCARotation.
+
+TestHostCARotation in the two rotation lanes:
+
+| | 9.5p1 | 10.5p1 |
+|---|---|---|
+| Duration | 132.86 s | 131.00 s |
+| Bundle 2 committed after its install, and after the signer served again (bound 45 s) | 14.137 s, 14.116 s | 14.101 s, 14.080 s |
+| r1 and r2, each after the previous issuance (51 s to 75 s) | 54 s, 63 s | 61 s, 54 s |
+| Step 6 ended at (bound r1 + 28 s) | r1 + 1.776 s | r1 + 1.695 s |
+| Bundle 3 committed after its install, and after the signer served again | 10.570 s, 10.524 s | 14.469 s, 14.423 s |
+| The new login of step 6a | exit 0, r1 by generation 1 | exit 0, r1 by generation 1 |
+| Step 6a ended at (bound r1 + 50 s) | r1 + 45.241 s | r1 + 45.183 s |
+| Re-anchored | no | no |
+| Client B after the renewal, then after its remedy | exit 255, then exit 0 | exit 255, then exit 0 |
+
+The new login moved step 6a's end by about 0.13 s against 4869fde (r1 + 45.107 s and r1 + 45.053 s there), which leaves about 4.8 s before the keyscan's bound. `login failures: 0` stands in both lanes' TestCARotationNoFailedLogin. Session 4 ran Task 4's verify commands on this head after CI and reported exit 0 for the 1st to the 4th and the 7th to the 11th; its saved logs hold the exit code of the first four.
+
 ## Commits
 
 | Name | SHA | Subject | Full staged read before it |
@@ -554,7 +585,8 @@ In both lanes every login's `Server host certificate` line names the expected ho
 | X4 | ace104b28c5cd20820ae8ce5cd8e805b49d500bd | test(cli): pin the UNVERIFIED labels with their sentences and item 4a between its neighbours | yes, both files, one at a time, after the last edit |
 | X5 | 80fd108431eef948da72603eb1f2217f17dddfc6 | docs(runbooks): say what the admin's agent signs and what one admin signature authorises | yes, the one file, after the last edit |
 | X6 | 85d0ec4206e31d6295a25b069f564420c019df97 | test(e2e): say which polls narrowed the file and name a late login | the working-tree diff in full right before `git add`, with no edit between, and the committed diff in full right after the commit (deviation 10) |
-| this commit | (cannot name itself) | docs(03-12f2): record the pre-merge review and its fix round | yes, this SUMMARY, after the last edit |
+| the record's commit | 134d4a672b06e22d88d6d1f4ae8652d3331702c1 | docs(03-12f2): record the pre-merge review and its fix round | yes, this SUMMARY, after the last edit |
+| this commit | (cannot name itself) | docs(03-12f2): rule on the full gate's re-run and record the fix round's CI | yes, this SUMMARY, after the last edit |
 
 Every commit is signed with keyroster-bot's SSH key (a `gpgsig` header in each), authored as Daniel Gustafsson and committed by keyroster-bot.
 
@@ -603,4 +635,4 @@ Under the mutant rule, at G2, on 10.5p1 through the wrapper, each with the actio
 9. **[A comment says less than dictated, fix round part A2] Step 6a's comments do not say that the last poll narrowed under bundle 3.** The dispatch for X6 asked the comments to say that the commit wait's polls narrowed A's live file, "the last of them at least under bundle 3 (the host took bundle 3 from the same server before it could commit it)". The code does not order it so: `keyroster host status` verifies the bundle and narrows (cmd/keyroster/hoststatus.go:130, through `verifiedTrust`, narrow.go:61-66) before it asks for the host status (:134), and `/trust` answers from a signer status cached for up to 5 s (internal/server/server.go:323-324, internal/server/signer.go:372, :435-443); so the poll that saw the commit narrowed under whatever `/trust` gave it when it started, which can, by the code, come before the host fetched bundle 3. The comments say instead that each poll verifies the bundle and narrows A's live file under it before it asks for the host status, that a poll soon after the switch may still have verified bundle 2, and that A's login shows the old host CA's line survived those narrowings. That a narrowing under bundle 3 did come before the login in these runs is shown by the narrowing mutant's kill, not by the code. **Ruling** (the orchestrator): accepted; the comment says what the code shows, the orchestrator read `statusTTL` at internal/server/signer.go:372 itself, and the clause it had dictated said more than the code shows.
 10. **[Staged read, fix round part A2] X6's staged diff was not read with `git diff --cached` before its commit.** Its `git diff` was read in full right before `git add`, with no edit between, and before the commit only the line count of `git diff --cached` (48 lines) was printed; right after the commit `git show HEAD` was read in full: the same diff, `index 5274c34..bfd2793`. **Ruling** (the orchestrator): accepted; the diff was read in full before the add and again in the commit, recorded as it happened.
 11. **[Clock flake, the plan's rule] The narrowing mutant's first try at X6 stopped at step 5 on `clock_regression` and was re-run once, unchanged.** Doctor after retire-key exited 1 with `FAIL clock_regression: the wall clock is 1s (1 s) behind the serial high-water mark`, the WSL clock having read earlier than a moment before it, as in deviation 6. The plan's "One rule for clock flakes" lists a mutant's unmutated run, not its mutated one; the orchestrator ruled that this first try falls under the rule all the same. The same mutant was applied again by the same replacement, vetted and run unchanged, and was killed at the new login (both runs under "The fix round"). No bound, timeout or assertion was changed. **Ruling** (the orchestrator): it falls under the plan's clock rule; both runs are recorded.
-12. **[Clock flake and a known timing flake in one run] The full gate of part B was re-run once, unchanged, after a first run with two failures.** One failure named `clock_regression` (internal/signer, `TestCheckLogAgainstLiveSigner`), which the plan's rule for clock flakes covers; the other was `TestFetch/more_repolls_immediately` in internal/agent/fetch, a wall-clock bound that whole-module `-race` load exceeds, recorded as a pre-existing flake in deferred-items.md and met before in 03-08c, 03-09, 03-10b and 03-14b, and not a clock reading the rule names. Both packages are untouched by this branch. The re-run the clock rule asks for was the one re-run: it exited 0 (both runs under "The fix round"). No bound, timeout or assertion was changed. Not yet ruled on: whether the rule's one re-run may cover a failure in the same run that its text does not name.
+12. **[Clock flake and a known timing flake in one run] The full gate of part B was re-run once, unchanged, after a first run with two failures.** One failure named `clock_regression` (internal/signer, `TestCheckLogAgainstLiveSigner`), which the plan's rule for clock flakes covers; the other was `TestFetch/more_repolls_immediately` in internal/agent/fetch, a wall-clock bound that whole-module `-race` load exceeds, recorded as a pre-existing flake in deferred-items.md and met before in 03-08c, 03-09, 03-10b and 03-14b, and not a clock reading the rule names. Both packages are untouched by this branch. The re-run the clock rule asks for was the one re-run: it exited 0 (both runs under "The fix round"). No bound, timeout or assertion was changed. **Ruling** (the orchestrator): accepted, as a ruling of its own and not as a reading of the rule, whose text does not name the second failure. The gate was re-run once, unchanged, and passed whole; the second failure is the load flake that deferred-items.md records, in a package this branch does not touch; and both packages' tests passed on the runner, in the `build-test` job of CI run 45087973726 on head 134d4a6 (`go test -race ./...`), at its first attempt.
