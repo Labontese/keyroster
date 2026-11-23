@@ -113,8 +113,11 @@ func TestHostTrustRunbooks(t *testing.T) {
 		htrbWant(t, "item 2, refreshing", sec, "keyroster known-hosts sync", "--no-known-hosts", "Host trust refreshed (directory vN, KRL vK, M names).",
 			"Host trust partly refreshed: revocations only", "Host trust not refreshed:", "exits 0 when refreshed or unchanged, 3 when partly refreshed, and 1 when nothing was written")
 		htrbWant(t, "item 3, T-03-100", sec, "T-03-100", "whole admin-signed directory", "no secrets", "one installation serves one organisation")
-		htrbWant(t, "item 4, the lag", sec, "T-03-240", "next login or sync", "never prompted",
-			// An automation account's keyroster machine renew changes no host name (03-12g).
+		htrbWant(t, "item 4, the lag", sec, "T-03-240", "next login or sync", "never prompted")
+		// An automation account's keyroster machine renew changes no host name
+		// (03-12g), read in item 4's own window: the whole-section check let the
+		// sentence sit in another item (pre-merge review).
+		htrbWant(t, "item 4, the lag, in item 4", htrbBetween(sec, "**4. The refresh lag", "**4a. "),
 			"An automation account's `keyroster machine renew` changes no host name", "the line it adds for a new host CA included, until an admin's next sync as that account")
 		htrbWant(t, "item 5, the costs", sec, "unreachable until its host has a host certificate", "Names removed before the client's first verified refresh", "--keys")
 		htrbWant(t, "item 6, ports", sec, "D7", "Port <n>", "HostKeyAlias <that same name>", "after the Include", "QB-6", "NEVERMATCH")
