@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -881,6 +882,136 @@ func TestMachineHostTrust(t *testing.T) {
 		}
 		if got := mhtFiles(t, m.sshDir)[hostTrustKnownHosts]; strings.Contains(got, g2.Key) {
 			t.Fatalf("run 3: known_hosts holds the aborted key's line:\n%s", got)
+		}
+	})
+	// The floor records the bundle's ops key with its version, as the
+	// writer does (03-12g, "The step", item 6; pre-merge review).
+	t.Run("floor_records_the_new_ops_key", func(t *testing.T) {
+		m, g2 := mhtFirst(t, 3, 2)
+		newOps := freshKeyLike(t, m.e.bundle.OpsKey.Alg)
+		if newOps == m.e.bundle.OpsKey.Key {
+			t.Fatal("the fresh ops key equals the planted one")
+		}
+		m.e.serveRotated(t, 3, func(b *trust.Bundle) { b.OpsKey.Key = newOps })
+		code, stdout, stderr := m.run(t)
+		if code != 0 {
+			t.Fatalf("run 1: exit %d, want 0; stderr:\n%s", code, stderr)
+		}
+		m.requireRenewed(t, stdout, stderr)
+		st, err := parseHostTrustState([]byte(m.before[hostTrustStateFile]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.BundleVersion, st.OpsKey = 3, newOps
+		wantState, err := st.encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.requireFiles(t, map[string]string{
+			hostTrustKnownHosts: m.before[hostTrustKnownHosts] + hostCALine("web1,web2", g2),
+			hostTrustStateFile:  string(wantState),
+		}, stderr)
+		m.before = mhtFiles(t, m.sshDir)
+		code, _, stderr = m.run(t)
+		if code != 0 {
+			t.Fatalf("run 2: exit %d, want 0; stderr:\n%s", code, stderr)
+		}
+		requireNoStepLine(t, stderr)
+		m.requireFiles(t, nil, stderr)
+	})
+	// The step writes the file 0644 and the state 0600, as the writer
+	// does, whatever modes the files had (03-12g, "The step", items 6 and
+	// 7; pre-merge review).
+	t.Run("writes_use_the_writers_modes", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Unix mode bits")
+		}
+		m, g2 := mhtFirst(t, 3, 2)
+		if err := os.Chmod(m.khPath(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(m.statePath(t), 0o644); err != nil { //nolint:gosec // a wider mode on purpose, so the step's write must narrow it
+			t.Fatal(err)
+		}
+		code, _, stderr := m.run(t)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0; stderr:\n%s", code, stderr)
+		}
+		m.requireFiles(t, map[string]string{
+			hostTrustKnownHosts: m.before[hostTrustKnownHosts] + hostCALine("web1,web2", g2),
+			hostTrustStateFile:  m.stateAt(t, 3),
+		}, stderr)
+		for p, want := range map[string]fs.FileMode{m.khPath(): 0o644, m.statePath(t): 0o600} {
+			fi, err := os.Stat(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fi.Mode().Perm(); got != want {
+				t.Fatalf("%s: mode %v after the step's write, want %v", p, got, want)
+			}
+		}
+	})
+	// Without $HOME the step does not look at the account's home (03-12g,
+	// "The step", item 1, and the outcome table's column "no home"): the
+	// run changes nothing and prints nothing of the step, even though the
+	// account's home holds the file.
+	t.Run("no_home_changes_nothing", func(t *testing.T) {
+		m, _ := mhtFirst(t, 3, 2)
+		mhtUseAccountHome(t, filepath.Dir(m.sshDir), nil)
+		mhtUseSSHDir(t, "", fmt.Errorf("%w: %w", errNoHomeDir, errors.New("$HOME is not defined (a test)")))
+		code, stdout, stderr := m.run(t)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0; stderr:\n%s", code, stderr)
+		}
+		m.requireRenewed(t, stdout, stderr)
+		requireNoStepLine(t, stderr)
+		if strings.Contains(stderr, "Host trust narrowed") {
+			t.Fatalf("stderr:\n%s\nwant no narrowing line", stderr)
+		}
+		m.requireFiles(t, nil, stderr)
+	})
+	// A file with no line of a host CA the bundle trusts gets no line and
+	// exits 0 when nothing else is wrong (03-12g, B11; pre-merge review).
+	t.Run("no_trusted_line_exits_0_and_adds_nothing", func(t *testing.T) {
+		m := newMHTEnv(t)
+		g2 := mhtNextOf(t, m.g1)
+		m.serve(t, 3, m.g1, g2)
+		stranger := mhtNextOf(t, g2)
+		m.plant(t, 2, stranger)
+		code, _, stderr := m.run(t)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0; stderr:\n%s", code, stderr)
+		}
+		if strings.Count(stderr, m.narrowed()) != 1 {
+			t.Fatalf("stderr:\n%s\nwant the narrowing line once", stderr)
+		}
+		requireNoStepLine(t, stderr)
+		got := mhtFiles(t, m.sshDir)[hostTrustKnownHosts]
+		for _, g := range []trust.CAEntry{m.g1, g2} {
+			if strings.Contains(got, g.Key) {
+				t.Fatalf("known_hosts holds a CA line of generation %d:\n%s", g.Generation, got)
+			}
+		}
+		m.requireFiles(t, map[string]string{
+			hostTrustKnownHosts: strings.Replace(m.before[hostTrustKnownHosts], hostCALine("web1,web2", stranger), "", 1),
+			hostTrustStateFile:  m.stateAt(t, 3),
+		}, stderr)
+	})
+	// The same file with a missing state exits 4: the step reads the
+	// state whether or not a line is missing (03-12g, "The step", item 4;
+	// pre-merge review).
+	t.Run("no_trusted_line_with_a_missing_state_exits_4", func(t *testing.T) {
+		m := newMHTEnv(t)
+		g2 := mhtNextOf(t, m.g1)
+		m.serve(t, 3, m.g1, g2)
+		m.plant(t, 2, mhtNextOf(t, g2))
+		if err := os.Remove(m.statePath(t)); err != nil {
+			t.Fatal(err)
+		}
+		code, _, stderr := m.run(t)
+		warn := fmt.Sprintf("Warning: host trust not refreshed in %s: the host trust state is missing.\n", m.khPath())
+		if code != 4 || strings.Count(stderr, warn) != 1 || strings.Count(stderr, warnPrefix) != 1 {
+			t.Fatalf("exit %d, stderr:\n%s\nwant 4 and %q once", code, stderr, warn)
 		}
 	})
 }
