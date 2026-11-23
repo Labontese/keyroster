@@ -321,10 +321,11 @@ profile's max TTL after ceremony 1's install, once the managed
 `keyroster_known_hosts` of every account whose ssh reads the managed
 files holds the new host CA's line (a user who always passes
 `--no-known-hosts` included; an automation account that runs
-`keyroster machine renew` gets the line from it, and an account that
-has neither a login of its own nor a `keyroster machine renew` that
-runs gets the line from an admin who runs `keyroster known-hosts sync`
-as that account), and once `keyroster host status` reads
+`keyroster machine renew` without `--no-known-hosts` gets the line
+from it, and an account that has neither a login of its own nor a
+`keyroster machine renew` that runs gets the line from an admin who
+runs `keyroster known-hosts sync` as that account), and once
+`keyroster host status` reads
 `bundle v<N> on <M>/<M> hosts` for the server's current bundle N,
 ceremony 1's or a later one that still lists the new host CA.
 

@@ -111,7 +111,9 @@ one. Log in with the key and the certificate:
 `ssh -i /path/to/id_ci -o CertificateFile=/path/to/id_ci-cert.pub user@host`.
 
 `keyroster machine renew` keeps an automation account's host CA lines
-current. When the account's `~/.ssh/keyroster_known_hosts` exists,
+current, for the OS account it runs as: run it as the account whose
+ssh reads the file. When the account's `~/.ssh/keyroster_known_hosts`
+exists,
 every run, renewed or not due, adds to it the line of each active or
 next host CA of the root-verified trust bundle that the file lacks,
 over the host names that the file's lines for the host CAs the bundle
@@ -132,9 +134,10 @@ account's `keyroster_known_hosts` ([ca-rotation.md](ca-rotation.md),
 "The host CA"). Run in CI: `TestMachineHostTrust`,
 `TestAddHostCALines` and, end to end, `TestHostCARotation`.
 UNVERIFIED: a run by a real cron job or timer, an account whose
-renewal runs with another `$HOME` than its home in the account
-database, Windows, and a sync that an admin runs for another account
-(no test runs sync for another account). The end-to-end run renews
+renewal runs as another OS account than its ssh or with another
+`$HOME` than its home in the account database, Windows, and a sync
+that an admin runs for another account (no test runs sync for another
+account). The end-to-end run renews
 from an account that also holds an administrator's configuration;
 the command-level tests also renew from a configuration without a
 user.
@@ -147,11 +150,18 @@ line on stderr; the certificate is kept); 1 for any refusal or failure
 of the renewal itself, whatever happened to the host CA lines; 2 for a
 usage error. An account whose home holds no
 `~/.ssh/keyroster_known_hosts`, or a run with `--no-known-hosts`, never
-gets 4; one whose home holds it gets 4 on every run while the server
-serves an older trust bundle than the account verified before, while
-its managed file or state is damaged, or while `$HOME` is not the
-account's home. An account whose file holds no line of a host CA the
-trust bundle trusts, as after a drain it missed, gets 0 and no line:
+gets 4, and neither does a run without `$HOME` (unset or empty), which
+changes no host CA line even when the account's home holds the file;
+one whose home holds it gets 4 on every run while the server serves an
+older trust bundle than the account verified before, while its managed
+file or state is damaged, or while `$HOME` is set and is not the
+account's home. What to do is in [enroll-user.md](enroll-user.md),
+"Trusting hosts without TOFU": item 7 for an older trust bundle, item
+8 for a damaged file or a state that is missing, damaged or of another
+installation (start over, then an admin's `keyroster known-hosts sync`
+as that account), and item 9 for `$HOME`. An account whose file holds
+no line of a host CA the trust bundle trusts, as after a drain it
+missed, gets no line, and 0 unless one of those faults gives it 4:
 only an admin's `keyroster known-hosts sync` as that account gives it
 one again. A timer cannot tell `machine_disabled` from a server that
 is down by the exit code alone: read the text it prints.
