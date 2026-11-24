@@ -18,7 +18,7 @@ metrics:
   completed: 2026-11-24
 actuals:
   tasks: 4
-  commits: 6
+  commits: 10
 plan_head_before: 2d61b55
 ---
 
@@ -31,6 +31,12 @@ plan_head_before: 2d61b55
 Before (cmd/keyroster/machinehosttrust.go at 2d61b55): step 1 of `machineHostTrust`, lines 148 to 167, was a `switch` on the error of `userSSHDir()`. Its first case, `case errors.Is(err, errNoHomeDir): return nil` (lines 155 and 156), ended the step at once when `$HOME` was unset or empty: `defaultSSHDir` (cmd/keyroster/knownhosts.go:128-132) wraps the error of `os.UserHomeDir` in `errNoHomeDir`. The run exited 0 and printed nothing of the step. Its second case, any other error (a `$HOME` that is not the account's home), looked up `accountHome()` and returned `fail(p, err.Error())` when `<account home>/.ssh/keyroster_known_hosts` existed: one warning line and exit 4. The doc comment's first bullet (lines 121 to 124) said "no home directory is nil". The leaf `TestMachineHostTrust/no_home_changes_nothing` (cmd/keyroster/machinehosttrust_test.go:958) pinned the exit 0.
 
 After: every error of `userSSHDir()` except a `*homeLookupWarning` takes the second path. With no `$HOME`, the run exits 4 with the line `Warning: host trust not refreshed in <home>/.ssh/keyroster_known_hosts: no home directory: <the standard library's reason>.`, when the home the account database names is an absolute path whose `.ssh` holds the file. It returns nil (exit 0, nothing of the step) when the account lookup fails, when that home is not an absolute path, or when it holds no file. A `*homeLookupWarning` still uses the directory it carries.
+
+Who that reaches, exactly:
+- A run without `$HOME` reaches the step only when its configuration is still found, as through `XDG_CONFIG_HOME`. Without one, `loadConfig` (cmd/keyroster/machinerenew.go:106) fails and the run exits 1 before the step, before and after this change.
+- It gets 4 only when the CLI can look the account up and that home holds the file.
+- An account known only through NSS or LDAP gets 0 there: the CGO_ENABLED=0 Linux release's `os/user` reads only `/etc/passwd` (docs/runbooks/enroll-user.md, item 9), so the lookup fails.
+- Windows does not get this 4 either. The home there is `%USERPROFILE%`, not `$HOME`, and `defaultSSHDir` returns it before any account lookup (cmd/keyroster/knownhosts.go:134-136), so a run refreshes the file in that home as on any other run.
 
 The owner decided on 2026-11-24 that the command looks up the account's home also when `$HOME` is missing and exits 4 when the file is there; a job that deliberately runs without `$HOME` then gets 4 after an upgrade.
 
@@ -158,7 +164,11 @@ All runs went through `scripts/linux.sh` (WSL, Linux amd64).
 - 4ef5443 `fix(cli): machine renew exits 4 without HOME when the account's home holds the managed file` (machinehosttrust.go)
 - a6f6cff `test(cli): pin the runbook text on a run without HOME and on what --no-known-hosts turns off` (runbook_test.go)
 - 9112e5e `docs(runbooks): say that a run without HOME gets exit 4 and what --no-known-hosts turns off` (machine-identities.md)
-- `docs(quick-261124-nhm): record the change` (this SUMMARY)
+- 169ef64 `docs(quick-261124-nhm): record the change` (this SUMMARY)
+- 8d21201 `test(cli): correct the comment on which errors reach the account lookup` (machinehosttrust_test.go)
+- 18ed468 `test(cli): pin which accounts the HOME case of exit 4 reaches` (runbook_test.go)
+- 12953aa `docs(runbooks): say which accounts the HOME case of exit 4 reaches` (machine-identities.md)
+- `docs(quick-261124-nhm): record the review's fix round` (this SUMMARY)
 
 ## Deviations from Plan
 
@@ -169,7 +179,7 @@ All runs went through `scripts/linux.sh` (WSL, Linux amd64).
 ## UNVERIFIED
 
 - Windows. The unit tests run on the cli-windows job. That the account lookup fails there, so that a run without the home variable stays exit 0, is read from the code and the standard library: `accountHome` is `user.LookupId(strconv.Itoa(os.Getuid()))`, and `os.Getuid()` is -1 on Windows. No test of its own shows it.
-- A uid without an entry in the account database: `user.LookupId` returns an error, so the run stays exit 0. This too is read from the code and the standard library, not shown by a test of its own.
+- A uid without an entry in the account database, or an account known only through NSS or LDAP: `user.LookupId` returns an error, so the run stays exit 0. This too is read from the code and the standard library, not shown by a test of its own.
 - A real cron job or timer that runs `keyroster machine renew` without `$HOME`.
 - A real ssh that reads the file from the account database's home.
 
