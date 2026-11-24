@@ -29,12 +29,24 @@ elif command -v pacman >/dev/null 2>&1; then
 	# built (the day its build wrote the mirrorlist), and -Syyu upgrades
 	# the whole system to that snapshot before installing openssh: the
 	# same package set on every run, with pacman's signature checks left
-	# on (the image's own archlinux-keyring verifies them).
+	# on (the image's own archlinux-keyring verifies them). The sync is
+	# tried at most three times, 30 s apart, over the same snapshot: on
+	# 2026-11-22 one stalled fetch failed the lane for hours, and a retry
+	# rides out a stall, not an outage.
 	snapshot=$(date -u -r /etc/pacman.d/mirrorlist +%Y/%m/%d)
 	# shellcheck disable=SC2016 # $repo and $arch are pacman's own variables
 	printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' "$snapshot" >/etc/pacman.d/mirrorlist
 	echo "run-in.sh: pacman from the Arch Linux Archive snapshot $snapshot"
-	pacman -Syyu --noconfirm --needed openssh >/dev/null
+	tries=0
+	until pacman -Syyu --noconfirm --needed openssh >/dev/null; do
+		tries=$((tries + 1))
+		if [ "$tries" -ge 3 ]; then
+			echo "run-in.sh: pacman failed 3 times against the Arch Linux Archive snapshot $snapshot" >&2
+			exit 1
+		fi
+		echo "run-in.sh: pacman failed (try $tries of 3); trying again in 30 s" >&2
+		sleep 30
+	done
 else
 	echo "run-in.sh: no supported package manager in this image" >&2
 	exit 1
