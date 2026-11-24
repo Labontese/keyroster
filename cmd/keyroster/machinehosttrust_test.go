@@ -965,8 +965,8 @@ func TestMachineHostTrust(t *testing.T) {
 		}
 		m.requireRenewed(t, stdout, stderr)
 		requireNoStepLine(t, stderr)
-		if strings.Contains(stderr, "Host trust narrowed") {
-			t.Fatalf("stderr:\n%s\nwant no narrowing line", stderr)
+		if strings.Contains(stderr, "Host trust narrowed") || strings.Contains(stderr, "host CA lines not narrowed") {
+			t.Fatalf("stderr:\n%s\nwant no narrowing line and no narrowing warning", stderr)
 		}
 		m.requireFiles(t, nil, stderr)
 	})
