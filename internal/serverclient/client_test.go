@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1173,11 +1174,15 @@ func TestConnectErrorTransport(t *testing.T) {
 				t.Errorf("body %.20q... accepted", body)
 				continue
 			}
-			// The message begins with the request's URL, whose port is
-			// the test listener's and can hold "000" itself (40005,
-			// 51000): the peer's zeros are looked for in the rest.
+			// The whole message is the request's URL and path, the
+			// CLI's own words, the byte offset and ")". That refuses
+			// any of the peer's text before ": decode:" or after the
+			// offset: its zeros, a run of its spaces, encoding/json's
+			// text ("invalid character 'x' ...") and a "peer text"
+			// excerpt. The URL is the test's own, so a port that holds
+			// "000" (40005, 51000) is no peer text.
 			msg := err.Error()
-			if !strings.Contains(msg, want) || strings.Contains(msg, "peer text") || strings.Contains(strings.ReplaceAll(msg, url, ""), "000") {
+			if !regexp.MustCompile(`^` + regexp.QuoteMeta(url+"/healthz: "+want) + `[0-9]+\)$`).MatchString(msg) {
 				t.Errorf("body %.20q...: err = %.300q, want %q in the CLI's own words", body, msg, want)
 			}
 		}
