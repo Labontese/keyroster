@@ -12,9 +12,9 @@ key-files:
   modified: [cmd/keyroster/machinerenew.go, cmd/keyroster/knownhosts.go, cmd/keyroster/knownhosts_test.go, cmd/keyroster/runbook_test.go, cmd/keyroster/hosttrust_runbook_test.go, test/e2e/hostca_rotation_test.go, docs/runbooks/ca-rotation.md, docs/runbooks/enroll-user.md, docs/runbooks/machine-identities.md, .planning/phases/03-linux-agent-and-revocation/03-12d-PLAN.md, .planning/phases/03-linux-agent-and-revocation/03-13-PLAN.md, .planning/phases/03-linux-agent-and-revocation/03-14-PLAN.md, .planning/phases/03-linux-agent-and-revocation/03-15-PLAN.md, .planning/phases/03-linux-agent-and-revocation/03-16-PLAN.md, .planning/ROADMAP.md, .planning/STATE.md]
 requirements-completed: []
 actuals:
-  tokens: 96994    # chars/4 over the realized diff against a49a214 without this SUMMARY (322,016) plus this SUMMARY (65,963), at S7
-  tasks: 5         # Tasks 1 to 5 up to the PR, its red rotation lanes on the first two heads and the fix round; Task 5's step 6 (the pre-merge review) is the orchestrator's and Task 6 the owner's merge
-  commits: 9       # git rev-list --count a49a214..HEAD with S7: R2, G2, C3, R4, W4, P5, the first SUMMARY commit, F6 and S7
+  tokens: 106097    # chars/4 over the realized diff against a49a214 without this SUMMARY (329,838) plus this SUMMARY (94,551), at this record
+  tasks: 5         # Tasks 1 to 5 up to the PR, its red rotation lanes on the first two heads and the fix round, and the pre-merge review's fix round; Task 5's step 6 (the pre-merge review) is the orchestrator's and Task 6 the owner's merge
+  commits: 16      # git rev-list --count a49a214..HEAD with this record: R2, G2, C3, R4, W4, P5, the first SUMMARY commit, F6, S7, T7, R8, W9, T10, R11, W12 and this record
 plan_head_before: a49a214604600c3bc2818584acdde47c5bf2315c
 ---
 
@@ -23,7 +23,7 @@ plan file sha256: 2bdb0c0811ef2b3d9cd28ec81d1d4702262dcd57660e8d1da095c20443a3af
 
 # Phase 03 Plan 12g: machine renew adds a new host CA's line Summary
 
-`keyroster machine renew` now adds, right after its trust bundle verifies, the line of each active or next host CA that an automation account's managed `keyroster_known_hosts` lacks, over the host names the file's own lines for trusted host CAs already carry, and moves the bundle floor of `host-trust.json`; it exits 4 when the certificate is in place but host trust could not be refreshed, and `--no-known-hosts` turns the step off. TestHostCARotation gains a third client refreshed this way in the e2e-rotation lane, and ca-rotation.md, enroll-user.md and machine-identities.md say what the step does and does not do, each new sentence pinned. Pull request #120; the pre-merge review is pending.
+`keyroster machine renew` now adds, right after its trust bundle verifies, the line of each active or next host CA that an automation account's managed `keyroster_known_hosts` lacks, over the host names the file's own lines for trusted host CAs already carry, and moves the bundle floor of `host-trust.json`; it exits 4 when the certificate is in place but host trust could not be refreshed, and `--no-known-hosts` turns the step off. TestHostCARotation gains a third client refreshed this way in the e2e-rotation lane, and ca-rotation.md, enroll-user.md and machine-identities.md say what the step does and does not do, the new text pinned by 54 required phrases, with 7 earlier wordings forbidden. Pull request #120; the pre-merge review and its fix round are recorded under "Pre-merge review".
 
 ## Hand-over
 
@@ -50,9 +50,13 @@ delta gate and the full gate (each exit 0 on its first run); the push; PR #120 o
 keyroster-bot without auto-merge; the tracking update; the first SUMMARY commit, pushed. See
 "Task 5 (session 3)". The e2e-rotation lanes were red on the PR's first two heads (P5 and the
 first SUMMARY commit), so step 5 was not complete there; on the orchestrator's ruling the fix
-round added F6 (a fixed wait after client C's setup) and S7 (this record). See "The rotation
+round added F6 (a fixed wait after client C's setup) and S7 (its record). See "The rotation
 lanes' red runs on the first two heads, and the fix". Next: the orchestrator's pre-merge review
 (Task 5, step 6) on a green PR, then the owner's merge gate (Task 6).
+
+After the pre-merge review (Task 5, step 6). Done: the review on c7aa526 and its fix round (T7,
+R8, W9, T10, R11 and W12, and this record); see "Pre-merge review". Next: the owner's merge gate
+(Task 6).
 
 ## Task 1: preconditions and base
 
@@ -91,8 +95,8 @@ lanes' red runs on the first two heads, and the fix". Next: the orchestrator's p
   1795458749 on, after the test binary had been built (the run's test time is 280.23 s of its
   292 s): the measured binary is a49a214's.
 
-test-time base: keyroster=264.218 at=1795469558
-Re-measured in session 3 (Task 5) and replaced in place, because session 1's base (280.230 s at epoch 1795458760) came from another session and another WSL boot: on origin/main a49a214 in a detached worktree outside the repository, removed afterwards; Budget's command (`bash scripts/linux.sh 'exec 2>&1; go test -race -count=1 -timeout 15m ./cmd/keyroster/'`, with a read of the WSL boot id put before it), in the background with nothing else running in WSL; started at epoch 1795464069, `ok  github.com/Labontese/keyroster/cmd/keyroster 271.776s`, exit 0; WSL boot id 4974cc49-ddca-4836-a015-2032127a83e3 before and after the run. For the fix round WSL had booted again (boot id 011372f6-9963-4a98-9bdb-83ce959b9cce), so the base was measured once more the same way and replaced in place: started at epoch 1795469275, `ok  github.com/Labontese/keyroster/cmd/keyroster 264.218s`, exit 0, the same boot id before and after the run.
+test-time base: keyroster=282.596 at=1795479239
+Re-measured in session 3 (Task 5) and replaced in place, because session 1's base (280.230 s at epoch 1795458760) came from another session and another WSL boot: on origin/main a49a214 in a detached worktree outside the repository, removed afterwards; Budget's command (`bash scripts/linux.sh 'exec 2>&1; go test -race -count=1 -timeout 15m ./cmd/keyroster/'`, with a read of the WSL boot id put before it), in the background with nothing else running in WSL; started at epoch 1795464069, `ok  github.com/Labontese/keyroster/cmd/keyroster 271.776s`, exit 0; WSL boot id 4974cc49-ddca-4836-a015-2032127a83e3 before and after the run. For the fix round WSL had booted again (boot id 011372f6-9963-4a98-9bdb-83ce959b9cce), so the base was measured once more the same way and replaced in place: started at epoch 1795469275, `ok  github.com/Labontese/keyroster/cmd/keyroster 264.218s`, exit 0, the same boot id before and after the run. For the pre-merge review's fix round, part A, WSL had booted again (boot id f9e96bc7-e0b5-47d9-bb01-75e6ce1a110d), so the base was measured once more the same way: started at epoch 1795476199, `ok  github.com/Labontese/keyroster/cmd/keyroster 278.467s`, exit 0, the same boot id before and after the run. For its part A2 WSL had booted again (boot id 298a181b-226a-41fd-9448-6db1044afb4d), so the base was measured once more the same way and is the line above: started at epoch 1795478940, `ok  github.com/Labontese/keyroster/cmd/keyroster 282.596s`, exit 0, the same boot id before and after the run.
 
 ## Task 2
 
@@ -569,6 +573,8 @@ The open questions of the planning work, each carried: whether OpenSSH falls bac
 - Step 6's failure of `encode()` on the moved state: no test reaches it (a state that
   `readHostTrustStateBytes` parsed and validated encodes again), so the branch and its reason
   text (deviation 3) are defence in depth, untested.
+- A symbolic link at the managed file's path: no leaf plants one (the leaf not_a_regular_file plants a directory), so what the step prints for a link is shown by no test.
+- Two host CA lines added in one run: every leaf adds at most one, so the order of two added lines is shown by no test.
 
 ## Deviations
 
@@ -636,15 +642,18 @@ The open questions of the planning work, each carried: whether OpenSSH falls bac
    `git cat-file` leg (skipped by its own `if` while the plan was not yet at HEAD) and its legs
    on the branch's added lines (R2 to W4). It exited 0. This asks more than the cut command
    would, never less; it ran again after the commit, with exit 0.
+   **Ruling (orchestrator): accepted.** The whole command asks more than the cut one would, and it passed.
 7. **The base command was prefixed with a read of the WSL boot id.** The base run was
    `bash scripts/linux.sh 'cat /proc/sys/kernel/random/boot_id; exec 2>&1; go test -race -count=1 -timeout 15m ./cmd/keyroster/'`,
    so that the base and the delta gate are shown to share one WSL boot (the plan's rule re-measures
    a base from another boot). The `go test` command is Budget's, unchanged.
+   **Ruling (orchestrator): accepted.** The prefix reads the boot id and changes nothing of the measured command.
 8. **The PR's creation command.** The plan gives
    `scripts/gh-as-bot.sh pr create --title "feat(cli): machine renew adds a new host CA's line to the managed known_hosts"`
    and a body; the command run added `--base main --head p03/12g-machine-renew-host-trust` and
    `--body-file <the body file>`, and read its stdin from `/dev/null` so that it could not wait on
    a prompt. The title and the body are the plan's.
+   **Ruling (orchestrator): accepted.** The added flags name the base, the head and the body's file; the title and the body are the plan's, read back after creation.
 9. **F6 changes test text the plan dictates.** The plan's C3 table (plan line 251) places client
    C's setup between `hostTrustKR` and `joinHostCert` and adds no wait. F6 inserts, on the
    orchestrator's ruling after the red rotation lanes, the constant `hcrSetupPayback` with its
@@ -652,6 +661,7 @@ The open questions of the planning work, each carried: whether OpenSSH falls bac
    line, so the host joins with the admin bucket it has on main (see "The rotation lanes' red
    runs on the first two heads, and the fix"). Nothing else in the file changes; the setup's
    logged duration stays the duration of the work, without the wait.
+   **Ruling (orchestrator): accepted.** The change is the orchestrator's own ruling after the red lanes.
 10. **There is now one fixed wait in the e2e test.** The plan's "The budget" says the e2e
     additions add no wait, and the PR text said "no new wait in the e2e test". There is now one
     fixed wait of 4 s in the setup, outside every window. The budget, plainly: the plan's
@@ -659,11 +669,45 @@ The open questions of the planning work, each carried: whether OpenSSH falls bac
     the lanes measured the setup additions at 34 ms, 30 ms and 32 ms and step 3's two runs at
     12 ms, so the 4 s wait fits inside that allowance, and the figures and the 900 s rule stand;
     the typical figure moves by about 4 s.
+    **Ruling (orchestrator): accepted.** The change is the orchestrator's own ruling after the red lanes.
 11. **The PR body's budget line was replaced.** After F6 and S7 were pushed, the bot replaced
     only the body's line that began `- the budget: no new wait in the e2e test;` with
     `- the budget: one new fixed wait of 4 s in the e2e test's setup, outside every window (it pays back the admin requests the third client's setup spends before the host joins); the rotation lanes' slowest passing figure stays about 874 s to 878 s against the owner's 900 s, which applies to the measured run.`
     (`scripts/gh-as-bot.sh pr edit 120 --body-file <file>`); every other line of the body is
     unchanged.
+    **Ruling (orchestrator): accepted.** The change is the orchestrator's own ruling after the red lanes.
+12. **The review's fix round changes text the plan dictates.** T7 and T10 add five leaves to
+    TestMachineHostTrust that the plan does not name. R8 and R11 replace four of the plan's
+    pinned phrases (P1, P33, P37 and P42, which now read as P1', P33', P37'' and P42'') and add
+    twelve (Q1 to Q12), and they read item 4's two phrases in item 4's own window. W9 and W12
+    change four passages of the plan's blocks: one in ca-rotation.md's "Before ceremony 2" and
+    three in machine-identities.md's "Renew a machine certificate". Each change is the
+    orchestrator's ruling after the review; the plan file is not edited.
+13. **"Every new sentence is pinned with a mutant" was not true on c7aa526.** The plan's
+    must-have says it, and the pull request's text said "each new sentence pinned". The review
+    showed three document mutants that passed and three sentences without a pinned phrase, and
+    the check of the fix round three more. Now this plan's runbook text is pinned by 54 required
+    phrases, with 7 earlier wordings forbidden (five of them new to the test files, two that
+    main's tests required), and each of the 54 has a document mutant that its leaf killed: the
+    plan's mutants for the 38 phrases that stand as the plan gave them, M510 and M511 for P1' and
+    P33', M526 and M527 for P37'' and P42'', M514 to M523 for Q1 to Q10, M528 for Q11 and M529
+    for Q12; M524 for item 4's window. (M512 and M513 killed P37' and P42', wordings that part
+    A2 replaced.) This record claims the count, not "each sentence".
+14. **A run without `$HOME`.** The step returns at once when there is no `$HOME`, as the plan
+    dictates ("The step", item 1; the outcome table's column "no home"), also when the
+    account's home holds the file. The review raised it; on the orchestrator's ruling the code
+    stays, machine-identities.md says it, and the leaf `no_home_changes_nothing` pins it.
+15. **M509 and M525 ran with only one leaf selected**, not with the mutant rule's command:
+    under either mutant, other tests that run `keyroster machine renew` would look into, or
+    name, the real account's home, which no test of the package may do.
+16. **A `//nolint:gosec` comment** sits on the leaf's deliberate `os.Chmod(<state>, 0o644)` in
+    `writes_use_the_writers_modes` (gosec's G302 flagged it); the orchestrator accepted it.
+17. **The pull request's text changed in two clauses** after this record's push: in the line
+    that begins `- exit 4 when`, `for an account that has the file;` became
+    ``for an account that has the file (a run without `$HOME` does not look for it, changes nothing and gets 0);``,
+    and in the line that begins `- ca-rotation.md, enroll-user.md items 4 and 4a`,
+    `each new sentence pinned;` became
+    `the new text pinned by 54 required phrases, with 7 earlier wordings forbidden;`.
 
 ### The plan's wording of one owner decision
 
@@ -761,4 +805,224 @@ requests; it is on main, and this plan does not change it.
 
 ## Pre-merge review
 
-Pending.
+**CI on c7aa526, the head the review read.** CI 45273826814, E2E 45273826909, E2E TPM 45273827220, PIV 45273827151, E2E distro 45273827298, E2E PKCS#11 45273826954, Systemd 45273826863, CodeQL 45273826852, Workflow lint 45273826803, PR title 45273826920 and, after the body's edit, 45273842856: every run concluded success, the 30 required checks without a re-run.
+
+| Lane | `go test` |
+|---|---|
+| e2e-rotation (9.5p1) | 670.137 s |
+| e2e-rotation (10.5p1) | 660.407 s |
+| e2e (9.5p1) | 802.148 s |
+| e2e (10.5p1) | 787.708 s |
+| e2e-probe (9.5p1) | 275.393 s |
+| e2e-probe (10.5p1) | 283.505 s |
+
+| Reading | e2e-rotation (9.5p1), job 138040285252 | e2e-rotation (10.5p1), job 138040284443 |
+|---|---|---|
+| TestHostCARotation | PASS, 139.12 s | PASS, 133.87 s |
+| setup line (the wait is not in it) | 34 ms | 33 ms |
+| step 3's two runs | 12 ms | 13 ms |
+| re-anchored | false | false |
+| both fixed lines | once each | once each |
+| client C right after the switch | `ssh exited 0` | `ssh exited 0` |
+| client C after the renewal | `ssh exited 0` | `ssh exited 0` |
+| client B after the renewal | `ssh exited 255` | `ssh exited 255` |
+| TestCARotationNoFailedLogin | PASS, 470.96 s, `login failures: 0` | PASS, 467.07 s, `login failures: 0` |
+| TestCANextAndAbort | PASS, 35.30 s | PASS, 35.07 s |
+
+These are the lanes of a head from F6 on: the wait of F6 held in both. Task 5's verify commands 1 to 4 and 7 to 11 exited 0 on c7aa526, run by the executor and run again by the orchestrator; 5 and 6 on F6's tree, as recorded above.
+
+**The review** (2026-11-23, on c7aa526, lean as Task 5's step 6 says). Three readers, none with sight of another's work:
+- one of the step, its exit status, its tests and the end-to-end addition (Claude Opus, high effort), with mutants and narrow test runs in a private copy of the tree;
+- one of the runbook text, its pins and the CLI's own texts (Claude Opus, high effort), the same way;
+- Codex (gpt-6-astra, high effort, read-only) of the diff outside .planning and the pull request's text.
+
+Three skeptics (Claude Sonnet, high effort) then judged what the readers raised: two, each on its own, the one point Codex raised, and one the eight points of the two other readers together. Each ran tests in a private copy of the tree: the two an experiment of their own, the third the mutants and the probe that five of its points rested on; its three other points rest on text, and it judged them by reading. No reader and no skeptic ran TestHostCARotation: it was read, with the two rotation lanes' logs of c7aa526.
+
+No point is rated critical or high after the skeptics. Nine stand, three medium and six low, and each is closed by the fix round below. One half of Codex's point was refuted by both skeptics. The step reader reported no defect in the step itself and names its evidence for the line reader, the issuing set, the state's rewrite, the exit status of every return path, the order and the checks of the two writes, and client C's control.
+
+| # | Raised by (its rating) | The point | The skeptics | Closed by |
+|---|---|---|---|---|
+| 1 | step reader (medium) | The ops key that step 6 writes beside the bundle version was pinned by no test: `next.BundleVersion, next.OpsKey = b.Version, b.OpsKey.Key` -> `next.BundleVersion = b.Version` passed every test, because every leaf served the planted ops key. | upheld, medium; the mutant repeated | the leaf `floor_records_the_new_ops_key`, M506 |
+| 2 | step reader (medium) | The modes of the step's two writes were pinned by no test: `0o644` -> `0o666` for the file and `0o600` -> `0o666` for the state each passed every test. | upheld, medium; both mutants repeated | the leaf `writes_use_the_writers_modes`, M507 and M508 |
+| 3 | Codex (critical) | Without `$HOME` (unset or empty, the configuration found through `XDG_CONFIG_HOME`) the step returns at once: exit 0 and no line, although the account's home holds the file. | both: real, and low. The code does what the plan dictates ("The step", item 1, and the outcome table's column "no home"), the narrowing does the same, the account's ssh then refuses a new host CA instead of trusting anything, and the gate's check of the file shows it. Both refuted the point's other half (a failed `Lstat` of the account home's file taken as absent): the same account's ssh could not read that file either. | the code stays, on the orchestrator's ruling; machine-identities.md says it (block D3, Q4); the leaf `no_home_changes_nothing`, M509 |
+| 4 | runbook reader (medium) | machine-identities.md said what exit 4 means and not what to do about it. | upheld, low: one pointer sentence is enough | the pointer to enroll-user.md's items 7, 8 and 9 (block D3), pinned (Q5) |
+| 5 | runbook reader (medium) | "Each new sentence pinned" was not true: three document mutants passed (the exit-0 clause rewritten, `, and without --no-known-hosts` dropped, the quoted warning prefix changed), and three sentences of machine-identities.md held no pinned phrase. | upheld, medium; the three mutants repeated and a fourth added, with a control that fails | ten more pinned phrases (Q1 to Q10), each with its mutant; this record and the pull request's text now give the count |
+| 6 | runbook reader (low) | "Gets 0 and no line", for a file with no line of a host CA the bundle trusts, holds only while nothing else is wrong: with a missing, damaged or foreign state, or a bundle below the floor, the run exits 4. | upheld, low; own probe | the sentence corrected (blocks D3 and D5, P42''); the leaves `no_trusted_line_exits_0_and_adds_nothing` and `no_trusted_line_with_a_missing_state_exits_4` |
+| 7 | runbook reader (low) | "Before ceremony 2" said that an automation account that runs `keyroster machine renew` gets the line from it, also when its job carries `--no-known-hosts`. | upheld, low | three words (block D4, P1') |
+| 8 | runbook reader (low) | Item 4's two new phrases of enroll-user.md were checked against the whole section: the sentence moved into item 5 passed. | upheld, low; the move repeated | the two phrases checked in item 4's own window, M524 |
+| 9 | runbook reader (low) | machine-identities.md did not say that the renewal must run as the account whose ssh reads the file, nor label a renewal that runs as another OS account UNVERIFIED. | upheld, low | blocks D1 and D2 (Q1, P33') |
+
+**What the review did not check**, from the readers' own lists: Windows behaviour (read, not run); the fuzz target (read, not run); the files that each reader read in the parts its questions named and not whole (the step reader: knownhosts.go and the end-to-end test beyond its diff; the runbook reader: the diffs of the test files and of the step's code, and enroll-user.md outside its section on host trust); and two paths that no test reaches, now listed under "UNVERIFIED" above (a symbolic link at the managed file's path, and two lines added in one run).
+
+**The check of the fix round.** Before anything of the fix round was pushed, one checker (Claude Sonnet, high effort) read its first three commits (T7, R8 and W9) against the code, with four code mutants and three document mutants of its own in a private copy of the tree. It found the commits to be exactly the dictated ones with no product code changed, each of the five leaves to pin what it names (three of its mutants failed them: the file written with the mode it had, step 4 skipped when nothing is added, and a floor write that also dropped the names), every changed sentence true by the code, each of the fourteen phrases in the window of its section, and 52 required phrases. Four of its mutants passed, which gave three low points and one more phrase to pin, all closed by the round's last commits (T10, R11 and W12): the leaf `no_home_changes_nothing` did not show that the narrowing prints no warning (M525 now fails it); the pointer sentence's lead-in held no pinned phrase (Q11, M528); "one of those faults" pointed at a list that omitted a missing or foreign state (block D5; P37'' and P42'', M526 and M527); and the clause of "Before ceremony 2" on who gets the line from an admin held no pinned phrase (Q12, M529). Of the seven forbidden phrases it found five new to the test files and two that main's tests required. The orchestrator read T10, R11 and W12 against their dictation; no further checker read them.
+
+**The fix round's commits.** Six commits on c7aa526, each signed (SSH signature present),
+authored as Daniel Gustafsson and committed by keyroster-bot, staged by path; before each
+commit `git diff --cached` of every staged file was read in full, one file at a time, after the
+last edit, and the staged-lines scan with the owner's two pattern files exited 0. No product
+file changes in any of them.
+
+| Name | SHA | Subject |
+|------|-----|---------|
+| T7 | c8965133004ef75252379f65ad58716b6126346f | test(cli): pin the floor's ops key, the modes of the step's writes and the runs that change nothing |
+| R8 | 3eb68aa6872848ba1f0c9ea81a51b4960108bd3d | test(cli): pin the runbook text on what exit 4 calls for and on the account the renewal runs as |
+| W9 | 1f1670b424641b096149560c9878bbcf80add28e | docs(runbooks): say what exit 4 calls for, what a run without HOME does and which account the renewal runs as |
+| T10 | 916246bf4e46bf94d72b9c32b261630deb0a1c76 | test(cli): show that a run without HOME prints no narrowing warning either |
+| R11 | ea9f3ce5204fa2b71f0bcc1790fcb05588fe62dc | test(cli): pin the pointer to the enrol runbook and the faults that give exit 4 |
+| W12 | d0689afc04ef0a38bf1d5c1de03f9854e78d22b3 | docs(runbooks): name every state fault that gives exit 4 |
+
+- **T7** (cmd/keyroster/machinehosttrust_test.go only: 131 lines added, with the `runtime`
+  import): five leaves of TestMachineHostTrust after
+  `stale_bundle_after_the_floor_moved_adds_nothing`, each passing on the code as it was, from
+  the unmutated `-v` run: `--- PASS: TestMachineHostTrust/floor_records_the_new_ops_key (0.05s)`
+  (version 3 served with a fresh ops key, the files of version 2 planted: g2's line added and
+  the state the plant with `bundle_version` 3 and the new `ops_key`; a second run prints no
+  line of the step and changes no byte), `--- PASS: TestMachineHostTrust/writes_use_the_writers_modes (0.04s)`
+  (the file chmod 0600 and the state 0644 before the run; 0644 and 0600 after it; skipped on
+  windows), `--- PASS: TestMachineHostTrust/no_home_changes_nothing (0.04s)` (the plant under
+  `<home>/.ssh`, `accountHome` that home, `userSSHDir` an error that wraps `errNoHomeDir` as
+  `defaultSSHDir` builds it: exit 0, the renewed summary, no line of the step, the four files
+  byte-equal), `--- PASS: TestMachineHostTrust/no_trusted_line_exits_0_and_adds_nothing (0.05s)`
+  (one CA line of a fresh untrusted key: exit 0, the narrowing's line once, no line of the step,
+  no line of g1 or g2, the state at `bundle_version` 3) and
+  `--- PASS: TestMachineHostTrust/no_trusted_line_with_a_missing_state_exits_4 (0.04s)` (exit 4
+  and `Warning: host trust not refreshed in <the file>: the host trust state is missing.` once).
+  gosec flagged the leaf's deliberate `os.Chmod(<state>, 0o644)` (G302); one
+  `//nolint:gosec // a wider mode on purpose, so the step's write must narrow it` on that line
+  (deviation 16). The lens command (`go vet` and the four named tests) `ok ... 8.030s`; gofmt
+  clean; golangci-lint `0 issues.` under linux, windows and darwin.
+- **T10** (the same file, 2 lines): in `no_home_changes_nothing` the check that stderr holds no
+  `Host trust narrowed` also fails when stderr holds `host CA lines not narrowed` (the
+  narrowing's warning, narrow.go's `narrowWarn`), with the message "want no narrowing line and
+  no narrowing warning". The lens command `ok ... 7.558s`; lint `0 issues.` three times.
+- **R8** (runbook_test.go and hosttrust_runbook_test.go): the phrases taken from the
+  orchestrator's dictation by script (the markdown space before a closing double backtick
+  dropped); P1 replaced by P1' in "Before ceremony 2", Q9 and Q10 added in "The host CA", P33,
+  P37 and P42 replaced by P33', P37' and P42' and Q1 to Q8 added in "Renew a machine
+  certificate", each group with a comment that cites (03-12g); item 4's two phrases checked in
+  `htrbBetween(sec, "**4. The refresh lag", "**4a. ")` under the name `item 4, the lag, in item 4`.
+- **R11** (runbook_test.go): P37' and P42' replaced by P37'' and P42'', Q11 added beside Q5 (its
+  double quotes escaped in the Go literal), and Q12 added beside P1' in "Before ceremony 2".
+  The required phrases are 54; the seven forbidden phrases are unchanged.
+- **W9** (machine-identities.md and ca-rotation.md) applied blocks D1 to D4 and **W12**
+  (machine-identities.md) block D5, each by a script that took the block from the dictation's
+  bytes and asserted, before any edit, that its old text occurs exactly once and once at a line
+  start; D1 2 lines to 4, D2 4 to 5, D3 10 to 17, D4 6 to 7, D5 11 to 12; the widest line 71
+  columns; LF only, no carriage return, no added line naming a plan number. After each, both
+  runbook tests pass, the wider run (`Runbook|CARotation|HostTrust|SignerInstall|MoveAside|Restore|SecurityDocs`)
+  is `ok`, and lint is `0 issues.` three times.
+
+**The phrase counts** (each file's text with its whitespace runs joined, as `normalizeSpace`
+does):
+
+| Phrase | Before W9 | After W9 | After W12 |
+|---|---|---|---|
+| P1', P33', Q1, Q4, Q5, Q11 | 0 | 1 | 1 |
+| P37', P42' | 0 | 1 | 0 |
+| P37'', P42'' | 0 | 0 | 1 |
+| Q2, Q3, Q6, Q7, Q8, Q9, Q10, Q12 | 1 | 1 | 1 |
+| P1, P33, P37, P42 (the plan's wordings) | 1 | 0 | 0 |
+
+Every count was taken by script; Q11 and Q12, which R11 added after W9, were counted before
+W9 on c7aa526's runbooks (Q11 0, Q12 1).
+
+**The REDs**, each from a detached worktree of its commit outside the repository, removed
+afterwards, with `go test -count=1 -timeout 15m -v -run "^(TestCARotationSwitchRunbook|TestHostTrustRunbooks)$" ./cmd/keyroster/`
+as R4's RED:
+- R8: exit 1; exactly two `--- FAIL:` lines, `TestCARotationSwitchRunbook` and
+  `TestCARotationSwitchRunbook/host_ca_gate`; exactly seven `lacks` messages, P1' in
+  `ca-rotation.md "Before ceremony 2"` and P33', P37', P42', Q1, Q4 and Q5 in
+  `machine-identities.md "Renew a machine certificate"`; no `still holds` message;
+  `--- PASS: TestHostTrustRunbooks` and its leaves; no build, setup or SKIP line.
+- R11: exit 1; the same two `--- FAIL:` lines; exactly two `lacks` messages, P37'' and P42'' in
+  `machine-identities.md "Renew a machine certificate"`; no `still holds` message;
+  `--- PASS: TestHostTrustRunbooks` and its leaves; no build, setup or SKIP line.
+
+**The mutants M506 to M529**, each under the mutant rule: the unmutated run of its command
+passing first; one exact replacement (code: the string asserted unique in its file;
+documents: the whole line asserted unique in its file and the replaced words unique in that
+line; M524: the sentence moved by two asserted edits); its command; the log kept;
+`git checkout --` of the file; sha256 before and after equal; and
+`git status --short -- cmd internal test docs .github` empty. Every run exited 1 with its named
+leaf's `--- FAIL:` line and its parent and with no `[build failed]`, `[setup failed]`,
+`--- SKIP` or timeout line, and no other leaf failed; each document mutant's log holds exactly
+its own message (M524's its two) and no `still holds`.
+
+The commands: the code mutants M506 to M508 with Task 2's
+(`go vet ./cmd/keyroster/ && go test -count=1 -timeout 5m -run "^(TestAddHostCALines|TestMachineHostTrust|TestMachineHostTrustCaller|TestKnownHosts)$" ./cmd/keyroster/`);
+M509 and M525 with `go vet ./cmd/keyroster/`, then only
+`-run "^TestMachineHostTrust$/^no_home_changes_nothing$"` (deviation 15); the document mutants
+with Task 4's (`go test -count=1 -timeout 5m -run "^(TestCARotationSwitchRunbook|TestHostTrustRunbooks)$" ./cmd/keyroster/`).
+The unmutated controls: Task 2's command with `-v` on W9, 155 `--- PASS:` lines and no FAIL or
+SKIP line, `ok ... 8.080s`; the one-leaf command with `-v` on W9 and on W12, each running
+exactly `TestMachineHostTrust` and `TestMachineHostTrust/no_home_changes_nothing`, both PASS;
+Task 4's command on W9 (`ok ... 1.254s`) and on W12 (`ok ... 1.555s`).
+
+The sha256 of each file before every mutant and after its restore: machinehosttrust.go
+821ca964a2750356501e777e939eeeb42cac880fbc5c2bc567b9e05bd2aa8e4b; narrow.go
+0b31b3750c50da575aa8de6d5ea19de8a4dfd74fb31b605dc20a5aa48f3b068e; ca-rotation.md
+b30dc4b96f64b2104e3bc4135dc00341740eeae260700588a360cbc5669c42e8; enroll-user.md
+11e4c4084ba4fd4f81761cd1fb4d1b83c7afce21b66b1a66201fe91ea1d424d7; machine-identities.md
+d0877c4ed0f43a85a7544c33d7c41fd67702d32a7e5a2edc91a00971503cf8de (W9's tree, M510 to M521) and
+ee3a6cde393c1793905ea556658cb2edecd97eec593fa188ab0c9d4a81fa017d (W12's tree, M526 to M528).
+
+| Mutant | File: exact replacement | Named leaf failed | Message |
+|---|---|---|---|
+| M506 | machinehosttrust.go: `next.BundleVersion, next.OpsKey = b.Version, b.OpsKey.Key` -> `next.BundleVersion = b.Version` | `--- FAIL: TestMachineHostTrust/floor_records_the_new_ops_key` | `machinehosttrust_test.go:910: host-trust.json:` with the planted `ops_key`, want the new one |
+| M507 | machinehosttrust.go: `machineTrustReplace(dir, hostTrustKnownHosts, out, 0o644, check)` -> `machineTrustReplace(dir, hostTrustKnownHosts, out, 0o666, check)` | `--- FAIL: TestMachineHostTrust/writes_use_the_writers_modes` | `:950: .../keyroster_known_hosts: mode -rw-rw-rw- after the step's write, want -rw-r--r--` |
+| M508 | machinehosttrust.go: `hostTrustStateFile, enc, 0o600, check)` -> `hostTrustStateFile, enc, 0o666, check)` | `--- FAIL: TestMachineHostTrust/writes_use_the_writers_modes` | `:950: .../host-trust.json: mode -rw-rw-rw- after the step's write, want -rw-------` |
+| M509 | machinehosttrust.go: `case errors.Is(err, errNoHomeDir):` -> `case errors.Is(err, errNoHomeDir) && false:` | `--- FAIL: TestMachineHostTrust/no_home_changes_nothing` | `:964: exit 4, want 0`, stderr `Warning: host trust not refreshed in <home>/.ssh/keyroster_known_hosts: no home directory: $HOME is not defined (a test).` |
+| M510 | ca-rotation.md:324: `` renew` without `--no `` -> `` renew` with `--no `` | `--- FAIL: TestCARotationSwitchRunbook/host_ca_gate` | `ca-rotation.md "Before ceremony 2" lacks` P1' |
+| M511 | machine-identities.md:137: `runs as another OS` -> `runs as the OS` | the same | `machine-identities.md "Renew a machine certificate" lacks` P33' |
+| M512 | machine-identities.md:157: `is set and is` -> `is unset and is` | the same | `lacks` P37' |
+| M513 | machine-identities.md:164: `gets no line, and 0 unless` -> `gets no line, and 0 even if` | the same | `lacks` P42' |
+| M514 | machine-identities.md:114: `run it as the account` -> `run it as any account` | the same | `lacks` Q1 |
+| M515 | machine-identities.md:146: `host CA lines were refreshed or needed no change;` -> `host CA lines were refreshed or not;` | the same | `lacks` Q2 |
+| M516 | machine-identities.md:148: `Warning: host trust not refreshed in` -> `Warning: host trust was not refreshed in` | the same | `lacks` Q3 |
+| M517 | machine-identities.md:153: `and neither does` -> `and so does` | the same | `lacks` Q4 |
+| M518 | machine-identities.md:159: `item 7 for` -> `item 6 for` | the same | `lacks` Q5 |
+| M519 | machine-identities.md:121: `server cannot later` -> `server can later` | the same | `lacks` Q6 |
+| M520 | machine-identities.md:122: `It also removes the` -> `It also keeps the` | the same | `lacks` Q7 |
+| M521 | machine-identities.md:124: `makes no request` -> `makes a request` | the same | `lacks` Q8 |
+| M522 | ca-rotation.md:702: `` , and without `--no-known-hosts` `` dropped | the same | `ca-rotation.md "The host CA" lacks` Q9 |
+| M523 | ca-rotation.md:712: `refreshed once a` -> `refreshed before a` | the same | `ca-rotation.md "The host CA" lacks` Q10 |
+| M524 | enroll-user.md: the sentence from `An automation` to `until an admin's next sync as that account.` removed from item 4 (which then reads `... through the KRL. Run in CI e2e (03-09b):`) and appended after `` --keys` (revoke.md, section 4b). `` at the end of item 5 | `--- FAIL: TestHostTrustRunbooks/enroll_user_trusting_hosts` | `hosttrust_runbook_test.go:120: item 4, the lag, in item 4 lacks` both of item 4's phrases |
+| M525 | narrow.go: `case errors.Is(err, errNoHomeDir):` -> `case errors.Is(err, errNoHomeDir) && false:` | `--- FAIL: TestMachineHostTrust/no_home_changes_nothing` | `:969`, by T10's check: stderr `Warning: host CA lines not narrowed in ~/.ssh/keyroster_known_hosts: no home directory: $HOME is not defined (a test).` |
+| M526 | machine-identities.md:157 (W12): `its state is missing, damaged` -> `its state is damaged` | `--- FAIL: TestCARotationSwitchRunbook/host_ca_gate` | `lacks` P37'' |
+| M527 | machine-identities.md:165 (W12): `unless the refresh fails` -> `even if the refresh fails` | the same | `lacks` P42'' |
+| M528 | machine-identities.md:159 (W12): `What to do is in` -> `What to do is not in` | the same | `lacks` Q11 |
+| M529 | ca-rotation.md:325: `has neither a login of its own nor a` -> `has either a login of its own or a` | the same | `ca-rotation.md "Before ceremony 2" lacks` Q12 |
+
+M528 ran twice. Its first run was killed (the leaf's `--- FAIL:` line and Q11's message in its
+log, the file restored with equal sha256), but the runner judged it not killed: it looked for
+the phrase with plain `"`, which Go's `%q` prints as `\"`. The runner's check was corrected to
+Go's escaping and M528 and M529 were run again; M528 was killed again with the same message.
+M512 and M513 killed P37' and P42', which W12 replaced.
+
+**The gates.** Each in the background with nothing else running in WSL.
+- Part A, on W9's tree: WSL had booted again (boot id
+  f9e96bc7-e0b5-47d9-bb01-75e6ce1a110d), so the base was re-measured first on origin/main in a
+  detached worktree outside the repository: `ok ... 278.467s`, exit 0. The fifth verify command
+  (delta gate), run as written against this SUMMARY's line as it was then (264.218 s): exit 0,
+  `ok  github.com/Labontese/keyroster/cmd/keyroster 264.653s` (+0.435 s against that line,
+  -13.814 s against 278.467 s), the same boot id after it. The sixth (full gate): exit 0 on its
+  first run, 852 s; 36 `ok` lines (cmd/keyroster 314.508 s, internal/agent/apply 671.861 s,
+  internal/signer 551.705 s), no FAIL, DATA RACE or SKIP; golangci-lint `0 issues.` under linux,
+  windows, darwin and the `e2e,e2erotation` pass; capslock keyroster-signer 97 (baseline 97),
+  keyroster-agent 37 (37), keyroster-agent-fetch 23 (23), no new pair; dep-firewall,
+  testonly-firewall and check-pinned-actions (55 pinned) clean.
+- Part A2, on W12's tree: WSL had booted again (boot id
+  298a181b-226a-41fd-9448-6db1044afb4d), so the base was re-measured the same way:
+  `ok ... 282.596s`, exit 0, now the `test-time base:` line. The fifth verify command, run as
+  written against this SUMMARY's line as it was then (264.218 s): exit 0,
+  `ok  github.com/Labontese/keyroster/cmd/keyroster 312.454s` (+48.236 s against that line,
+  +29.858 s against 282.596 s, both within 90 s), the same boot id after it. The sixth: exit 0
+  on its first run, 893 s; 36 `ok` lines (cmd/keyroster 362.777 s, internal/agent/apply
+  704.157 s, internal/signer 551.816 s), no FAIL, DATA RACE or SKIP; golangci-lint `0 issues.`
+  four times; capslock 97 (97), 37 (37), 23 (23), no new pair; the firewalls and
+  check-pinned-actions clean.
+
+**Verify commands on the local head before the push**: the third, fourth, seventh and eighth
+exited 0 on W9 (1f1670b) and again on W12 (d0689af); main stayed at a49a214 throughout.
+
+The runs of this record's own commit cannot be named in it; the pull request's checks show them.
