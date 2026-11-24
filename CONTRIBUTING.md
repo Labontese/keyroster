@@ -79,7 +79,7 @@ name (with its matrix value) in one of the workflows under
 | `e2e (10.5p1)` | `e2e.yml` | the same suite against portable OpenSSH 10.5p1 |
 | `e2e-probe (9.5p1)` | `e2e.yml` | the probe certificate tests (`TestProbeCertsAgainstSSHD`, `TestProbeSSHDFacts`, build tags `e2e e2eprobe`) against the OpenSSH 9.5p1 build; the main `e2e` lanes do not run them |
 | `e2e-probe (10.5p1)` | `e2e.yml` | the same probe certificate tests against the OpenSSH 10.5p1 build |
-| `e2e-rotation (9.5p1)` | `e2e.yml` | the CA rotation end-to-end tests (`TestCANextAndAbort`, `TestCARotationNoFailedLogin` and `TestHostCARotation`, build tags `e2e e2erotation`) against the OpenSSH 9.5p1 build: a root ceremony adds a next user CA, an agent host trusts it, and an abort withdraws it; the second runs a CA switch, the drain and the host's drop with a certificate login every second that never fails; the third switches the host CA and shows that a client that refreshed keeps reaching the host across the host's renewal while a client that did not is refused after it; the main `e2e` lanes do not run them |
+| `e2e-rotation (9.5p1)` | `e2e.yml` | the CA rotation end-to-end tests (`TestCANextAndAbort`, `TestCARotationNoFailedLogin` and `TestHostCARotation`, build tags `e2e e2erotation`) against the OpenSSH 9.5p1 build: a root ceremony adds a next user CA, an agent host trusts it, and an abort withdraws it; the second runs a CA switch, the drain and the host's drop with a certificate login every second that never fails; the third switches the host CA and shows that a client that refreshed keeps reaching the host across the host's renewal while a client that did not is refused after it, and that a client whose file `keyroster machine renew` refreshed keeps reaching it too; the main `e2e` lanes do not run them |
 | `e2e-rotation (10.5p1)` | `e2e.yml` | the same three tests against the OpenSSH 10.5p1 build |
 | `e2e-distro (debian:12)` | `e2e-distro.yml` | `test/distro/run.sh` in the Debian 12 image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
 | `e2e-distro (debian:13)` | `e2e-distro.yml` | `test/distro/run.sh` in the Debian 13 image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
@@ -115,7 +115,7 @@ the ruleset is updated, so job names change only together with
 2. Commit signed commits, push the branch and open a PR with a Conventional
    Commits title.
 3. The code owner (`@Labontese`, see `.github/CODEOWNERS`) reviews and
-   approves. A new push dismisses an earlier approval, the approval must come
+   approves. A new push can dismiss an earlier approval, the approval must come
    from someone other than the last pusher, and every review thread must be
    resolved.
 4. Once every rule is satisfied, the code owner squash-merges the PR in the
@@ -166,7 +166,9 @@ two-person review is unchanged.
   configuration cannot make the force-push go out as the owner.
 - When `main` moved after the PR was opened, the bot rebases the feature
   branch onto `origin/main`, re-signs the commits, force-pushes with lease and
-  waits for green checks; the owner then approves the new head.
+  waits for green checks; the gate's next run then tells whether the owner
+  must approve the new head (GitHub has kept an approval when a rebase left
+  the diff unchanged).
 - **The owner never clicks "Update branch" on a bot PR.** That would make the
   owner the last pusher, and `require_last_push_approval` would then refuse
   the owner's own approval. The bot rebases instead.
