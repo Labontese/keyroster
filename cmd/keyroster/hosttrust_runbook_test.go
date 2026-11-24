@@ -114,6 +114,11 @@ func TestHostTrustRunbooks(t *testing.T) {
 			"Host trust partly refreshed: revocations only", "Host trust not refreshed:", "exits 0 when refreshed or unchanged, 3 when partly refreshed, and 1 when nothing was written")
 		htrbWant(t, "item 3, T-03-100", sec, "T-03-100", "whole admin-signed directory", "no secrets", "one installation serves one organisation")
 		htrbWant(t, "item 4, the lag", sec, "T-03-240", "next login or sync", "never prompted")
+		// An automation account's keyroster machine renew changes no host name
+		// (03-12g), read in item 4's own window: the whole-section check let the
+		// sentence sit in another item (pre-merge review).
+		htrbWant(t, "item 4, the lag, in item 4", htrbBetween(sec, "**4. The refresh lag", "**4a. "),
+			"An automation account's `keyroster machine renew` changes no host name", "the line it adds for a new host CA included, until an admin's next sync as that account")
 		htrbWant(t, "item 5, the costs", sec, "unreachable until its host has a host certificate", "Names removed before the client's first verified refresh", "--keys")
 		htrbWant(t, "item 6, ports", sec, "D7", "Port <n>", "HostKeyAlias <that same name>", "after the Include", "QB-6", "NEVERMATCH")
 		htrbWant(t, "item 7, freshness and rollback", sec, "24 hours", "signer restore", "older trust bundle", "stored ops key", "older_bundle_freezes_ca_lines_krl_still_written")
@@ -140,7 +145,11 @@ func TestHostTrustRunbooks(t *testing.T) {
 			"at most about 20 days after the switch", "moves only when an admin issues it a new certificate", "refuses each host from that host's move on", "cannot be rotated safely",
 			"unless an admin runs `keyroster known-hosts sync` as that account",
 			"after ceremony 1's install and before ceremony 2's install", "and the file then holds the new host CA's line", "so a refresh that wrote only the old line is repeated", "`TestHostCARotation`",
-			"UNVERIFIED on a real client and on Windows, and so are a sync that an admin runs for another account and a host certificate issued by hand across a host-CA switch")
+			// keyroster machine renew adds the line for the names the file already trusts (03-12g).
+			"an automation account's `keyroster machine renew` adds it for the host names the account's file already trusts (an admin's sync as that account writes the file first)",
+			"no admin key and no `keyroster machine renew` that runs, such as automation that only runs `ssh`) cannot be rotated safely",
+			"one host and three clients on loopback, one of them refreshed by `keyroster machine renew`", "The test renews from an account that also holds an administrator's configuration",
+			"UNVERIFIED on a real client and on Windows, and so are a sync that an admin runs for another account, a `keyroster machine renew` that a real cron job or timer runs, and a host certificate issued by hand across a host-CA switch")
 	})
 	t.Run("revoke_revoking_a_host", func(t *testing.T) {
 		doc := htrbDoc(t, "revoke.md")

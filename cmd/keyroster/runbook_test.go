@@ -1213,7 +1213,6 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"holds only the old host CA's line: it reaches each host until that host moves",
 				"`Host key verification failed` from then on, possibly weeks after the switch, until it refreshes",
 				"Watching for failures right after the switch shows little",
-				"is never rewritten by a full refresh cannot be rotated safely",
 				"No file that sshd reads lists a host CA key",
 				"removes its line from `keyroster_known_hosts` once its `trusted_until` has passed on the client's clock",
 				"each agent stops accepting answers signed by it at its `trusted_until`",
@@ -1223,14 +1222,41 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"the host asks for no certificate, installs no other and its agent refuses no answer",
 				"is refused with `Host key verification failed` after the renewal",
 				"The test does not wait the gate's time",
-				"UNVERIFIED: the host drain's end on a real host and client (unit-tested only), a real fleet, a client on Windows, clients older than OpenSSH 8.5, real clients that never refresh, and a sync run for another account",
-			}, []string{"UNVERIFIED until"}},
+				// keyroster machine renew refreshes an automation account's host CA lines (03-12g).
+				"a refresh writes one `@cert-authority` line for each host CA the trust bundle trusts at the client's clock, `keyroster machine renew` adds the line of an active or next host CA that the file lacks",
+				"An automation account that has the managed files refreshes itself with `keyroster machine renew`, run as the account ssh runs as, with `$HOME` its home",
+				"Every run, whether it renews the certificate or finds it not due, adds to the account's `keyroster_known_hosts` the line of each active or next host CA of the trust bundle that the file lacks",
+				"over the host names that the file's lines for the host CAs the bundle trusts already name, in the form a refresh writes",
+				"It adds no host name, writes no revocation and never creates the file",
+				"an admin's `keyroster known-hosts sync` as that account is its first refresh, and it brings new host names and revocations",
+				"When the certificate is written or not due but host trust could not be refreshed, it exits 4",
+				"so the time between two of its runs bounds how soon that happens: check the file before ceremony 2's install",
+				"nor a `keyroster machine renew` that runs (a host that ssh connects onward from, or an automation account that runs it with `--no-known-hosts`)",
+				"The same holds for the first sync of an automation account",
+				"never gains the new host CA's line, from a refresh or from `keyroster machine renew`, cannot be rotated safely",
+				"one host at a host cap of 90 s and three clients on loopback",
+				"A third client's file starts as the second's: `keyroster machine renew`, run after ceremony 1's install and not due, adds to it exactly the new host CA's line for the host's name",
+				"(with `--no-known-hosts` it changes nothing), and with that file the client reaches the host right after the switch and after the renewal",
+				"UNVERIFIED: the host drain's end on a real host and client (unit-tested only), a real fleet, a client on Windows, clients older than OpenSSH 8.5, real clients that never refresh, a `keyroster machine renew` that a real cron job or timer runs, and a sync run for another account",
+				"The test renews from an account that also holds an administrator's configuration, not from an automation account of its own",
+				// How the automation account runs it and when it has refreshed (03-12g,
+				// pre-merge review).
+				"with `$HOME` its home, and without `--no-known-hosts`",
+				"Such an account has refreshed once a run after ceremony 1's install has left the new line in its file",
+			}, []string{
+				"UNVERIFIED until",
+				// The wordings before keyroster machine renew refreshed host CA lines (03-12g).
+				"is never rewritten by a full refresh",
+				"(an automation account, or a host that ssh connects onward from)",
+			}},
 			{"ca-rotation.md before its first \"## \" line", head, []string{
 				"`TestHostCARotation` for what the host CA's gate prevents",
 			}, nil},
 			{"ca-rotation.md \"Run in CI\"", caRotationWindow(t, data, "Run in CI"), []string{
 				"`TestHostCARotation` (the same job: what the host CA's gate prevents",
 				"UNVERIFIED: the drain on real hosts of a fleet, the machine CA, the host drain's end on a real host and client (unit-tested only)",
+				// The third client, which keyroster machine renew refreshed (03-12g).
+				"a client that refreshed and one that did not across the host's renewal, and one that `keyroster machine renew` refreshed",
 			}, []string{"the host CA end to end"}},
 			{"ca-rotation.md \"Before ceremony 2\"", caRotationWindow(t, data, "Before ceremony 2"), []string{
 				"at least the user profile's max TTL after ceremony 1's install",
@@ -1242,17 +1268,57 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"of every account whose ssh reads the managed files holds the new host CA's line",
 				"`keyroster ca issue --ca host` lives as long as its `--ttl`, up to the host profile's `max_ttl_seconds`, which the floor of \"Ceremony 2\" covers",
 				"lies past a role's floor only when a certificate was issued under an earlier policy whose cap for its role was larger",
+				// An automation account gets the line from keyroster machine renew run
+				// without --no-known-hosts (03-12g, pre-merge review).
+				"an automation account that runs `keyroster machine renew` without `--no-known-hosts` gets the line from it",
+				// Who gets the line from an admin (03-12g, pre-merge review).
+				"an account that has neither a login of its own nor a `keyroster machine renew` that runs gets the line from an admin",
 			}, []string{"has no cap on its validity", "can make the switch of the host role wait"}},
 			{"ca-rotation.md \"What changes for nobody\"", caRotationWindow(t, data, "What changes for nobody"), []string{
 				"a client must have refreshed first",
 			}, nil},
 			{"machine-identities.md \"Renew a machine certificate\"", machine, []string{
-				"`keyroster machine renew` does not refresh the host trust files",
-				"is refreshed only by an admin who runs",
-				"checked by the new host CA's line in that account's",
 				"after ceremony 1's install and before ceremony 2's install",
-				"UNVERIFIED: no test runs sync for another account",
-			}, []string{"before a host-CA rotation"}},
+				// keyroster machine renew refreshes the host CA lines, and exits 4 when it cannot (03-12g).
+				"the only other files it changes are the account's host trust files",
+				"keeps an automation account's host CA lines current",
+				"every run, renewed or not due, adds to it the line of each active or next host CA of the root-verified trust bundle that the file lacks",
+				"and records that bundle's version in `host-trust.json`, as a refresh does",
+				"prints one line on stderr when it adds a line and nothing when nothing changed",
+				"and `--no-known-hosts` turns it off",
+				"It never adds a host name, never creates the file and never writes `keyroster_revoked_hosts.krl` or `keyroster_ssh_config`",
+				"the file's first version, new host names and revocations reach the account only when an admin runs `keyroster known-hosts sync` as that account",
+				"Run in CI: `TestMachineHostTrust`, `TestAddHostCALines` and, end to end, `TestHostCARotation`",
+				"UNVERIFIED: a run by a real cron job or timer, an account whose renewal runs as another OS account than its ssh or with another `$HOME` than its home in the account database, Windows, and a sync that an admin runs for another account",
+				"4 when the certificate was written or is not due but the host CA lines could not be refreshed",
+				"1 for any refusal or failure of the renewal itself, whatever happened to the host CA lines",
+				"An account whose home holds no `~/.ssh/keyroster_known_hosts`, or a run with `--no-known-hosts`, never gets 4",
+				"one whose home holds it gets 4 on every run while the server serves an older trust bundle than the account verified before, while its managed file is damaged or its state is missing, damaged or of another installation, or while `$HOME` is set and is not the account's home",
+				"The end-to-end run renews from an account that also holds an administrator's configuration; the command-level tests also renew from a configuration without a user",
+				"checks the answer against the root-verified trust bundle before it writes the certificate: it is a user certificate",
+				"An account whose file holds no line of a host CA the trust bundle trusts, as after a drain it missed, gets no line, and 0 unless the refresh fails for another reason: only an admin's `keyroster known-hosts sync` as that account gives it one again",
+				// The account the renewal runs as, what exit 0 and 4 print, what exit 4
+				// calls for, a run without $HOME, and what the step also does (03-12g,
+				// pre-merge review).
+				"for the OS account it runs as: run it as the account whose ssh reads the file",
+				"0 when the certificate was written or is not due and the host CA lines were refreshed or needed no change",
+				"the reason is the `Warning: host trust not refreshed in` line on stderr; the certificate is kept",
+				"and neither does a run without `$HOME` (unset or empty), which changes no host CA line even when the account's home holds the file",
+				"item 7 for an older trust bundle, item 8 for a damaged file or a state that is missing, damaged or of another installation (start over, then an admin's `keyroster known-hosts sync` as that account), and item 9 for `$HOME`",
+				// The pointer sentence's lead-in (03-12g, pre-merge review).
+				"What to do is in [enroll-user.md](enroll-user.md), \"Trusting hosts without TOFU\": item 7",
+				"so that a server cannot later serve an older bundle unnoticed",
+				"It also removes the lines of host CAs the bundle no longer trusts, as every command that verifies the bundle does",
+				"It makes no request of its own for this",
+			}, []string{
+				"before a host-CA rotation",
+				// The wordings before keyroster machine renew refreshed host CA lines (03-12g).
+				"`keyroster machine renew` does not refresh the host trust files",
+				"It writes only the certificate",
+				"is refreshed only by an admin who runs",
+				"0 when the certificate was written or is not due, 1",
+				"before it writes anything",
+			}},
 			{"signer-install.md \"Install a CA switch\"", switchTrust, []string{
 				"for the host role by the clients, and by the agents, which accept host certificates signed by it until then",
 				"so that no certificate the signer issued under the old key outlives the trust in that key",

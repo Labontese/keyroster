@@ -88,6 +88,17 @@ const (
 	// hcrLine is the line the test logs at its end, which the lane gate
 	// counts.
 	hcrLine = "host CA rotation: the refreshed client accepted generation 1 and generation 2, the client that did not refresh was refused"
+	// hcrMachineLine is the line the test logs for client C, which the lane gate counts (03-12g).
+	hcrMachineLine = "host CA rotation: machine renew added the generation 2 line to the third client, which accepted generation 1 and generation 2"
+	// hcrSetupPayback is the wait after client C's setup (03-12g). The role
+	// and the machine each spend two requests of the admin routes'
+	// per-client bucket (a GET and a POST of the directory), which holds 20
+	// requests and gains one a second (internal/server/ratelimit.go);
+	// joinHostCert's poll of host pending and its approval draw on the same
+	// bucket. Four seconds pay the four requests back, so the host joins
+	// with the bucket it has without client C. The wait is outside every
+	// window.
+	hcrSetupPayback = 4 * time.Second
 	// hcrClock is the layout of the times the test logs.
 	hcrClock = "15:04:05.000"
 )
@@ -441,19 +452,57 @@ func hcrCommitted(t *testing.T, eh *enrolledHost, kr func(args ...string) string
 // client B did not. Both reach the host right after the switch, and the
 // host asks for nothing until its own renewal. After that renewal, under
 // the new host CA key, A reaches the host and B is refused with Host key
-// verification failed; B's remedy is a refreshed file. Every refusal has a
-// positive control (the e2e-rotation lane, 9.5p1 and 10.5p1).
+// verification failed; B's remedy is a refreshed file. A third client's
+// file, a copy of B's, gains generation 2's line from a not-due keyroster
+// machine renew after ceremony 1's install (03-12g); it reaches the host
+// before and after the renewal. Every refusal has a positive control (the
+// e2e-rotation lane, 9.5p1 and 10.5p1).
 func TestHostCARotation(t *testing.T) {
 	// The real home first: known-hosts sync refuses a $HOME that is not the
 	// account's home (cmd/keyroster/knownhosts.go:139).
 	home := requireRealHome(t)
 	sshDir := filepath.Join(home, ".ssh")
 	withGenesisHostMaxTTL(t, hcrCap)
-	env := startServerEnv(t, serverOpts{PoPHosts: true, AgentListen: true, StoppableSigner: true})
+	env := startServerEnv(t, serverOpts{PoPHosts: true, PoPMachines: true, AgentListen: true, StoppableSigner: true})
 	sg := env.Signer
 	admin := adminCLI(t, env, sg.AdminFingerprint)
 	admin.home = home
 	kr := hostTrustKR(t, env, admin)
+	// Client C's machine identity (03-12g): the machine ci and its key, as
+	// TestMachineIdentityEndToEnd adds them, and keyroster machine renew in
+	// the admin's configuration, whose home is the real home. The first
+	// renewal, before any sync, finds no managed file and adds nothing.
+	setupAt := time.Now()
+	mKey := newUserKey(t, "id_ci")
+	kr("role", "add", "deploy", "--max-ttl", "12h", "--yes")
+	kr("machine", "add", "ci", "--key", mKey+".pub", "--role", "deploy", "--max-ttl", "24h", "--yes")
+	mCert := filepath.Join(t.TempDir(), "ci-cert.pub")
+	renew := func(args ...string) (string, string) {
+		t.Helper()
+		code, stdout, stderr := runCLIIn(t, admin, "", "", keyrosterBin, append([]string{"machine", "renew", "ci", "--key", mKey, "--out", mCert}, args...)...)
+		if code != 0 {
+			t.Fatalf("machine renew %s exited %d, want 0:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", strings.Join(args, " "), code, stdout, stderr, env.Stderr.String())
+		}
+		return stdout, stderr
+	}
+	mOut, mErr := renew()
+	if !strings.Contains(mOut, "machine certificate for ci written to ") || !strings.Contains(mOut, mCert) {
+		t.Fatalf("setup: machine renew did not say it wrote %s:\nstdout:\n%s\nstderr:\n%s", mCert, mOut, mErr)
+	}
+	if strings.Contains(mErr, "host trust") || strings.Contains(mErr, "Host trust") {
+		t.Fatalf("setup: machine renew printed host trust text with no managed file; stderr:\n%s", mErr)
+	}
+	for _, name := range trustManaged {
+		if _, err := os.Lstat(filepath.Join(sshDir, name)); err == nil {
+			t.Fatalf("setup: %s exists after the first machine renew, which must create no managed file", filepath.Join(sshDir, name))
+		}
+	}
+	t.Logf("setup: the machine key, the role, the machine and the first machine renew took %s", time.Since(setupAt).Round(time.Millisecond))
+	// Pay the setup's four admin requests back before the host joins
+	// (hcrSetupPayback): in CI the approval's POST found the bucket empty,
+	// and a retry of the approval spends on its two reads the two requests
+	// that its 2 s wait refills.
+	time.Sleep(hcrSetupPayback)
 	// joinHostCert's fetcher polls every 5 s (hostCertPoll): a 1 s fetcher
 	// would exhaust the agent's request rate in a test this long.
 	eh := joinHostCert(t, env, kr, "web1")
@@ -524,7 +573,65 @@ func TestHostCARotation(t *testing.T) {
 	// A and B both reach the host by generation 1; B's logins here and at
 	// step 6 are the controls of its refusal at step 8. The export taken
 	// after ceremony 1's install is the switch's --previous.
+	// Client C first (03-12g): the real file still equals B's copy. A
+	// not-due machine renew with --no-known-hosts changes nothing; one
+	// without it adds generation 2's line for web1 and moves the state's
+	// bundle_version to 2. C's file is a copy of the result.
+	f1 := readFile(t, bKH)
+	if got := readFile(t, kh); !bytes.Equal(got, f1) {
+		t.Fatalf("step 3: the managed file is not client B's copy before machine renew:\n%s\nB's copy:\n%s", got, f1)
+	}
+	statePath := filepath.Join(admin.configHome, "keyroster", "host-trust.json")
+	st0 := readFile(t, statePath)
+	renewAt := time.Now()
+	nkOut, nkErr := renew("--if-due", "--no-known-hosts")
+	if !strings.HasPrefix(nkOut, "not due: ") || strings.Contains(nkErr, "host trust") || strings.Contains(nkErr, "Host trust") {
+		t.Fatalf("step 3: machine renew --if-due --no-known-hosts, want not due and no host trust text:\nstdout:\n%s\nstderr:\n%s", nkOut, nkErr)
+	}
+	if got := readFile(t, kh); !bytes.Equal(got, f1) {
+		t.Fatalf("step 3: machine renew --if-due --no-known-hosts changed the managed file:\n%s\nwant client B's copy:\n%s", got, f1)
+	}
+	if got := readFile(t, statePath); !bytes.Equal(got, st0) {
+		t.Fatalf("step 3: machine renew --if-due --no-known-hosts changed the host trust state:\n%s\nwant:\n%s", got, st0)
+	}
+	rOut, rErr := renew("--if-due")
+	if !strings.HasPrefix(rOut, "not due: ") {
+		t.Fatalf("step 3: machine renew --if-due, want not due:\nstdout:\n%s\nstderr:\n%s", rOut, rErr)
+	}
+	addedLine := "Host trust: added the CA line of host CA generation 2 to " + kh + " for the 1 host name(s) its lines already trust.\n"
+	switch n := strings.Count(rErr, addedLine); {
+	case n == 0:
+		t.Fatalf("step 3: machine renew --if-due added no line; stderr:\n%s", rErr)
+	case n > 1:
+		t.Fatalf("step 3: machine renew --if-due printed its added line %d times, want once; stderr:\n%s", n, rErr)
+	}
+	wantKH := append(slices.Clone(f1), "@cert-authority web1 "+trust.FormatKey(gen2)+" keyroster host CA generation 2\n"...)
+	if got := readFile(t, kh); !bytes.Equal(got, wantKH) {
+		t.Fatalf("step 3: the managed file is not client B's copy plus generation 2's line:\n%s\nwant:\n%s", got, wantKH)
+	}
+	st1 := readFile(t, statePath)
+	var stGot, stWant map[string]any
+	if err := json.Unmarshal(st1, &stGot); err != nil {
+		t.Fatalf("step 3: the host trust state after machine renew does not decode: %v\n%s", err, st1)
+	}
+	if err := json.Unmarshal(st0, &stWant); err != nil {
+		t.Fatalf("step 3: the host trust state before machine renew does not decode: %v\n%s", err, st0)
+	}
+	stWant["bundle_version"] = float64(2)
+	gotJSON, errGot := json.Marshal(stGot)
+	wantJSON, errWant := json.Marshal(stWant)
+	if errGot != nil || errWant != nil || !bytes.Equal(gotJSON, wantJSON) {
+		t.Fatalf("step 3: the host trust state after machine renew is not the state before it with bundle_version 2:\n%s\nbefore:\n%s", st1, st0)
+	}
+	t.Logf("step 3: the two machine renew runs took %s", time.Since(renewAt).Round(time.Millisecond))
+	cKH := filepath.Join(t.TempDir(), "c_known_hosts")
+	copyFile(t, kh, cKH, 0o600)
+	cfgC := writeTrustConfig(t, copyManagedConfig(t, sshDir, cKH, ""), eh.sshd.port)
 	hcrSync(t, kr, kh, gen1, gen2)
+	// A's sync rewrote the real file from its own inputs (03-12g).
+	if bytes.Equal(readFile(t, kh), readFile(t, cKH)) {
+		t.Fatalf("step 3: A's sync left the managed file equal to client C's copy, want the file the sync writes:\n%s", readFile(t, kh))
+	}
 	hcrAccepted(t, cfgA, login, "127.0.0.1", c, gen1, "client A after ceremony 1")
 	hcrAccepted(t, cfgB, login, "127.0.0.1", c, gen1, "client B after ceremony 1")
 	previous := sg.exportLog(t)
@@ -614,6 +721,8 @@ func TestHostCARotation(t *testing.T) {
 	hcrServes(t, eh.agentHost, r1, hcrServe)
 	hcrAccepted(t, cfgA, login, "127.0.0.1", c, gen1, "client A right after the switch")
 	hcrAccepted(t, cfgB, login, "127.0.0.1", c, gen1, "client B right after the switch")
+	// Client C, whose file machine renew refreshed (03-12g).
+	hcrAccepted(t, cfgC, login, "127.0.0.1", c, gen1, "client C right after the switch")
 	hcrServes(t, eh.agentHost, r1, hcrServe)
 	if now := time.Now(); now.After(hcrIssued(r1).Add(hcrStep6)) {
 		t.Fatalf("step 6 ended at %s, after r1 + 28 s (%s)", now.UTC().Format(hcrClock), hcrIssued(r1).Add(hcrStep6).UTC().Format(hcrClock))
@@ -642,6 +751,9 @@ func TestHostCARotation(t *testing.T) {
 	// PerSourcePenalties); then B's remedy, a refreshed file, lets it in.
 	hcrNoRefusal(t, eh)
 	hcrAccepted(t, cfgA, login, "127.0.0.1", c, gen2, "client A after the renewal")
+	// Client C, whose file differs from B's only by the line machine renew
+	// added (03-12g).
+	hcrAccepted(t, cfgC, login, "127.0.0.1", c, gen2, "client C after the renewal")
 	hcrRefused(t, cfgB, login, net.IPv4(127, 0, 0, 2).String(), c, gen2, "client B after the renewal")
 	hcrServes(t, eh.agentHost, r2, hcrServe)
 	// The remedy: a fresh sync still writes both lines (generation 1 drains
@@ -664,5 +776,6 @@ func TestHostCARotation(t *testing.T) {
 		t.Fatalf("audit verify counts %d host certificates, want at least 3:\n%s", n, auditOut)
 	}
 	t.Logf("serials: c1 %d, r1 %d (renewed %d), r2 %d; re-anchored: %v", c1.Serial, r1.Serial, r1prev.Serial, r2.Serial, reanchored)
+	t.Log(hcrMachineLine)
 	t.Log(hcrLine)
 }

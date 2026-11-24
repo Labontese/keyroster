@@ -185,6 +185,8 @@ Each row is a path of a command that verified a bundle, or one that did not, wit
 
 **What can widen, for the widening check.** Only the writer widens, and only on a full refresh from a verified directory: `hostTrustCAs(b, now)` lists a draining CA until its end, so a client first refreshed during the drain gets the line it needs. The narrowing has four properties, each with its own case and mutant: its output is a subsequence of its input (the subset property test, the fuzz target with its soundness property, `narrowing_never_adds`, M238); it writes no other file and moves no floor (`narrowing_writes_no_other_file`, M239); it never creates the file or follows a link (M248, M243); and it writes only when the bytes on disk are the bytes it read and no newer state exists (M245, M246). The login and renew readers widen by the issuing set and the trusted set the owner chose (M152, M153, M253, M254).
 
+**Amended (2026-11-23, 03-12g).** A second path now widens: `keyroster machine renew` adds the line of an active or next host CA that an account's `keyroster_known_hosts` lacks, over the host names that the file's own lines for the host CAs the bundle trusts already name, and moves the bundle floor of `host-trust.json` first (03-12g-PLAN.md, "The step"). The writer stays the only path that adds or changes a host name; this paragraph's other statements stand.
+
 ## Budget
 
 files_modified lists 26 files (counted at 4184809):

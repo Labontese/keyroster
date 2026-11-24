@@ -40,6 +40,9 @@ import (
 //
 // A name in the block without a CA line is refused, never prompted; a
 // name outside the block keeps the user's own configuration.
+//
+// keyroster machine renew adds the line of a new host CA on its own, over
+// the names the file already holds (machinehosttrust.go, 03-12g).
 func init() {
 	register(command{
 		Name: "known-hosts",
@@ -413,9 +416,12 @@ func verifyHostTrustDirectory(in hostTrustInput, st *hostTrustState) (*verifiedH
 	return &verifiedHostTrustDir{dir: d, sha: sha, active: active, all: all}, ""
 }
 
-// writeHostTrust is the one writer of the host trust files. It verifies
-// everything first, then writes, in this order, the state, the KRL,
-// keyroster_known_hosts and keyroster_ssh_config, each atomically, and
+// writeHostTrust is the one full writer of the host trust files (03-12g:
+// the narrowing, narrow.go, only removes CA lines, and keyroster machine
+// renew, machinehosttrust.go, only adds the line of an active or next host
+// CA over the names the file already holds and moves the bundle floor). It
+// verifies everything first, then writes, in this order, the state, the
+// KRL, keyroster_known_hosts and keyroster_ssh_config, each atomically, and
 // prints its outcome line on stdout (warnings and the Include advice on
 // stderr):
 //
@@ -851,10 +857,18 @@ func knownHostsFile(cas []trust.CAEntry, active []string, st *hostTrustState) []
 	if len(active) > 0 {
 		names := strings.Join(active, ",")
 		for _, ca := range cas {
-			fmt.Fprintf(&b, "@cert-authority %s %s keyroster host CA generation %d\n", names, ca.Key, ca.Generation)
+			b.WriteString(hostCALine(names, ca))
 		}
 	}
 	return []byte(b.String())
+}
+
+// hostCALine is the managed file's @cert-authority line for ca over names,
+// a comma-joined list (03-12g): knownHostsFile writes every CA line with
+// it, and keyroster machine renew adds its lines with it, so the two cannot
+// disagree on the form.
+func hostCALine(names string, ca trust.CAEntry) string {
+	return fmt.Sprintf("@cert-authority %s %s keyroster host CA generation %d\n", names, ca.Key, ca.Generation)
 }
 
 // sshConfigFile returns keyroster_ssh_config: the header, the Include

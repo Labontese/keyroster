@@ -96,11 +96,12 @@ keyroster machine renew ci --agent-key SHA256:... --out /path/to/id_ci-cert.pub
 The CLI signs the request on the automation host, so the private key is
 never sent and never written; `--out` naming the key file is refused. It
 checks the answer against the root-verified trust bundle before it writes
-anything: the certificate is a user certificate signed by an active or
+the certificate: it is a user certificate signed by an active or
 next machine CA key of the bundle, for this key, for this request and this
 policy, with a lifetime and extensions within the machine profile and no
-critical option. It writes only the certificate, by temporary file and
-rename. The principals are the signer's choice from the machine's roles,
+critical option. It writes the certificate by temporary file and rename;
+the only other files it changes are the account's host trust files,
+below. The principals are the signer's choice from the machine's roles,
 and the CLI does not check them against the directory, which it does not
 hold, unless you name them with `--expect-principal P` (repeatable).
 
@@ -109,19 +110,62 @@ attempt does not count; an answer that is lost on the way and retried costs
 one. Log in with the key and the certificate:
 `ssh -i /path/to/id_ci -o CertificateFile=/path/to/id_ci-cert.pub user@host`.
 
-`keyroster machine renew` does not refresh the host trust files that
-`keyroster login` and `keyroster known-hosts sync` write. An automation
-account whose ssh reads them is refreshed only by an admin who runs
-`keyroster known-hosts sync` as that account; in a host-CA rotation it
-needs one after ceremony 1's install and before ceremony 2's install,
-checked by the new host CA's line in that account's
-`keyroster_known_hosts` ([ca-rotation.md](ca-rotation.md), "The host
-CA"). UNVERIFIED: no test runs sync for another account.
+`keyroster machine renew` keeps an automation account's host CA lines
+current, for the OS account it runs as: run it as the account whose
+ssh reads the file. When the account's `~/.ssh/keyroster_known_hosts`
+exists,
+every run, renewed or not due, adds to it the line of each active or
+next host CA of the root-verified trust bundle that the file lacks,
+over the host names that the file's lines for the host CAs the bundle
+trusts already name, and records that bundle's version in
+`host-trust.json`, as a refresh does, so that a server cannot later
+serve an older bundle unnoticed. It also removes the lines of host CAs
+the bundle no longer trusts, as every command that verifies the bundle
+does. It makes no request of its own for this, prints one line on
+stderr when it adds a line and nothing when nothing changed, and
+`--no-known-hosts` turns it off. It never adds a host name, never
+creates the file and never writes `keyroster_revoked_hosts.krl` or
+`keyroster_ssh_config`: the file's first version, new host names and
+revocations reach the account only when an admin runs
+`keyroster known-hosts sync` as that account. In a host-CA rotation
+the account has refreshed once a run after ceremony 1's install and
+before ceremony 2's install has left the new host CA's line in that
+account's `keyroster_known_hosts` ([ca-rotation.md](ca-rotation.md),
+"The host CA"). Run in CI: `TestMachineHostTrust`,
+`TestAddHostCALines` and, end to end, `TestHostCARotation`.
+UNVERIFIED: a run by a real cron job or timer, an account whose
+renewal runs as another OS account than its ssh or with another
+`$HOME` than its home in the account database, Windows, and a sync
+that an admin runs for another account (no test runs sync for another
+account). The end-to-end run renews
+from an account that also holds an administrator's configuration;
+the command-level tests also renew from a configuration without a
+user.
 
-Exit codes: 0 when the certificate was written or is not due, 1 for any
-refusal or failure, 2 for a usage error. A timer cannot tell
-`machine_disabled` from a server that is down by the exit code alone: read
-the text it prints.
+Exit codes: 0 when the certificate was written or is not due and the
+host CA lines were refreshed or needed no change; 4 when the
+certificate was written or is not due but the host CA lines could not
+be refreshed (the reason is the `Warning: host trust not refreshed in`
+line on stderr; the certificate is kept); 1 for any refusal or failure
+of the renewal itself, whatever happened to the host CA lines; 2 for a
+usage error. An account whose home holds no
+`~/.ssh/keyroster_known_hosts`, or a run with `--no-known-hosts`, never
+gets 4, and neither does a run without `$HOME` (unset or empty), which
+changes no host CA line even when the account's home holds the file;
+one whose home holds it gets 4 on every run while the server serves an
+older trust bundle than the account verified before, while its managed
+file is damaged or its state is missing, damaged or of another
+installation, or while `$HOME` is set and is not the account's home.
+What to do is in [enroll-user.md](enroll-user.md), "Trusting hosts
+without TOFU": item 7 for an older trust bundle, item 8 for a damaged
+file or a state that is missing, damaged or of another installation
+(start over, then an admin's `keyroster known-hosts sync` as that
+account), and item 9 for `$HOME`. An account whose file holds no line
+of a host CA the trust bundle trusts, as after a drain it missed, gets
+no line, and 0 unless the refresh fails for another reason: only an
+admin's `keyroster known-hosts sync` as that account gives it
+one again. A timer cannot tell `machine_disabled` from a server that
+is down by the exit code alone: read the text it prints.
 
 ### Unattended renewal and passphrases
 

@@ -646,7 +646,11 @@ certificate is always returned).
 **4. The refresh lag (T-03-240).** Changes reach a client at its next
 login or sync. After that, a disabled or removed name has no CA line
 while it stays in the block, so it is refused (never prompted), and a
-revoked certificate is refused through the KRL. Run in CI e2e (03-09b):
+revoked certificate is refused through the KRL. An automation
+account's `keyroster machine renew` changes no host name: a host
+disabled or removed after the account's last sync keeps its name in
+the account's CA lines, the line it adds for a new host CA included,
+until an admin's next sync as that account. Run in CI e2e (03-09b):
 `TestHostCertNoTOFU/refused_through_krl_alone` and
 `TestHostCertNoTOFU/refused_through_missing_ca_line_alone`.
 
@@ -655,7 +659,10 @@ only through a refresh: a `keyroster login` without `--no-known-hosts`
 or an admin's `keyroster known-hosts sync` writes its `@cert-authority`
 line (for the rotation's gate, an account has refreshed once its
 managed `keyroster_known_hosts` holds the new host CA's line, the one
-that ends `keyroster host CA generation <g>`), and narrowing never adds
+that ends `keyroster host CA generation <g>`), an automation
+account's `keyroster machine renew` adds it for the host names the
+account's file already trusts (an admin's sync as that account writes
+the file first), and narrowing never adds
 one. A refresh writes the host CAs of the trust bundle the server gave
 it when it started, which shortly after ceremony 1's install can still
 be the earlier one, so a refresh that wrote only the old line is
@@ -671,16 +678,20 @@ with `keyroster ca issue --ca host`. A client whose managed
 was added (ceremony 1 of the rotation) holds only the old host CA's
 line, so it refuses each host from that host's move on, with
 `Host key verification failed`, until it refreshes. A client whose
-managed file is never refreshed (an account with no login of its own
-and no admin key, such as automation that only runs `ssh`) cannot be
+managed file is never refreshed (an account with no login of its own,
+no admin key and no `keyroster machine renew` that runs, such as
+automation that only runs `ssh`) cannot be
 rotated safely, unless an admin runs `keyroster known-hosts sync` as
 that account after ceremony 1's install and before ceremony 2's
 install and the file then holds the new host CA's line
 ([ca-rotation.md](ca-rotation.md), "The host CA"). Run in CI
-e2e: `TestHostCARotation` (OpenSSH 9.5p1 and 10.5p1, one host and two
-clients on loopback). UNVERIFIED on a real client and on Windows, and
-so are a sync that an admin runs for another account and a host
-certificate issued by hand across a host-CA switch.
+e2e: `TestHostCARotation` (OpenSSH 9.5p1 and 10.5p1, one host and three
+clients on loopback, one of them refreshed by `keyroster machine renew`).
+UNVERIFIED on a real client and on Windows, and so are a sync that an
+admin runs for another account, a `keyroster machine renew` that a
+real cron job or timer runs, and a host certificate issued by hand
+across a host-CA switch. The test renews from an account that also
+holds an administrator's configuration.
 
 **5. The costs.** A managed name is unreachable until its host has a host
 certificate. Disabled and removed names stay refused. Names removed

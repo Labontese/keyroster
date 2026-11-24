@@ -57,10 +57,14 @@ var machineRenewTimeNow = time.Now
 // machine certificate by proof of possession of its key. It signs the
 // request locally, so the private key is never sent and never written; it
 // checks the server's answer against the root-verified trust bundle and
-// writes only the certificate, by temporary file and rename. No admin key
-// and no user are needed: keyroster init without --user is enough. Exit 0
-// when the certificate is written or not due, 1 on any refusal or
-// failure, 2 for usage (b-C8).
+// writes the certificate by temporary file and rename. Right after the
+// bundle verifies, unless --no-known-hosts is given, it adds the line of
+// each active or next host CA that ~/.ssh/keyroster_known_hosts lacks over
+// the names its lines already trust and moves the bundle floor
+// (machinehosttrust.go, 03-12g). No admin key and no user are needed:
+// keyroster init without --user is enough. Exit 0 when the certificate is
+// written or not due, 4 when it is but host trust was not refreshed, 1 on
+// any refusal or failure of the renewal, 2 for usage (b-C8, 03-12g).
 func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("machine renew", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -71,6 +75,7 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 	var expect stringList
 	fset.Var(&expect, "expect-principal", "a principal the certificate must carry (repeatable)")
 	ifDue := fset.Bool("if-due", false, "renew only when CERTFILE is missing, does not verify, is for another key, name or CA, lacks an expected principal, or is due")
+	noKnownHosts := fset.Bool("no-known-hosts", false, "do not add host CA lines to ~/.ssh/keyroster_known_hosts or move its bundle floor; CA lines the trust bundle no longer trusts are still removed from it")
 	pos, err := parseInterspersed(fset, args)
 	if err != nil {
 		return errUsage
@@ -112,6 +117,10 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 	bundle, pol, err := verifiedTrust(ctx, client, cfg, stderr)
 	if err != nil {
 		return err
+	}
+	var hostTrust error
+	if !*noKnownHosts {
+		hostTrust = machineHostTrust(bundle, trustClock(), stderr)
 	}
 	if pol.PoP == nil || !pol.PoP.Machines {
 		return errors.New("the root-signed policy does not allow machine renewal (pop.machines); nothing was sent")
@@ -172,7 +181,10 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 		}
 		if due, current := machineCertCurrent(*out, pub, name, bundle, maxTTL, expect); current {
 			_, err := fmt.Fprintf(stdout, "not due: %s renews from %s; nothing was sent\n", *out, time.Unix(int64(min(due, 1<<62)), 0).UTC().Format(time.RFC3339)) //nolint:gosec // G115: bounded
-			return err
+			if err != nil {
+				return err
+			}
+			return hostTrust
 		}
 	}
 	if signer == nil {
@@ -206,7 +218,10 @@ func runMachineRenew(ctx context.Context, args []string, stdout, stderr io.Write
 	if err := writeMachineCert(*out, c); err != nil {
 		return err
 	}
-	return printMachineRenewed(stdout, name, *out, c)
+	if err := printMachineRenewed(stdout, name, *out, c); err != nil {
+		return err
+	}
+	return hostTrust
 }
 
 // machineAgentSigner returns the ssh-agent signer of the key whose SHA256
