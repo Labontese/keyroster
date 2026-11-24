@@ -154,15 +154,16 @@ gets 4, and neither does a run without `$HOME` (unset or empty), which
 changes no host CA line even when the account's home holds the file;
 one whose home holds it gets 4 on every run while the server serves an
 older trust bundle than the account verified before, while its managed
-file or state is damaged, or while `$HOME` is set and is not the
-account's home. What to do is in [enroll-user.md](enroll-user.md),
-"Trusting hosts without TOFU": item 7 for an older trust bundle, item
-8 for a damaged file or a state that is missing, damaged or of another
-installation (start over, then an admin's `keyroster known-hosts sync`
-as that account), and item 9 for `$HOME`. An account whose file holds
-no line of a host CA the trust bundle trusts, as after a drain it
-missed, gets no line, and 0 unless one of those faults gives it 4:
-only an admin's `keyroster known-hosts sync` as that account gives it
+file is damaged or its state is missing, damaged or of another
+installation, or while `$HOME` is set and is not the account's home.
+What to do is in [enroll-user.md](enroll-user.md), "Trusting hosts
+without TOFU": item 7 for an older trust bundle, item 8 for a damaged
+file or a state that is missing, damaged or of another installation
+(start over, then an admin's `keyroster known-hosts sync` as that
+account), and item 9 for `$HOME`. An account whose file holds no line
+of a host CA the trust bundle trusts, as after a drain it missed, gets
+no line, and 0 unless the refresh fails for another reason: only an
+admin's `keyroster known-hosts sync` as that account gives it
 one again. A timer cannot tell `machine_disabled` from a server that
 is down by the exit code alone: read the text it prints.
 
