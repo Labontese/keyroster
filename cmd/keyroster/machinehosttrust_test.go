@@ -951,13 +951,44 @@ func TestMachineHostTrust(t *testing.T) {
 			}
 		}
 	})
-	// Without $HOME the step does not look at the account's home (03-12g,
-	// "The step", item 1, and the outcome table's column "no home"): the
-	// run changes nothing and prints nothing of the step, even though the
-	// account's home holds the file.
-	t.Run("no_home_changes_nothing", func(t *testing.T) {
+	// Without $HOME the step looks at the home the account database names
+	// (03-12g, the owner's decision of 2026-11-24): ssh reads that home, so
+	// a missing $HOME does not hide the file. The run exits 4 with the
+	// step's one warning, changes nothing and does not narrow.
+	t.Run("no_home_with_the_file_exits_4", func(t *testing.T) {
 		m, _ := mhtFirst(t, 3, 2)
-		mhtUseAccountHome(t, filepath.Dir(m.sshDir), nil)
+		home := filepath.Dir(m.sshDir)
+		mhtUseAccountHome(t, home, nil)
+		noHome := fmt.Errorf("%w: %w", errNoHomeDir, errors.New("$HOME is not defined (a test)"))
+		mhtUseSSHDir(t, "", noHome)
+		code, stdout, stderr := m.run(t)
+		if code != 4 {
+			t.Fatalf("exit %d, want 4; stdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		m.requireRenewed(t, stdout, stderr)
+		p := filepath.Join(home, ".ssh", hostTrustKnownHosts)
+		warn := fmt.Sprintf("Warning: host trust not refreshed in %s: %s.\n", p, noHome.Error())
+		if strings.Count(stderr, warn) != 1 || strings.Count(stderr, warnPrefix) != 1 || strings.Count(stderr, warnPrefix+p+": ") != 1 {
+			t.Fatalf("stderr:\n%s\nwant one warning of the step: %q", stderr, warn)
+		}
+		if !strings.Contains(stderr, exitLine) {
+			t.Fatalf("stderr:\n%s\nwant %q", stderr, exitLine)
+		}
+		if strings.Contains(stderr, "Host trust: added") {
+			t.Fatalf("stderr:\n%s\nwant no added line", stderr)
+		}
+		if strings.Contains(stderr, "Host trust narrowed") || strings.Contains(stderr, "host CA lines not narrowed") {
+			t.Fatalf("stderr:\n%s\nwant no narrowing line and no narrowing warning", stderr)
+		}
+		m.requireFiles(t, nil, stderr)
+	})
+	// Without $HOME, an account home without the file, a failed account
+	// lookup and an account home that is no absolute path are each exit 0
+	// with no line of the step (03-12g, the owner's decision of
+	// 2026-11-24).
+	t.Run("no_home_without_the_file_is_0", func(t *testing.T) {
+		m, _ := mhtFirst(t, 3, 2)
+		mhtUseAccountHome(t, t.TempDir(), nil)
 		mhtUseSSHDir(t, "", fmt.Errorf("%w: %w", errNoHomeDir, errors.New("$HOME is not defined (a test)")))
 		code, stdout, stderr := m.run(t)
 		if code != 0 {
@@ -965,10 +996,43 @@ func TestMachineHostTrust(t *testing.T) {
 		}
 		m.requireRenewed(t, stdout, stderr)
 		requireNoStepLine(t, stderr)
-		if strings.Contains(stderr, "Host trust narrowed") || strings.Contains(stderr, "host CA lines not narrowed") {
-			t.Fatalf("stderr:\n%s\nwant no narrowing line and no narrowing warning", stderr)
+	})
+	t.Run("no_home_without_an_account_home_is_0", func(t *testing.T) {
+		m, _ := mhtFirst(t, 3, 2)
+		// The failed lookup carries a home that holds the file, so that a
+		// step which ignored the lookup's error would find it.
+		mhtUseAccountHome(t, filepath.Dir(m.sshDir), errors.New("no account of this uid (a test)"))
+		mhtUseSSHDir(t, "", fmt.Errorf("%w: %w", errNoHomeDir, errors.New("$HOME is not defined (a test)")))
+		code, stdout, stderr := m.run(t)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0; stderr:\n%s", code, stderr)
 		}
-		m.requireFiles(t, nil, stderr)
+		m.requireRenewed(t, stdout, stderr)
+		requireNoStepLine(t, stderr)
+	})
+	t.Run("no_home_with_a_relative_account_home_is_0", func(t *testing.T) {
+		m, _ := mhtFirst(t, 3, 2)
+		// The working directory holds .ssh/keyroster_known_hosts, so that
+		// a step which took the empty home as a path would find it there.
+		cwd := t.TempDir()
+		if err := os.Mkdir(filepath.Join(cwd, ".ssh"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		inCwd := filepath.Join(cwd, ".ssh", hostTrustKnownHosts)
+		writeTestFile(t, inCwd, []byte(m.before[hostTrustKnownHosts]))
+		before := readTestFile(t, inCwd)
+		t.Chdir(cwd)
+		mhtUseAccountHome(t, "", nil)
+		mhtUseSSHDir(t, "", fmt.Errorf("%w: %w", errNoHomeDir, errors.New("$HOME is not defined (a test)")))
+		code, stdout, stderr := m.run(t)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0; stderr:\n%s", code, stderr)
+		}
+		m.requireRenewed(t, stdout, stderr)
+		requireNoStepLine(t, stderr)
+		if got := readTestFile(t, inCwd); !bytes.Equal(got, before) {
+			t.Fatalf("%s:\n%s\nwant it unchanged:\n%s", inCwd, got, before)
+		}
 	})
 	// A file with no line of a host CA the bundle trusts gets no line and
 	// exits 0 when nothing else is wrong (03-12g, B11; pre-merge review).
