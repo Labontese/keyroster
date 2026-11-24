@@ -1271,6 +1271,8 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				// An automation account gets the line from keyroster machine renew run
 				// without --no-known-hosts (03-12g, pre-merge review).
 				"an automation account that runs `keyroster machine renew` without `--no-known-hosts` gets the line from it",
+				// Who gets the line from an admin (03-12g, pre-merge review).
+				"an account that has neither a login of its own nor a `keyroster machine renew` that runs gets the line from an admin",
 			}, []string{"has no cap on its validity", "can make the switch of the host role wait"}},
 			{"ca-rotation.md \"What changes for nobody\"", caRotationWindow(t, data, "What changes for nobody"), []string{
 				"a client must have refreshed first",
@@ -1291,10 +1293,10 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"4 when the certificate was written or is not due but the host CA lines could not be refreshed",
 				"1 for any refusal or failure of the renewal itself, whatever happened to the host CA lines",
 				"An account whose home holds no `~/.ssh/keyroster_known_hosts`, or a run with `--no-known-hosts`, never gets 4",
-				"one whose home holds it gets 4 on every run while the server serves an older trust bundle than the account verified before, while its managed file or state is damaged, or while `$HOME` is set and is not the account's home",
+				"one whose home holds it gets 4 on every run while the server serves an older trust bundle than the account verified before, while its managed file is damaged or its state is missing, damaged or of another installation, or while `$HOME` is set and is not the account's home",
 				"The end-to-end run renews from an account that also holds an administrator's configuration; the command-level tests also renew from a configuration without a user",
 				"checks the answer against the root-verified trust bundle before it writes the certificate: it is a user certificate",
-				"An account whose file holds no line of a host CA the trust bundle trusts, as after a drain it missed, gets no line, and 0 unless one of those faults gives it 4: only an admin's `keyroster known-hosts sync` as that account gives it one again",
+				"An account whose file holds no line of a host CA the trust bundle trusts, as after a drain it missed, gets no line, and 0 unless the refresh fails for another reason: only an admin's `keyroster known-hosts sync` as that account gives it one again",
 				// The account the renewal runs as, what exit 0 and 4 print, what exit 4
 				// calls for, a run without $HOME, and what the step also does (03-12g,
 				// pre-merge review).
@@ -1303,6 +1305,8 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"the reason is the `Warning: host trust not refreshed in` line on stderr; the certificate is kept",
 				"and neither does a run without `$HOME` (unset or empty), which changes no host CA line even when the account's home holds the file",
 				"item 7 for an older trust bundle, item 8 for a damaged file or a state that is missing, damaged or of another installation (start over, then an admin's `keyroster known-hosts sync` as that account), and item 9 for `$HOME`",
+				// The pointer sentence's lead-in (03-12g, pre-merge review).
+				"What to do is in [enroll-user.md](enroll-user.md), \"Trusting hosts without TOFU\": item 7",
 				"so that a server cannot later serve an older bundle unnoticed",
 				"It also removes the lines of host CAs the bundle no longer trusts, as every command that verifies the bundle does",
 				"It makes no request of its own for this",
