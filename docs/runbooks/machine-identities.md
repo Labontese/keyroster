@@ -155,8 +155,12 @@ gets 4; one whose home holds it gets 4 on every run while the server
 serves an older trust bundle than the account verified before, while
 its managed file is damaged or its state is missing, damaged or of
 another installation, or while `$HOME` is unset, empty or not the
-account's home (such a run changes no host CA line). What to do is in
-[enroll-user.md](enroll-user.md), "Trusting hosts
+account's home (such a run changes no host CA line). The `$HOME` case
+needs an account that the CLI can look up: for one known only through
+NSS or LDAP (enroll-user.md, item 9) a run without `$HOME` finds no
+home, changes nothing and gets 0, and on Windows the home is
+`%USERPROFILE%` and is compared with no account database. What to do
+is in [enroll-user.md](enroll-user.md), "Trusting hosts
 without TOFU": item 7 for an older trust bundle, item 8 for a damaged
 file or a state that is missing, damaged or of another installation
 (start over, then an admin's `keyroster known-hosts sync` as that
