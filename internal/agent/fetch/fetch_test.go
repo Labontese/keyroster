@@ -269,12 +269,17 @@ func TestFetch(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"bundles":[],"directories":[{"version":1,"directory":"YQ==","sigs":"YQ=="}],"krl":null,"more":false}`))
 		})
+		// The fetcher polls every hour: a sleep of one poll interval
+		// inside Once would take at least 50 minutes (NextPoll's jitter
+		// is a sixth of the interval), so a bound of a minute keeps such
+		// a sleep caught while seconds of load under -race pass.
+		ts.f.cfg.Poll = time.Hour
 		start := time.Now()
 		if err := ts.f.Once(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		reqs := ts.requests()
-		if len(reqs) != 2 || reqs[0] != "GET "+serverclient.AgentStatePath || reqs[1] != "GET "+serverclient.AgentStatePath+"?bundle=1" || time.Since(start) > 900*time.Millisecond {
+		if len(reqs) != 2 || reqs[0] != "GET "+serverclient.AgentStatePath || reqs[1] != "GET "+serverclient.AgentStatePath+"?bundle=1" || time.Since(start) > time.Minute {
 			t.Fatalf("requests %q in %s, want two at once, the second with the new bundle version", reqs, time.Since(start))
 		}
 		// F02 (03-08f): the bundle item's policy signatures are spooled per

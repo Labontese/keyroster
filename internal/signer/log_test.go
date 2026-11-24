@@ -429,7 +429,11 @@ func TestStartRefusesWithoutTrust(t *testing.T) {
 // snapshot, so it never reports a healthy log as inconsistent while the
 // signer appends to it.
 func TestCheckLogAgainstLiveSigner(t *testing.T) {
-	e := newLogEnv(t)
+	// The signer's clock advances only by the monotonic reading: a step
+	// back of the wall clock between two issues would fail an issue with
+	// clock_regression, which is not what this test is about.
+	base := time.Now()
+	e := newLogEnvClock(t, NewFixture(t, 1, 1), func() time.Time { return base.Add(time.Since(base)) })
 	ro, err := signerdb.OpenReadOnly(e.dbPath)
 	if err != nil {
 		t.Fatal(err)
