@@ -9,7 +9,7 @@ provides:
   - "merge gate texts that say to run the gate again after a green rebase instead of claiming a dismissed approval"
   - "a bounded retry of the Arch lane's package sync"
   - "five unit tests that random text, load or the wall clock no longer trip, or that now see a leak they could not see; each changed assertion fails its mutant"
-  - "a 3 s retry wait in the nine end-to-end helpers that run a command of three admin requests"
+  - "end-to-end retries that wait as many seconds as the largest command each helper runs sends admin requests"
   - "a correct and pinned location bullet in ca-rotation.md and a guarded, pinned tpm paragraph in signer-install.md"
 affects: []
 key-files:
@@ -32,27 +32,31 @@ key-files:
     - test/e2e/roles_test.go
     - test/e2e/ca_rotation_test.go
     - test/e2e/stall_test.go
+    - test/e2e/agent_forget_test.go
+    - test/e2e/hosts_test.go
+    - test/e2e/machine_test.go
+    - test/e2e/probe_certs_test.go
     - docs/runbooks/ca-rotation.md
     - docs/runbooks/signer-install.md
     - cmd/keyroster/securitydocs_test.go
     - cmd/keyroster/runbook_test.go
 decisions:
-  - "The decode-message test requires the whole message, anchored on the test's own URL: ^ + QuoteMeta(url + \"/healthz: \" + want) + [0-9]+\\)$. It refuses the peer's text before ': decode:' as well as after the offset."
-  - "The end-to-end retry wait is 3 s wherever a helper's callers run host approve or user approve, directly or through joinApproved, enrollApproved, joinHostCert or joinProbeHost: nine helpers. No bound, deadline or anchor of a timed test changes."
-  - "The re-poll test's fetcher polls every hour with a bound of a minute; the live-signer log test's clock advances only by the monotonic reading."
+  - "The decode-message test compares the whole message: the test's own URL, /healthz: , the CLI's words, the offset (4010 or 4006) and ')'. No peer text can stand anywhere in it, digits after the offset included."
+  - "Every end-to-end retry waits as many seconds as the largest command its helper runs sends admin requests, because a refused request spends no token and the bucket refills one a second. That is 5 s for machine_test.go; 4 s for the two helpers that run host remove; 3 s for those whose largest command is host approve, user approve, host forget or revoke user of a user in no directory; and 2 s for those that run only directory changes. No bound, deadline or anchor of a timed test changes."
+  - "The re-poll test bounds the gap between its two requests' arrivals at 900 ms and the whole Once at a minute, with an hour's poll interval. The live-signer log test's clock advances only by the monotonic reading, and its requests are stamped with that clock."
 requirements: []
 metrics:
   completed: 2026-11-24
 actuals:
   tasks: 5
-  commits: "10 (9 measured with git rev-list before this SUMMARY's own commit, plus that commit)"
+  commits: "17 (16 measured with git rev-list before the commit that records the fix round, plus that commit)"
 plan_head_before: 2d61b55d6e7317d4658a96447f5e759a730131ba
-plan_head_after: 8e0ef458e3d5a33467f46f2708bcb30cace1d682
+plan_head_after: 0fdb8fc58bb69daee4fa9097023fa3be0e5eb230
 ---
 
 # Quick 261124-sfx Plan 01: ten small fixes to tests, three documents, the merge gate's texts and the Arch lane Summary
 
-Ten small fixes, each read at 2d61b55 before it was changed. The merge gate's texts no longer claim that GitHub always dismisses the approval after a rebase. The Arch lane retries its package sync. Five unit tests change. Two absence checks no longer run on random text (items 3 and 5). One assertion now sees a leak it could not see (item 4). Two tests no longer depend on load or on the wall clock (item 6). Every changed assertion fails its mutant; TestCheckLogAgainstLiveSigner, which has no mutant, passes 20 race runs. Nine end-to-end retry helpers wait 3 s, long enough for a command of three admin requests. Two runbook passages say what the code does and are pinned, and one CONTRIBUTING.md row names the test's third client. No product code changes.
+Ten small fixes, each read at 2d61b55 before it was changed. The merge gate's texts no longer claim that GitHub always dismisses the approval after a rebase. The Arch lane retries its package sync. Five unit tests change. Two absence checks no longer run on random text (items 3 and 5). One assertion now sees a leak it could not see (item 4). Two tests no longer depend on load or on the wall clock (item 6). Every changed assertion fails its mutant; TestCheckLogAgainstLiveSigner, which has no mutant, passes 20 race runs. Every end-to-end retry waits as many seconds as the largest command its helper runs sends admin requests. The pull request's pre-merge review raised five points, and the fix round closed all of them ("Pre-merge review"). Two runbook passages say what the code does and are pinned, and one CONTRIBUTING.md row names the test's third client. No product code changes.
 
 ## The mutant rule
 
@@ -84,8 +88,8 @@ Every Q below followed one rule. The unmutated narrow run passed first. One exac
 
 ## Item 2: the Arch lane's package sync
 
-- **Wrong (read at 2d61b55).** test/distro/run-in.sh:37 runs `pacman -Syyu --noconfirm --needed openssh` once, under `set -eu` (:5), against the one Server line the script writes (:35). One stalled fetch fails the lane.
-- **Change.** The line becomes a POSIX sh loop: at most three tries, 30 s apart, over the same command, the same snapshot mirror and the same package, with pacman.conf untouched, so the signature checks stay. Each failed try but the last prints `run-in.sh: pacman failed (try N of 3); trying again in 30 s` on stderr. After the third it prints `run-in.sh: pacman failed 3 times against the Arch Linux Archive snapshot <snapshot>` and exits 1. One sentence in the comment above says why.
+- **Wrong (read at 2d61b55).** test/distro/run-in.sh:37 runs `pacman -Syyu --noconfirm --needed openssh` once, under `set -eu` (:5), against the one Server line the script writes (:35). One stalled fetch fails the lane. On 2026-11-22 the archive was down for hours, and when it answered again one stalled fetch failed the first re-run.
+- **Change.** The line becomes a POSIX sh loop: at most three tries, 30 s apart, over the same command, the same snapshot mirror and the same package, with pacman.conf untouched, so the signature checks stay. Each failed try but the last prints `run-in.sh: pacman failed (try N of 3); trying again in 30 s` on stderr. After the third it prints `run-in.sh: pacman failed 3 times against the Arch Linux Archive snapshot <snapshot>` and exits 1. One sentence in the comment above says why: on 2026-11-22 the archive was down for hours, and when it answered again one stalled fetch failed the first re-run; a retry rides out a stall, not an outage. (The first round's sentence said that one stalled fetch failed the lane for hours; the fix round corrected it.)
 - **Proof.** `sh -n test/distro/run-in.sh` (Git Bash) and `dash -n test/distro/run-in.sh` (WSL) pass. A copy of the loop, taken from the file's bytes, ran outside the repository with `pacman` replaced by a shell function that fails N times and then succeeds. It ran as `dash -eu` in WSL, where /bin/sh is /usr/bin/dash:
   - N=0: one call, exit 0, no message.
   - N=2: three calls, the messages for tries 1 and 2, exit 0, 60 s.
@@ -104,82 +108,146 @@ Every Q below followed one rule. The unmutated narrow run passed first. One exac
 
 ## Item 4: the decode message's form
 
-- **Wrong (read at 2d61b55).** internal/serverclient/client_test.go:1180, in TestConnectErrorTransport/json_errors_in_own_words, checks the message for the CLI's words, no "peer text" and no "000" outside the URL. For the body of 4,000 spaces, the "000" check sees nothing. encoding/json's own text for that body ("invalid character 'x' looking for beginning of value") would pass if the client appended it.
-- **Change.** One regular expression for the whole message replaces the three checks: `` ^ + regexp.QuoteMeta(url+"/healthz: "+want) + `[0-9]+\)$` ``. That is the test's own URL, `/healthz: `, the CLI's words (which begin with `decode: `), the byte offset, `)` and the end. The `regexp` import is added, and the comment above says what the expression refuses. A temporary `t.Logf` (removed again; the file's sha256 matched the edited file afterwards) showed both messages beginning with the URL exactly:
-  - `https://localhost:35463/healthz: decode: the response has a JSON value of the wrong type (at byte 4010)`, with url `https://localhost:35463`
-  - `https://localhost:45447/healthz: decode: the response is not valid JSON (at byte 4006)`, with url `https://localhost:45447`
-- **Proof, Q4a to Q4c, each first on the old assertion (the committed state at 2d61b55) and then on the new one.** Narrow command: `go test -count=1 -timeout 5m -v -run '^TestConnectErrorTransport$/^json_errors_in_own_words$' ./internal/serverclient/`. All are in internal/serverclient/client.go, whose sha256 before and after every run is `3ce7ec7af6f8e9917c80683b3cb469327ae14f2f08c80447a01e034d34e75238`.
+- **Wrong (read at 2d61b55).** internal/serverclient/client_test.go:1180, in TestConnectErrorTransport/json_errors_in_own_words, checks the message for three things: the CLI's words, no "peer text", and no "000" outside the URL. For the body of 4,000 spaces, the "000" check sees nothing. If the client appended encoding/json's own text for that body ("invalid character 'x' looking for beginning of value"), the check would still pass.
+- **Change.** The message is compared whole, and that one comparison replaces the three checks. Each body carries its full expected tail in the table, ending with its offset and `)`. The comparison is `msg != url+"/healthz: "+want`: the test's own URL, `/healthz: `, the CLI's words, the offset and `)`.
+  - The offsets are 4010 for the body of zeros (6 bytes of `{"a":1`, 4000 zeros and the 4 of `e999`) and 4006 for the body of spaces (5 bytes of `{"a":`, 4000 spaces and the `x`). The comment above the table gives this arithmetic.
+  - The comment above the comparison says what it refuses.
+  - No `regexp` import is needed.
+  - The first round compared against a regular expression instead ("Pre-merge review").
+  - A temporary `t.Logf` (removed again; the file's sha256 matched the edited file afterwards) showed both messages beginning with the URL exactly:
+    - `https://localhost:35463/healthz: decode: the response has a JSON value of the wrong type (at byte 4010)`, with url `https://localhost:35463`
+    - `https://localhost:45447/healthz: decode: the response is not valid JSON (at byte 4006)`, with url `https://localhost:45447`
+
+    The exact comparison passes on this toolchain, so both offsets are confirmed.
+- **Proof, Q4a to Q4d.** Each mutant ran on the assertion at 2d61b55 (the "old" one) or on the first round's regular expression, and then on the exact comparison.
+  - Narrow command: `go test -count=1 -timeout 5m -v -run '^TestConnectErrorTransport$/^json_errors_in_own_words$' ./internal/serverclient/`.
+  - All four are in internal/serverclient/client.go, whose sha256 before and after every run is `3ce7ec7af6f8e9917c80683b3cb469327ae14f2f08c80447a01e034d34e75238`.
   - **Q4a.** `msg = fmt.Sprintf("the response is not valid JSON (at byte %d)", syntaxErr.Offset)` becomes `msg = fmt.Sprintf("the response is not valid JSON (at byte %d): %v", syntaxErr.Offset, syntaxErr)`.
     - Old assertion: PASS (the mutant survives).
-    - New assertion: FAIL, `client_test.go:1186: body "{\"a\":               "...: err = "https://localhost:42645/healthz: decode: the response is not valid JSON (at byte 4006): invalid character 'x' looking for beginning of value", ...`.
+    - Exact comparison: FAIL, `client_test.go:1187: body "{\"a\":               "...: err = "https://localhost:42491/healthz: decode: the response is not valid JSON (at byte 4006): invalid character 'x' looking for beginning of value", ...`.
   - **Q4b.** `msg = fmt.Sprintf("the response has a JSON value of the wrong type (at byte %d)", typeErr.Offset)` becomes `msg = fmt.Sprintf("the response has a JSON value of the wrong type (at byte %d): %s", typeErr.Offset, typeErr.Value)`.
     - Old assertion: FAIL.
-    - New assertion: FAIL, `client_test.go:1186: body "{\"a\":100000000000000"...: err = "https://localhost:35923/healthz: decode: the response has a JSON value of the wrong type (at byte 4010): number 1000000000...`.
+    - Exact comparison: FAIL, `client_test.go:1187: body "{\"a\":100000000000000"...: err = "https://localhost:38695/healthz: decode: the response has a JSON value of the wrong type (at byte 4010): number 1000000000...`.
   - **Q4c, the peer's text before `: decode:`.** `return fmt.Errorf("%s%s: decode: %w", c.base, path, decodeError(err))` becomes `return fmt.Errorf("%s%s%.6s: decode: %w", c.base, path, data, decodeError(err))`.
     - Old assertion: PASS (the mutant survives: neither six-byte excerpt holds "000").
-    - New assertion: FAIL for both bodies, `err = "https://localhost:43185/healthz{\"a\":1: decode: ...` and `err = "https://localhost:36967/healthz{\"a\": : decode: ...`.
+    - Exact comparison: FAIL for both bodies, `err = "https://localhost:34457/healthz{\"a\":1: decode: ...` and `err = "https://localhost:42359/healthz{\"a\": : decode: ...`.
+  - **Q4d, digits after the offset.** `msg = fmt.Sprintf("the response has a JSON value of the wrong type (at byte %d)", typeErr.Offset)` becomes `msg = fmt.Sprintf("the response has a JSON value of the wrong type (at byte %d000)", typeErr.Offset)`.
+    - The first round's regular expression: PASS (the mutant survives). That run used the test file of a9a4d51 in the worktree; both files were restored afterwards, and their sha256 values matched (client_test.go `8b7bc349400937daf293366657abc1293561cd522a7b423a16d1e44d91a2c0f4`, client.go as above).
+    - Exact comparison: FAIL, `err = "https://localhost:39629/healthz: decode: the response has a JSON value of the wrong type (at byte 4010000)", ...`.
   - `go test -race -count=1 ./internal/serverclient/`: ok (4.0 s).
 
 ## Item 5: the sweep, and the entry name in known_hosts
 
-- **Wrong (read at 2d61b55).** cmd/keyroster/knownhosts_test.go:593, in TestKnownHosts/names_are_principals_not_entry_names, looks for "srv1" in the whole managed known_hosts. That file holds an @cert-authority line with a random ed25519 host CA key in base64, which can hold "srv1", at about 1 in 400,000 runs (computed, not measured).
-- **Change.** The leaf reads the CA lines' names with htCALines, the helper its neighbours use, and requires each to be `[web1]`, the principal only.
-- **Proof, Q5.** Narrow command: `go test -count=1 -timeout 5m -v -run '^TestKnownHosts$/^names_are_principals_not_entry_names$' ./cmd/keyroster/`.
-  - Replacement in cmd/keyroster/knownhosts.go (hostTrustNames): `active = append(active, p)` becomes `active = append(active, p, h.Name)`. The Host line comes from all names and stays `[web1]`; the CA line's names become `[srv1 web1]`.
-  - Failing line: `knownhosts_test.go:598: CA line names ["srv1" "web1"], want the principal web1 only`.
-  - sha256 before and after: `ee3aff0433bf1704818ff9f604f6ca3b0d7bd5fe93975b33059b59f18ae86d67`.
-- **The sweep.** The pattern `(?:^|[^!\w])(?:strings|bytes)\.Contains\(.*,\s*(\[\]byte\()?"[A-Za-z0-9+/=_.:-]{2,8}"|NotContains\(.*"[A-Za-z0-9+/=_.:-]{2,8}"` over every `*_test.go`, read at 2d61b55, gives 74 lines in 37 files. It was re-run here with `git grep -n -P` at 2d61b55 and gives the same 74 lines in 37 files. The two real cases among them are session_test.go:82 (item 3) and knownhosts_test.go:593 (this item). Four more are absence checks of five letters or more on text that holds a fingerprint, a port or a log, at negligible odds, and are not changed: test/e2e/websignin_test.go:266, enroll_test.go:150, probe_certs_test.go:673 and probe_selftest_test.go:853. At the head of this task the pattern gives 72 lines: knownhosts_test.go:593 and client_test.go:1180 are gone, and session_test.go:84 still matches, now made on the page without the fingerprints. The pattern does not see an absence check whose string is a variable, a regular-expression check, or a string longer than eight characters.
+- **Wrong (read at 2d61b55).** cmd/keyroster/knownhosts_test.go:593, in TestKnownHosts/names_are_principals_not_entry_names, looks for "srv1" in the whole managed known_hosts. That file holds an @cert-authority line with a random ed25519 host CA key in base64. The key can hold "srv1", at about 1 in 400,000 runs (computed, not measured).
+- **Change.**
+  - The leaf now collects the file's lines that are neither empty nor comments. It requires them to be exactly one line: `hostCALine("web1", f.bundle.CAs[1])` without its newline. `f.bundle.CAs[1]` is the fixture's only host CA (knownhosts_test.go:106-107), and the writer receives it unchanged through `hostTrustCAs` and `trust.TrustedCAs`. No short string is looked for inside the key, and a second line, or a line of another kind, fails too.
+  - `htCALines` now fails the test when a second `@cert-authority` line carries a key it has already seen, because the map would otherwise hide the first line. The whole cmd/keyroster package passes with that check, so no leaf has two lines of one key.
+  - The first round compared only the CA lines' names, read through `htCALines` ("Pre-merge review").
+- **Proof.**
+  - Narrow command: `go test -count=1 -timeout 5m -v -run '^TestKnownHosts$/^names_are_principals_not_entry_names$' ./cmd/keyroster/`.
+  - The sha256 of cmd/keyroster/knownhosts.go before and after each mutant is `ee3aff0433bf1704818ff9f604f6ca3b0d7bd5fe93975b33059b59f18ae86d67`.
+  - **Q5.** In cmd/keyroster/knownhosts.go (hostTrustNames), `active = append(active, p)` becomes `active = append(active, p, h.Name)`. Fails, `knownhosts_test.go:610: known_hosts lines ["@cert-authority srv1,web1 ssh-ed25519 AAAA... keyroster host CA generation 1"], want only "@cert-authority web1 ssh-ed25519 AAAA... keyroster host CA generation 1"`. The first round's check failed this mutant too (`knownhosts_test.go:598: CA line names ["srv1" "web1"], want the principal web1 only`).
+  - **Q5b, one more CA line of the same key before the real one.** In knownHostsFile, `b.WriteString(hostCALine(names, ca))` becomes `b.WriteString(hostCALine("srv1", ca) + hostCALine(names, ca))`. The writer does not see entry names there, so the mutant writes the entry name "srv1" as a literal. Fails, `knownhosts_test.go:610: known_hosts lines ["@cert-authority srv1 ssh-ed25519 AAAA... keyroster host CA generation 1" "@cert-authority web1 ssh-ed25519 AAAA... keyroster host CA generation 1"], want only ...`.
+  - `go test -count=1 -timeout 15m -run '^(TestKnownHosts|TestMachineHostTrust)$' ./cmd/keyroster/`: ok (7.9 s).
+  - `go test -count=1 -timeout 20m ./cmd/keyroster/`: ok (140.6 s).
+- **The sweep.** The pattern `(?:^|[^!\w])(?:strings|bytes)\.Contains\(.*,\s*(\[\]byte\()?"[A-Za-z0-9+/=_.:-]{2,8}"|NotContains\(.*"[A-Za-z0-9+/=_.:-]{2,8}"` runs over every `*_test.go`.
+  - Read at 2d61b55, it gives 74 lines in 37 files. It was re-run here with `git grep -n -P` at 2d61b55 and gave the same 74 lines in 37 files.
+  - The two real cases among them are session_test.go:82 (item 3) and knownhosts_test.go:593 (this item).
+  - Four more are absence checks of five letters or more, on text that holds a fingerprint, a port or a log. Their odds are negligible and they are not changed: test/e2e/websignin_test.go:266, enroll_test.go:150, probe_certs_test.go:673 and probe_selftest_test.go:853.
+  - At the head of the first round, the pattern gave 72 lines. knownhosts_test.go:593 and client_test.go:1180 were gone, and session_test.go:84 still matched, now made on the page without the fingerprints.
+  - The pattern does not see an absence check whose string is a variable, a regular-expression check, or a string longer than eight characters.
 
 ## Item 6: two tests that failed once under load
 
 - **Wrong (read at 2d61b55).**
-  - internal/agent/fetch/fetch_test.go:277, in TestFetch/more_repolls_immediately, bounds one `Once` at 900 ms, under -race and with a fetcher that polls every second (:142). Load of a second fails it.
-  - internal/signer/log_test.go:432, in TestCheckLogAgainstLiveSigner, uses the wall clock (`newLogEnv`, clock nil). A step back of the wall clock between two of its 60 issues fails an issue with `clock_regression` (internal/serial/serial.go).
+  - internal/agent/fetch/fetch_test.go:277, in TestFetch/more_repolls_immediately, bounds one `Once` at 900 ms, under -race and with a fetcher that polls every second (:142). A second of load fails it.
+  - internal/signer/log_test.go:432, in TestCheckLogAgainstLiveSigner, uses the wall clock (`newLogEnv`, clock nil). If the wall clock steps back between two of its 60 issues, an issue fails with `clock_regression` (internal/serial/serial.go).
 - **Change.**
-  - The re-poll leaf sets `ts.f.cfg.Poll = time.Hour` and bounds `Once` at a minute, with a comment. The fetcher reads `cfg.Poll` only in New (fetch.go:177-181) and Run (:249).
-  - The log test builds its environment with `newLogEnvClock(t, NewFixture(t, 1, 1), func() time.Time { return base.Add(time.Since(base)) })`, so the signer's clock advances only by the monotonic reading. The constructor exists at log_test.go:99 and passes the clock to Bootstrap and to `Config.Clock`.
-- **Proof, Q6a.** Narrow command: `go test -count=1 -timeout 3m -v -run 'TestFetch/more_repolls_immediately' ./internal/agent/fetch/`.
-  - The mutant is an insertion in `Once`'s round loop (fetch.go:463-531) of `time.Sleep(min(NextPoll(f.cfg.Poll), 61*time.Second))`, after line 530 (the `}` that closes `if !resp.More {`), as the last statement of the loop's body. The replacement's old string, `\t\t\treturn true, err\n\t\t}\n\t}\n\treturn true, nil\n}`, occurs once.
-  - Failing line: `fetch_test.go:283: requests ["GET /api/v1/agent/state" "GET /api/v1/agent/state?bundle=1"] in 1m1.058271796s, want two at once, the second with the new bundle version`, with `--- FAIL: TestFetch/more_repolls_immediately (61.08s)`. The leaf's own minute bound caught it.
-  - sha256 before and after: `47304efcfbcb54233584eaa3b3ba6c29cba708aab7ffe6169b96c76a447135ca`.
-  - Not run: the uncapped sleep of one poll interval (at least 50 minutes with an hour's poll) would end the run by the test timeout instead of the leaf's bound.
+  - **The re-poll leaf** sets `ts.f.cfg.Poll = time.Hour`. The fetcher reads `cfg.Poll` only in New (fetch.go:177-181) and Run (:249). The leaf now has two bounds:
+    - Its own handler records the time each of the two requests arrives. The gap between the first and the second arrival must be below 900 ms, and the message says that a re-poll after `more: true` must be immediate. The gap holds only the spooling of the first answer and the second request, so it catches a wait of about a second or more between the rounds.
+    - The bound on the whole `Once` is a minute, the limit for the call.
+    - A `t.Logf` prints the gap. The gap is checked before the request list and the minute bound.
+  - **The log test** builds its environment with `newLogEnvClock(t, NewFixture(t, 1, 1), clock)`, where `clock` is `func() time.Time { return base.Add(time.Since(base)) }`. The signer's clock therefore advances only by the monotonic reading. The constructor exists at log_test.go:99 and passes the clock to Bootstrap and to `Config.Clock`.
+    - Each request the test issues also takes `CreatedAt` from that clock and is signed again (`SignRequest`), as internal/signer/drain_test.go:468-470 does. So a step of the wall clock cannot fail an issue with `request_time_skew` either.
+    - The shared `request` helper is unchanged.
+- **Proof, Q6a and Q6c.**
+  - Narrow command: `go test -count=1 -timeout 3m -v -run 'TestFetch/more_repolls_immediately' ./internal/agent/fetch/`.
+  - Both mutants are insertions in `Once`'s round loop (fetch.go:463-531), after line 530 (the `}` that closes `if !resp.More {`), as the last statement of the loop's body. The replacement's old string, `\t\t\treturn true, err\n\t\t}\n\t}\n\treturn true, nil\n}`, occurs once.
+  - sha256 of fetch.go before and after both: `47304efcfbcb54233584eaa3b3ba6c29cba708aab7ffe6169b96c76a447135ca`.
+  - **Q6a** inserts `time.Sleep(min(NextPoll(f.cfg.Poll), 61*time.Second))`. It now fails by the gap bound: `fetch_test.go:299: the second request arrived 1m1.04234382s after the first, want below 900 ms: a re-poll after more: true must be immediate` (`--- FAIL: TestFetch/more_repolls_immediately (61.07s)`). In the first round it failed by the minute bound, `fetch_test.go:283: requests [...] in 1m1.058271796s`.
+  - **Q6c** inserts `time.Sleep(time.Second)`. Fails by the gap bound, `fetch_test.go:299: the second request arrived 1.016664298s after the first, want below 900 ms: ...` (`--- FAIL: TestFetch/more_repolls_immediately (1.05s)`).
+  - Not run: the uncapped sleep of one poll interval (at least 50 minutes with an hour's poll). It would end the run by the test timeout.
 - **Repeated runs.**
-  - `go test -race -count=20 -run 'TestFetch/more_repolls_immediately' ./internal/agent/fetch/`: ok (2.1 s). Again with `-v`: 20 PASS lines of the leaf, no FAIL.
-  - `go test -race -count=20 -v -run '^TestCheckLogAgainstLiveSigner$' ./internal/signer/`: ok (14.7 s), 20 PASS lines, no FAIL.
+  - `go test -race -count=50 -v -run 'TestFetch/more_repolls_immediately' ./internal/agent/fetch/`: ok (3.7 s), 50 PASS lines, no FAIL. The gaps the leaf logged ranged from 16.6 ms to 21.5 ms, with a median of 17.9 ms.
+  - The first round's `-race -count=20` run of the leaf with only the minute bound was ok (2.1 s).
+  - `go test -race -count=20 -v -run '^TestCheckLogAgainstLiveSigner$' ./internal/signer/` with the requests stamped by the test's clock: ok (16.1 s), 20 PASS lines, no FAIL. The first round's run with only the signer's clock was ok (14.7 s).
 
 ## Item 7: the end-to-end helpers' retry
 
-- **Read at 2d61b55.** The admin routes share one bucket per client address: `adminLimit: newLimiter(lim.AdminPerMinute, lim.AdminBurst, 0, 0)` (internal/server/server.go:189), with defaults of 60 a minute and a burst of 20 (internal/server/ratelimit.go:60-61), keyed by the client address only (`clientKey`, :209-223). A refused request takes no token (`AllowN`, :180), and Retry-After is always 1 s (:201).
-  - `keyroster host approve` sends three admin requests: GET pending hosts (cmd/keyroster/host.go:577), GET directory (cmd/keyroster/dirpipe.go:137) and POST directory (dirpipe.go:384). `verifiedTrust`'s GET of the trust path (server.go:230) is outside the admin bucket.
-  - `keyroster user approve` sends three: GET pending credentials (cmd/keyroster/user.go:588), then editDirectory's GET and POST.
-  - A retry after 2 s finds about two refilled requests, the two reads spend them, and the POST is refused again.
-- **Change.** Line numbers from here to the end of this item are at the head of this task. In the nine helpers below, the retry's `time.Sleep(2 * time.Second)` becomes `time.Sleep(3 * time.Second)`, with a comment that gives the arithmetic. The two log lines that name the wait (revoke_test.go, roles_test.go) now say 3 s. No other line of test/e2e changes; no bound, deadline or anchor changes.
+- **The rule (internal/server/ratelimit.go).**
+  - The admin routes share one bucket per client address: `adminLimit: newLimiter(lim.AdminPerMinute, lim.AdminBurst, 0, 0)` (internal/server/server.go:189).
+  - The defaults are 60 a minute and a burst of 20 (ratelimit.go:60-61), so the bucket refills one request a second. The bucket is keyed by the client address only (`clientKey`, :209-223).
+  - A refused request spends no token (`AllowN`, :180), and Retry-After is always 1 s (:201).
+  - So a wait of N seconds lets a command of N admin requests through at its first retry. Every retry site under test/e2e now waits as many seconds as the largest command its helper runs sends admin requests, and its comment names that command and its count.
+- **The requests of each command** (cmd/keyroster at the head of this task; no product file changes):
+  - GET directory: `fetchVerifiedDirectory`, dirpipe.go:137.
+  - POST directory: `installVersion`, dirpipe.go:384.
+  - A directory change (role add, update, grant or revoke; group add; host-group add, map or unmap; machine add; host add): GET and POST directory, two.
+  - host join-token: host.go:506, one.
+  - host pending: host.go:577, one.
+  - host status: hoststatus.go:154, one.
+  - host principals: GET directory through host.go:284, one.
+  - known-hosts sync: knownhosts.go:1083, one.
+  - host ca-key: none (host.go:329 reads only the trust path, which is outside the admin bucket).
+  - revoke serial, key or key-id: one POST each (`send`, revoke.go:164).
+  - host approve: GET pending hosts (host.go:823, which calls :577), then GET and POST directory (host.go:865), three.
+  - user approve: GET pending credentials (user.go:588), then GET and POST directory (user.go:631 or :704), three.
+  - host forget: GET pending hosts (host.go:1036, which calls :577), GET hosts status (host.go:1041, which calls hoststatus.go:154), POST forget (host.go:1135), three.
+  - host remove: four. GET directory, a sweep of the host's certificates before the install (dirpipe.go:302, then :605, then revoke.go:164), POST directory (dirpipe.go:305), and a second sweep after it (dirpipe.go:308). The second sweep only warns when it fails. Both sweeps run only when the bundle has an installation ID, which the end-to-end bundles have.
+  - revoke user: a sweep (revoke.go:491), GET directory, POST directory only when the user is in the directory, a second sweep (revoke.go:558). That is three for a user in no directory and four for a user in one.
+  - revoke machine NAME: a sweep (revoke.go:794), GET and POST directory (revoke.go:810), one revocation per key with `--keys` (revoke.go:862, through `revokeHostKey`, revoke.go:963-973), a second sweep (revoke.go:884). That is four, or five with `--keys` and one key.
+- **The sites, as verified.** The callers were followed through joinApproved, enrollApproved, joinApprovedHeld, joinHostCert and joinProbeHost. Line numbers are at the head of this task.
 
-| Helper | What its callers run through it | Wait |
-|--------|----------------------------------|------|
-| `hostTrustKR` (hosttrust_test.go) | host approve through joinHostCert (hosttrust_test.go:297; hostca_rotation_test.go:508); user approve (hosttrust_test.go:364); known-hosts sync, host status | 3 s |
-| `hostCertKR` (hostcert_test.go) | host approve through joinHostCert (hostcert_test.go:269, :406) and joinProbeHost (probe_selftest_test.go:419); host status | 3 s |
-| `kr` of TestAgentEnrollEndToEnd (agent_enroll_test.go) | host approve (:322); host pending, revoke serial | 3 s |
-| `kr` of TestAgentStatusEndToEnd (agent_status_test.go) | host approve through enrollApproved (:225); host status, revoke serial | 3 s |
-| `loginFixture.kr` (login_test.go) | user approve (:343) | 3 s |
-| `revokeCLIRetry` (revoke_test.go) | user approve through its caller's kr (:258, :260); role add and grant, revoke | 3 s |
-| `kr` of TestRolesHostPrincipalsEndToEnd (roles_test.go) | user approve (:93, :95) | 3 s |
-| `kr` of TestCARotationNoFailedLogin (ca_rotation_test.go) | host approve through joinApproved (:674); host status, revoke serial | 3 s |
-| `kr` of TestDeliveryDuringHeldSignature (stall_test.go) | host approve through enrollApproved (:168) | 3 s |
-| `kr` of hosts_test.go | no host approve or user approve, directly or through a helper | 2 s, unchanged |
-| `kr` of machine_test.go | no host approve or user approve, directly or through a helper | 2 s, unchanged |
-| `kr` of TestProbeCertsAgainstSSHD (probe_certs_test.go) | no host approve or user approve, directly or through a helper | 2 s, unchanged |
+| Retry site | Commands its callers run through it (admin requests each) | Largest | Wait |
+|---|---|---|---|
+| `kr` of TestAgentEnrollEndToEnd (agent_enroll_test.go) | directory changes (2), host join-token (1), host pending (1), host approve (:324, 3), revoke serial (1), host remove (:417, 4) | host remove, 4 | 3 s to 4 s |
+| the inline loop around host forget (agent_enroll_test.go:442) | host forget (3) | host forget, 3 | 2 s to 3 s |
+| `run` and `kr` of TestAgentReenrollEndToEnd (agent_forget_test.go) | through enrollApproved and joinApprovedHeld: directory changes (2), host join-token (1), host pending (1), host approve (3); host remove (:71, 4), host forget (:122, :161, :171, 3), host status (1), revoke serial (1) | host remove, 4 | 3 s to 4 s |
+| `kr` of TestAgentStatusEndToEnd (agent_status_test.go) | through enrollApproved: directory changes, host join-token, host pending, host approve (3); host status (1), revoke serial (1) | host approve, 3 | 3 s |
+| `kr` of TestCARotationNoFailedLogin (ca_rotation_test.go) | directory changes (2); through joinApproved: host join-token, host pending, host approve (3); host status (1), revoke serial (1) | host approve, 3 | 3 s |
+| `kr` of TestDeliveryDuringHeldSignature (stall_test.go) | through enrollApproved only: directory changes, host join-token, host pending, host approve (3) | host approve, 3 | 3 s |
+| `hostCertKR` (hostcert_test.go) | through joinHostCert and joinProbeHost: directory changes, host join-token, host pending, host approve (3); host status (1); directory changes (2) | host approve, 3 | 3 s |
+| `hostTrustKR` (hosttrust_test.go) | through joinHostCert: host approve (3); user approve (:364, 3); directory changes (2); known-hosts sync (1); host status (1) | host approve and user approve, 3 | 3 s |
+| `loginFixture.kr` (login_test.go) | user approve (:343, 3); directory changes (2); host principals (1); host ca-key (0) | user approve, 3 | 3 s |
+| `kr` of TestRolesHostPrincipalsEndToEnd (roles_test.go) | user approve (:93, :95, 3); directory changes (2); host principals (1); host ca-key (0) | user approve, 3 | 3 s |
+| `revokeCLIRetry` (revoke_test.go), used by TestRevokeUserEndToEnd and the two recovery drills | user approve (revoke_test.go:258, :260, 3); directory changes (2); revoke key-id, serial, key (1); revoke user carol (recovery_test.go:442: carol is in no directory, the drill installs none, so 3); revoke recover (0) | user approve and revoke user, 3 | 3 s |
+| `kr` of TestMachineIdentityEndToEnd (machine_test.go) | directory changes (2); revoke machine ci (:179, 4); revoke machine ci2 --keys, one key (:197, 5) | revoke machine --keys, 5 | 2 s to 5 s |
+| `kr` of TestDirectoryHostsEndToEnd (hosts_test.go) | directory changes (2); host principals (1) | a directory change, 2 | 2 s |
+| `kr` of TestProbeCertsAgainstSSHD (probe_certs_test.go) | directory changes (2) | a directory change, 2 | 2 s |
 
-agent_forget_test.go already waits 3 s, and agent_systemd_test.go's `kr` has no retry; neither changes.
+The table the fix round started from ("Pre-merge review") put `revokeCLIRetry` at 4 s, for a revoke user of a user in a directory. Every revoke user run through it is of carol, who is in no directory, and the one revoke user of a user in a directory (revoke_test.go:304) runs through `env.keyroster` without a retry. So the count is 3 and the wait stays 3 s. agent_systemd_test.go's `kr` has no retry.
 
-- **Calls of a changed helper inside a timed window.** The longer wait acts only after a refusal; these are the places where a refused call's retry now takes 1 s more of a window:
-  - joinApprovedHeld's poll of `host pending` within 30 s (agent_status_test.go:62), reached from agent_status_test.go, stall_test.go and ca_rotation_test.go; the same 30 s poll in joinHostCert (hostcert_test.go:71), in joinProbeHost (probe_selftest_test.go:134) and in TestAgentEnrollEndToEnd (agent_enroll_test.go:286-290).
-  - waitStatus's 30 s poll of `host status --json` (agent_status_test.go:107-108), from TestAgentStatusEndToEnd (:229, :246, :289) and from TestCARotationNoFailedLogin (caRotRevoke at :747 and :835, and :837); and the 240 s poll for a silent agent (agent_status_test.go:302-303).
-  - TestCARotationNoFailedLogin's 150 s poll of `host status` (ca_rotation_test.go:728-729). The revocation and the waitStatus at :835-837 lie between the switch and the drain, whose bound is trusted_until + 120 s (:856).
-  - TestAgentEnrollEndToEnd: `host approve` (:322) inside the 10 s window from `before` (:310) to the first apply (:333-335); `revoke serial` at the start of `took` (:359-372), which is logged, not bounded (the 20 s deadline starts after the call returns).
-  - TestHostCARotation: hcrSync's `known-hosts sync` (hostca_rotation_test.go:527, :630, :761), and hcrCommitted's poll of `host status` up to installed + 45 s (:570) and up to r1 + 44 s (:731).
-  - hosttrust_test.go's 60 s poll of the heartbeat's directory version (:416), and hostcert_test.go's 60 s polls of host status (:285-297, :370-380).
+- **Changed sites whose retry lies inside a timed window.** The longer wait acts only after a refusal. These are the places where a refused call's retry now takes 1 s or more of a window. No bound, deadline or anchor changed.
+  - **TestAgentEnrollEndToEnd** (4 s):
+    - `host approve` (:324) is inside the 10 s window, which runs from `before` (:312) to the first apply (:335). A refused approval's retry spends 4 s of it.
+    - The poll of `host pending` (:288-292, 30 s) also lies inside a window.
+    - `revoke serial` (:362) is at the start of `took`, which is logged, not bounded.
+    - `host remove` (:417) and `revoke serial` (:426) sit inside no bound.
+  - **The inline loop around host forget** (3 s) polls within its unchanged 32 s deadline (:442) for `host_removal_not_applied` and `host_swap_pending` as well as for the limiter. So it now makes about 10 attempts instead of 16.
+  - **TestAgentReenrollEndToEnd** (4 s), within `forgetWait`, 32 s:
+    - `host pending` (:74, in the loop at :73);
+    - `host status` (:94, in the loop at :92; :135, in the loop at :134);
+    - joinApprovedHeld's 30 s poll of `host pending` (agent_status_test.go:62).
+  - **TestMachineIdentityEndToEnd** (5 s) has no deadline around any call of its helper. Its whole test sends 19 admin requests against a fresh bucket of 20, so its retry does not fire today.
+  - **The sites at 3 s**, unchanged since the first round:
+    - joinApprovedHeld's, joinHostCert's (hostcert_test.go:71) and joinProbeHost's (probe_selftest_test.go:134) 30 s polls of `host pending`;
+    - waitStatus's 30 s poll (agent_status_test.go:107-108);
+    - the 240 s poll for a silent agent (agent_status_test.go:302-303);
+    - TestCARotationNoFailedLogin's 150 s poll of `host status` (ca_rotation_test.go:728-729), and its revocations and waitStatus at :747 and :835-837, the latter between the switch and the drain, whose bound is trusted_until + 120 s (:856);
+    - TestHostCARotation's hcrSync (hostca_rotation_test.go:527, :630, :761) and hcrCommitted (:570, :731);
+    - hosttrust_test.go's 60 s heartbeat poll (:416) and hostcert_test.go's 60 s polls (:285-297, :370-380).
 - **Proof.** None locally: the refusal needs the bucket's level that only a CI lane reaches, and nothing under test/e2e runs locally. `go vet` passed under each tag set: `e2e`, `e2e e2emachine`, `e2e e2eprobe`, `e2e e2erotation`, `e2e systemdsmoke`, `e2e_pkcs11` and `e2e_tpm`. The full gate's vet lines and the CI lanes run them again.
+  - In the CI runs of the first round's head, both main e2e lanes logged `roles_test.go:187: keyroster host-group unmap web runner --yes was rate-limited; running it again in 3 s`, and the tests passed. That is a refused command of two requests recovering at its first retry, not a command of three or more.
 
 ## Item 8: the location bullet of ca-rotation.md
 
@@ -225,7 +293,7 @@ agent_forget_test.go already waits 3 s, and agent_systemd_test.go's `kr` has no 
 - Item 1: what GitHub does with an approval when a rebase changes the diff, or leaves it unchanged. The observation of 2026-11-22 is the only evidence.
 - Item 2: a real stall of the archive. Only the scratch copy of the loop ran; the green path is the CI lane.
 - Item 6: a wall clock that steps back. It cannot be produced on demand; the clock is monotonic by construction.
-- Item 7: that a refused approval now recovers at its first retry. No test empties the bucket.
+- Item 7: that a refused command of N admin requests now recovers at its first retry after N seconds. No test empties the bucket; CI showed only a refused command of two requests recovering after 3 s.
 
 ## Gates
 
@@ -233,7 +301,14 @@ agent_forget_test.go already waits 3 s, and agent_systemd_test.go's `kr` has no 
   - In this task's worktree it exited 1 after 881 s, at its fourth lint (`golangci-lint run --build-tags "e2e,e2erotation" --new-from-rev=origin/main ./test/e2e/`). Everything before that passed: `go test -race -count=1 -timeout 15m ./...` with 36 `ok` lines and no FAIL; `go vet ./...`; `go vet` of test/e2e under each of the six tag sets; `bash -n test/systemd/smoke.sh`; gofmt; and `0 issues.` from the lints for linux, windows and darwin. The fourth lint warned `can't prepare diff by revgrep: no version control repository found` and, without its diff filter, listed 17 issues of the whole of test/e2e. None of them lies on a line this task adds: the only changed hunk in those files is agent_enroll_test.go:240-245, and the listed lines there are :84, :118 and :353. The cause is the checkout. The worktree's `.git` file names a Windows path (`gitdir: C:/...`), which git inside WSL cannot open (`git rev-parse HEAD` in WSL: `fatal: not a git repository`), so the `--new-from-rev` lint cannot pass in a linked worktree on this host.
   - The rest of the same line, from the fourth lint to its end, also taken from the plan's bytes by script, then ran in a full clone of the same commit outside the repository. Its HEAD was 8e0ef45, its tree 66e0792..., the same as the worktree's, and `origin/main` was set to 2d61b55. It exited 0 after 141 s. The fourth lint gave `0 issues.`. capslock gave 97, 37 and 23 (package, capability) pairs, each equal to its baseline, so no new pair. The dependency firewall and the test-only firewall (6 GOOS/tag combinations) were clean, and all 55 `uses:` references in .github/workflows are pinned to commit SHAs.
   - So lint gave `0 issues.` four times in all, three in the worktree and one in the clone.
-- `git diff --name-only origin/main...HEAD` lists only the files of the task's scope: the 22 files above and this task's PLAN, plus this SUMMARY once it is committed.
+- **The full gate of the fix round, once, on the tree of 0fdb8fc (tree a404a77201ec67cd903fcccf49265141845d7880)**, in the same two parts. Before it started, `pgrep -fa "go test|golangci-lint"` in WSL showed only its own shell.
+  - **In the worktree:** exit 1 after 851 s, at the fourth lint. Everything before it passed: 36 `ok` lines and no FAIL, every vet, `bash -n test/systemd/smoke.sh`, gofmt, and `0 issues.` three times. The fourth lint gave the same warning and listed the same 17 issues. None of them lies on a changed line: the listed lines in agent_enroll_test.go are :84, :118 and :355, and that file's changed hunks are :240-247 and :436-442.
+  - **In the full clone** (HEAD 0fdb8fc, the same tree, `origin/main` at 2d61b55), the rest of the line exited 0 after 128 s:
+    - `0 issues.`;
+    - capslock 97, 37 and 23 pairs, each equal to its baseline;
+    - both firewalls clean;
+    - 55 pinned `uses:` references.
+- `git diff --name-only origin/main...HEAD` lists only the files of the task's scope: the first round's 22 files, the four e2e files the fix round adds (agent_forget_test.go, hosts_test.go, machine_test.go and probe_certs_test.go), this task's PLAN and this SUMMARY.
 - **Authorship and signatures.** Over `git log origin/main..HEAD`, every commit is authored by the owner's noreply address `121555671+Labontese@users.noreply.github.com` and committed by `keyroster-bot <337682656+keyroster-bot@users.noreply.github.com>`. Each carries an SSH signature, and `%G?` is `G`, signer keyroster-bot, for each, checked against an allowed-signers file outside the repository that holds the committer's configured signing key.
 - `scripts/check-pr-title.sh` with the pull request's title in `PR_TITLE`: `PR title OK`.
 - shellcheck is not installed in the WSL used here and did not run.
@@ -241,7 +316,7 @@ agent_forget_test.go already waits 3 s, and agent_systemd_test.go's `kr` has no 
 
 ## Commits
 
-All ten are signed by keyroster-bot as committer and authored as the owner. Before each, `git diff --cached` of every staged file was read whole and the staged-lines scan exited 0.
+All seventeen are signed by keyroster-bot as committer and authored as the owner. Before each, `git diff --cached` of every staged file was read whole and the staged-lines scan exited 0.
 
 - `docs(quick-261124-sfx): plan ten small fixes` (the PLAN)
 - `test(server): look for another user's name outside the page's fingerprints`
@@ -253,12 +328,21 @@ All ten are signed by keyroster-bot as committer and authored as the owner. Befo
 - `test(cli): pin the location bullet and the tpm paragraph's guard` (the pins; RED)
 - `docs: correct the location bullet, the tpm paragraph, the rotation row and the merge gate's texts`
 - `docs(quick-261124-sfx): record the small fixes` (this SUMMARY)
+- `test(cli): compare the managed file's lines exactly and refuse a second line of one CA key` (ba98027)
+- `test(serverclient): compare the whole decode message with its offset` (d0b556b)
+- `test(e2e): size each retry's wait to the largest command its helper runs` (fdd34ba)
+- `test(fetch): bound the gap between the two requests of an immediate re-poll` (1f3b232)
+- `test(signer): stamp the live-signer test's requests with its own clock` (5cde560)
+- `ci(distro): correct the comment on the Arch lane's retry` (0fdb8fc)
+- `docs(quick-261124-sfx): record the review's fix round` (this SUMMARY)
 
 ## Deviations from Plan
 
 - **Item 7 covers nine helpers, not seven.** The helpers of ca_rotation_test.go (TestCARotationNoFailedLogin) and stall_test.go (TestDeliveryDuringHeldSignature) also run a command of three admin requests: they pass their `kr` to joinApproved and enrollApproved, which run `host approve` through it. Reading the callers' indirect calls showed this; a search for "approve" alone does not show it. Both now wait 3 s like the others.
 - **Item 4's expression.** The form first proposed, `^[^ ]*: decode: ` followed by the quoted `want`, would require `decode: ` twice, because `want` already begins with it. The expression used is anchored on the test's own URL and path instead: `^` + the quoted `url+"/healthz: "+want` + `[0-9]+\)$`. That also refuses peer text without spaces placed before `: decode:` (Q4c).
 - **The full gate ran in two parts** ("Gates"): in the worktree up to its fourth lint, which cannot read git in a linked worktree on this host, and from that lint to its end in a full clone of the same commit.
+- **The fix round's count for `revokeCLIRetry` differs from the table the round started from.** That table gave 4 s, for a revoke user of a user in a directory. The only revoke user run through the helper is of carol, who is in no directory (recovery_test.go:442; the drill installs none), so the count is three and the wait stays 3 s (item 7).
+- **Q5b names the entry as a literal.** knownHostsFile does not see entry names, so the mutant writes `"srv1"`, the leaf's entry name, into the extra line.
 - **The pins' commit was amended before its RED run**, to rewrap one comment line of TestSecurityDocs. Nothing else of it changed, and the RED ran on the amended commit.
 
 ## Not changed here
@@ -275,4 +359,41 @@ All ten are signed by keyroster-bot as committer and authored as the owner. Befo
 
 ## Self-Check: PASSED
 
-The PLAN and this SUMMARY exist; the nine commits before this one are ancestors of HEAD; no row of either file begins with a label form that other plans read.
+The PLAN and this SUMMARY exist; the sixteen commits before the fix round's record are ancestors of HEAD; no row of either file begins with a label form that other plans read.
+
+## Pre-merge review
+
+The review ran on head a9a4d51 while that head's checks were running. This section is written from the review's run record.
+
+### Who read what, and who judged
+
+- **The reader** was Codex (gpt-6-astra, high effort, read-only, static). It read the diff outside the quick task's folder and the pull request's text. It raised five points: two it rated critical, two high and one medium.
+- **The judge** was one skeptic, Claude Sonnet at high effort. It worked statically and ran nothing, because another task was running timed tests on the machine. It judged all five points and refuted none. It rated two of them medium and three low. It also followed every retry helper's callers and built the table of requests the fix round started from.
+- **The orchestrator** read the code behind each point and ruled that all five be fixed.
+
+### The five points and what closed each
+
+1. **knownhosts_test.go, names_are_principals_not_entry_names** (medium). The loop over `htCALines` reads a map keyed by the CA key, so a second `@cert-authority` line of the same key hides the first. A writer that wrote `srv1` on one line and `web1` on the next would pass it; the old check for "srv1" failed on that. Closed by ba98027 (item 5): the managed file's lines are compared exactly, and `htCALines` refuses a second line of one key.
+2. **client_test.go, json_errors_in_own_words** (low). The expression ended in `[0-9]+\)$`, so the peer's digits right after the offset passed (`(at byte 4010000)`); the old check for "000" failed on them. Closed by d0b556b (item 4): the whole message is compared, with its offsets 4010 and 4006.
+3. **The retry helpers** (low). `revoke machine` sends four admin requests, or five with `--keys` and one key, and `host remove` sends four. The helper of machine_test.go still waited 2 s, and the comment of the nine changed helpers named three requests as the largest command. The skeptic noted that the helper of machine_test.go cannot fire today, since its test sends 19 admin requests against a bucket of 20. Closed by fdd34ba (item 7): every retry waits as many seconds as the largest command its helper runs sends admin requests.
+4. **fetch_test.go, more_repolls_immediately** (medium). With the bound at a minute, a fixed wait of one second between the two requests passed; the old bound of 900 ms failed on it. Closed by 1f3b232 (item 6): the gap between the two requests' arrivals is bounded at 900 ms.
+5. **log_test.go, TestCheckLogAgainstLiveSigner** (low). The signer's clock was the monotonic one, while the requests' `CreatedAt` was the wall clock, so a wall step of more than 300 s during the test would fail it with request_time_skew. Closed by 5cde560 (item 6): the requests are stamped with the test's clock and signed again.
+
+The orchestrator made one correction of its own. The comment this task added to test/distro/run-in.sh said that on 2026-11-22 one stalled fetch failed the lane for hours. In fact the archive was down for hours, and when it answered again one stalled fetch failed the first re-run. The first round's sentence came from the task's own brief. Closed by 0fdb8fc.
+
+### The fix round's record
+
+- **Commits and checks.**
+  - Commits: ba98027, d0b556b, fdd34ba, 1f3b232, 5cde560 and 0fdb8fc, then this section's commit.
+  - Each is signed and authored as the others. Before each, the whole staged diff was read and the staged-lines scan exited 0.
+  - Before each repeated run and before the full gate, `pgrep -fa "go test|golangci-lint"` in WSL showed only its own shell.
+- **New mutants** (the mutant rule above):
+  - **Q5b** in cmd/keyroster/knownhosts.go. `b.WriteString(hostCALine(names, ca))` becomes `b.WriteString(hostCALine("srv1", ca) + hostCALine(names, ca))`. Fails, `knownhosts_test.go:610: known_hosts lines ["@cert-authority srv1 ssh-ed25519 ..." "@cert-authority web1 ssh-ed25519 ..."], want only ...`. sha256 before and after: `ee3aff0433bf1704818ff9f604f6ca3b0d7bd5fe93975b33059b59f18ae86d67`.
+  - **Q4d** in internal/serverclient/client.go. `(at byte %d)", typeErr.Offset)` becomes `(at byte %d000)", typeErr.Offset)` in the type-error case. It passed the first round's expression and fails the exact comparison, `err = "https://localhost:39629/healthz: decode: the response has a JSON value of the wrong type (at byte 4010000)"`. sha256 before and after: `3ce7ec7af6f8e9917c80683b3cb469327ae14f2f08c80447a01e034d34e75238`.
+  - **Q6c** in internal/agent/fetch/fetch.go. `time.Sleep(time.Second)` is inserted after line 530. Fails by the gap bound, `fetch_test.go:299: the second request arrived 1.016664298s after the first, want below 900 ms: a re-poll after more: true must be immediate`. sha256 before and after: `47304efcfbcb54233584eaa3b3ba6c29cba708aab7ffe6169b96c76a447135ca`.
+  - Q5, Q4a to Q4c and Q6a were run again on the new assertions and fail them (items 4 to 6).
+- **Repeated runs.**
+  - The re-poll leaf: `-race -count=50`, ok, gaps 16.6 ms to 21.5 ms.
+  - The live-signer test: `-race -count=20`, ok (16.1 s).
+  - cmd/keyroster as a whole: ok (140.6 s).
+- **Full gate.** In the worktree up to its fourth lint, then the rest in a full clone of 0fdb8fc ("Gates").
