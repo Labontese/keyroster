@@ -590,8 +590,13 @@ func TestKnownHosts(t *testing.T) {
 		if got := htHostLine(f.file(t, hostTrustSSHConfig)); !slices.Equal(got, []string{"web1"}) {
 			t.Fatalf("Host line %q, want the principal web1 only", got)
 		}
-		if strings.Contains(f.file(t, hostTrustKnownHosts), "srv1") {
-			t.Fatal("the entry name reached known_hosts")
+		// The CA lines' names field is where an entry name would stand;
+		// the rest of the file holds a random host CA key in base64,
+		// which can hold "srv1" itself.
+		for _, names := range htCALines(t, f.file(t, hostTrustKnownHosts)) {
+			if !slices.Equal(names, []string{"web1"}) {
+				t.Fatalf("CA line names %q, want the principal web1 only", names)
+			}
 		}
 	})
 	t.Run("names_sorted_unique_across_entries", func(t *testing.T) {
