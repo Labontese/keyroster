@@ -1886,20 +1886,25 @@ func TestCARotationBackendSteps(t *testing.T) {
 	})
 	t.Run("unrecorded_key_files_after_restore", func(t *testing.T) {
 		// The software paragraph and the tpm paragraph, each read as a
-		// window of its own, let an unrecorded file go only after the
-		// restore section has run to its end, and the tpm paragraph's
-		// sentence on the console texts says the same for both backends.
+		// window of its own, let an unrecorded file go only when no
+		// prepare is running and after the restore section has run to its
+		// end, and never record a lost key; the tpm paragraph's sentence on
+		// the console texts says the same for both backends.
 		data := signerInstall(t)
 		section := &signingSection{id: "prepare", file: "signer-install.md", section: "Prepare a CA key generation"}
 		softWin := window(t, data, &signingSection{id: "prepare_software", file: "signer-install.md", within: section,
 			start: "With the software backend,", end: "With the tpm backend,"})
 		holds(t, `the software paragraph of signer-install.md "Prepare a CA key generation"`, softWin, []string{
+			"when no prepare is running",
 			"but only after the restore section has run to its end",
+			"never record a lost key with `--key`",
 		})
 		tpmWin := window(t, data, &signingSection{id: "prepare_tpm", file: "signer-install.md", within: section,
 			start: "With the tpm backend,", end: "With the piv backend,"})
 		holds(t, `the tpm paragraph of signer-install.md "Prepare a CA key generation"`, tpmWin, []string{
+			"when no prepare is running",
 			"but only after the restore section has run to its end",
+			"never record a lost key with `--key`",
 			"destroy such a file only once the restore section has run to its end, and keep it where that section stops on a lost generation",
 		})
 		if strings.Contains(normalizeSpace(window(t, data, section)), "both say to destroy such a file after a restore") {

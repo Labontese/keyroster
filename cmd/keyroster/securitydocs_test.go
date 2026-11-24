@@ -14,12 +14,13 @@ import (
 // shredded and not proven erased, and the location column that is not
 // logged, with what retire-key and prepare still do after an edited
 // location and the limit stated for generation 2 or later only, as Holds
-// has it. And docs/security/custody.md states the rule for an unrecorded
-// key file for both backends that write one, the tpm pair as well as the
-// software file, each with the guard that no prepare is running. Each text
-// is read in its own row, bullet or paragraph (the software sentence in
-// its section), white-space normalised, so that a clause moved to another
-// row or out of its block does not pass.
+// has it; docs/runbooks/ca-rotation.md's bullet on the location column
+// states the same limit. And docs/security/custody.md states the rule for
+// an unrecorded key file for both backends that write one, the tpm pair as
+// well as the software file, each with the guard that no prepare is
+// running. Each text is read in its own row, bullet or paragraph (the
+// software sentence in its section), white-space normalised, so that a
+// clause moved to another row or out of its block does not pass.
 func TestSecurityDocs(t *testing.T) {
 	window := func(t *testing.T, data string, e *signingSection) string {
 		t.Helper()
@@ -97,6 +98,23 @@ func TestSecurityDocs(t *testing.T) {
 		for _, old := range []string{"points at any slot", "is stopped by the fingerprint checks before any card write"} {
 			if strings.Contains(normalizeSpace(win), old) {
 				t.Errorf(`piv.md "What CI verifies, and what needs hardware" still says %q`, old)
+			}
+		}
+	})
+	t.Run("ca_rotation_location_bullet", func(t *testing.T) {
+		// ca-rotation.md "Run in CI" states the same limit in its own
+		// bullet, read to the next bullet or blank line.
+		data := doc(t, "docs", "runbooks", "ca-rotation.md")
+		section := &signingSection{id: "run_in_ci", file: "ca-rotation.md", section: "Run in CI"}
+		bullet := normalizeSpace(window(t, data, &signingSection{id: "location", file: "ca-rotation.md", within: section, start: "- **The location column is not logged.**",
+			endNext: func(l string) bool { return strings.HasPrefix(l, "- ") || l == "" }}))
+		holds(t, `ca-rotation.md "Run in CI", the bullet on the location column`, bullet, []string{
+			"retire-key still overwrites a slot only when its key has the draining fingerprint",
+			"for generation 2 or later an edit that points at another generation slot, one that does not hold the draining key",
+		})
+		for _, old := range []string{"points at any slot", "is stopped by the fingerprint checks before any card write"} {
+			if strings.Contains(bullet, old) {
+				t.Errorf(`ca-rotation.md "Run in CI", the bullet on the location column, still says %q`, old)
 			}
 		}
 	})
