@@ -123,7 +123,8 @@ serve an older bundle unnoticed. It also removes the lines of host CAs
 the bundle no longer trusts, as every command that verifies the bundle
 does. It makes no request of its own for this, prints one line on
 stderr when it adds a line and nothing when nothing changed, and
-`--no-known-hosts` turns it off. It never adds a host name, never
+`--no-known-hosts` turns off the adding and the version record, not
+the removal. It never adds a host name, never
 creates the file and never writes `keyroster_revoked_hosts.krl` or
 `keyroster_ssh_config`: the file's first version, new host names and
 revocations reach the account only when an admin runs
@@ -150,13 +151,12 @@ line on stderr; the certificate is kept); 1 for any refusal or failure
 of the renewal itself, whatever happened to the host CA lines; 2 for a
 usage error. An account whose home holds no
 `~/.ssh/keyroster_known_hosts`, or a run with `--no-known-hosts`, never
-gets 4, and neither does a run without `$HOME` (unset or empty), which
-changes no host CA line even when the account's home holds the file;
-one whose home holds it gets 4 on every run while the server serves an
-older trust bundle than the account verified before, while its managed
-file is damaged or its state is missing, damaged or of another
-installation, or while `$HOME` is set and is not the account's home.
-What to do is in [enroll-user.md](enroll-user.md), "Trusting hosts
+gets 4; one whose home holds it gets 4 on every run while the server
+serves an older trust bundle than the account verified before, while
+its managed file is damaged or its state is missing, damaged or of
+another installation, or while `$HOME` is unset, empty or not the
+account's home (such a run changes no host CA line). What to do is in
+[enroll-user.md](enroll-user.md), "Trusting hosts
 without TOFU": item 7 for an older trust bundle, item 8 for a damaged
 file or a state that is missing, damaged or of another installation
 (start over, then an admin's `keyroster known-hosts sync` as that
