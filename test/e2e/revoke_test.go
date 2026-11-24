@@ -537,8 +537,13 @@ func revokeCLIRetry(t *testing.T, env *serverEnv, admin *cliEnv, args ...string)
 	t.Helper()
 	code, out, errOut := env.keyroster(t, admin, "", args...)
 	for try := 0; try < 5 && code != 0 && strings.Contains(errOut, "the server is rate-limiting requests from this address"); try++ {
-		t.Logf("keyroster %s was rate-limited; running it again in 2 s", strings.Join(args, " "))
-		time.Sleep(2 * time.Second)
+		// The admin routes share one bucket per client address, which
+		// refills one request a second (internal/server/ratelimit.go).
+		// host approve and user approve send three admin requests: after
+		// 2 s the two reads would take the two refilled requests and the
+		// write would be refused again, so the wait is 3 s.
+		t.Logf("keyroster %s was rate-limited; running it again in 3 s", strings.Join(args, " "))
+		time.Sleep(3 * time.Second)
 		code, out, errOut = env.keyroster(t, admin, "", args...)
 	}
 	return code, out, errOut
