@@ -431,9 +431,18 @@ func TestStartRefusesWithoutTrust(t *testing.T) {
 func TestCheckLogAgainstLiveSigner(t *testing.T) {
 	// The signer's clock advances only by the monotonic reading: a step
 	// back of the wall clock between two issues would fail an issue with
-	// clock_regression, which is not what this test is about.
+	// clock_regression, which is not what this test is about. Each request
+	// takes CreatedAt from the same clock and is signed again, so a step of
+	// the wall clock cannot fail an issue with request_time_skew either.
 	base := time.Now()
-	e := newLogEnvClock(t, NewFixture(t, 1, 1), func() time.Time { return base.Add(time.Since(base)) })
+	clock := func() time.Time { return base.Add(time.Since(base)) }
+	e := newLogEnvClock(t, NewFixture(t, 1, 1), clock)
+	issue := func() (*wire.IssueResponse, error) {
+		req := e.request()
+		req.CreatedAt = uint64(clock().Unix()) //nolint:gosec // G115: a time after 1970
+		req.Evidence = SignRequest(e.t, req, e.fx.Admins...)
+		return e.s.Issue(context.Background(), Peer{UID: 1000}, req)
+	}
 	ro, err := signerdb.OpenReadOnly(e.dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -443,7 +452,7 @@ func TestCheckLogAgainstLiveSigner(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		for range 60 {
-			if _, err := e.issue(); err != nil {
+			if _, err := issue(); err != nil {
 				done <- err
 				return
 			}
