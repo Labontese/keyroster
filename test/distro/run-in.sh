@@ -31,8 +31,9 @@ elif command -v pacman >/dev/null 2>&1; then
 	# same package set on every run, with pacman's signature checks left
 	# on (the image's own archlinux-keyring verifies them). The sync is
 	# tried at most three times, 30 s apart, over the same snapshot: on
-	# 2026-11-22 one stalled fetch failed the lane for hours, and a retry
-	# rides out a stall, not an outage.
+	# 2026-11-22 the archive was down for hours, and when it answered
+	# again one stalled fetch failed the first re-run; a retry rides out a
+	# stall, not an outage.
 	snapshot=$(date -u -r /etc/pacman.d/mirrorlist +%Y/%m/%d)
 	# shellcheck disable=SC2016 # $repo and $arch are pacman's own variables
 	printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' "$snapshot" >/etc/pacman.d/mirrorlist
