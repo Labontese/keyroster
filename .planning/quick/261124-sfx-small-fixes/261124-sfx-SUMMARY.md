@@ -49,7 +49,7 @@ metrics:
   completed: 2026-11-24
 actuals:
   tasks: 5
-  commits: "17 (16 measured with git rev-list before the commit that records the fix round, plus that commit)"
+  commits: "18 (17 measured with git rev-list before the commit that lists the re-poll leaf's gap bound under load as unverified, plus that commit)"
 plan_head_before: 2d61b55d6e7317d4658a96447f5e759a730131ba
 plan_head_after: 0fdb8fc58bb69daee4fa9097023fa3be0e5eb230
 ---
@@ -293,6 +293,7 @@ The table the fix round started from ("Pre-merge review") put `revokeCLIRetry` a
 - Item 1: what GitHub does with an approval when a rebase changes the diff, or leaves it unchanged. The observation of 2026-11-22 is the only evidence.
 - Item 2: a real stall of the archive. Only the scratch copy of the loop ran; the green path is the CI lane.
 - Item 6: a wall clock that steps back. It cannot be produced on demand; the clock is monotonic by construction.
+- Item 6: that the re-poll leaf's gap bound holds under the load that failed the old bound. The gap was 16.6 ms to 21.5 ms in 50 unloaded runs; a stall of 900 ms or more that lands between the two arrivals would still fail the leaf.
 - Item 7: that a refused command of N admin requests now recovers at its first retry after N seconds. No test empties the bucket; CI showed only a refused command of two requests recovering after 3 s.
 
 ## Gates
@@ -316,7 +317,7 @@ The table the fix round started from ("Pre-merge review") put `revokeCLIRetry` a
 
 ## Commits
 
-All seventeen are signed by keyroster-bot as committer and authored as the owner. Before each, `git diff --cached` of every staged file was read whole and the staged-lines scan exited 0.
+All eighteen are signed by keyroster-bot as committer and authored as the owner. Before each, `git diff --cached` of every staged file was read whole and the staged-lines scan exited 0.
 
 - `docs(quick-261124-sfx): plan ten small fixes` (the PLAN)
 - `test(server): look for another user's name outside the page's fingerprints`
@@ -335,6 +336,7 @@ All seventeen are signed by keyroster-bot as committer and authored as the owner
 - `test(signer): stamp the live-signer test's requests with its own clock` (5cde560)
 - `ci(distro): correct the comment on the Arch lane's retry` (0fdb8fc)
 - `docs(quick-261124-sfx): record the review's fix round` (this SUMMARY)
+- `docs(quick-261124-sfx): list the re-poll leaf's gap bound under load as unverified` (this SUMMARY)
 
 ## Deviations from Plan
 
