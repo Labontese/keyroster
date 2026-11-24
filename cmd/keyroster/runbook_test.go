@@ -1298,8 +1298,7 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"checks the answer against the root-verified trust bundle before it writes the certificate: it is a user certificate",
 				"An account whose file holds no line of a host CA the trust bundle trusts, as after a drain it missed, gets no line, and 0 unless the refresh fails for another reason: only an admin's `keyroster known-hosts sync` as that account gives it one again",
 				// The account the renewal runs as, what exit 0 and 4 print, what exit 4
-				// calls for, a run without $HOME, and what the step also does (03-12g,
-				// pre-merge review).
+				// calls for, and what the step also does (03-12g, pre-merge review).
 				"for the OS account it runs as: run it as the account whose ssh reads the file",
 				"0 when the certificate was written or is not due and the host CA lines were refreshed or needed no change",
 				"the reason is the `Warning: host trust not refreshed in` line on stderr; the certificate is kept",
@@ -1309,6 +1308,11 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"so that a server cannot later serve an older bundle unnoticed",
 				"It also removes the lines of host CAs the bundle no longer trusts, as every command that verifies the bundle does",
 				"It makes no request of its own for this",
+				// Which accounts the $HOME case of exit 4 reaches: one the CLI can
+				// look up, not one known only through NSS or LDAP, and not Windows
+				// (the owner's decision of 2026-11-24, pre-merge review).
+				"for one known only through NSS or LDAP (enroll-user.md, item 9) a run without `$HOME` finds no home, changes nothing and gets 0",
+				"on Windows the home is `%USERPROFILE%` and is compared with no account database",
 			}, []string{
 				"before a host-CA rotation",
 				// The wordings before keyroster machine renew refreshed host CA lines (03-12g).
