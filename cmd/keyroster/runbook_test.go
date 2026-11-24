@@ -1285,7 +1285,7 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"every run, renewed or not due, adds to it the line of each active or next host CA of the root-verified trust bundle that the file lacks",
 				"and records that bundle's version in `host-trust.json`, as a refresh does",
 				"prints one line on stderr when it adds a line and nothing when nothing changed",
-				"and `--no-known-hosts` turns it off",
+				"and `--no-known-hosts` turns off the adding and the version record, not the removal",
 				"It never adds a host name, never creates the file and never writes `keyroster_revoked_hosts.krl` or `keyroster_ssh_config`",
 				"the file's first version, new host names and revocations reach the account only when an admin runs `keyroster known-hosts sync` as that account",
 				"Run in CI: `TestMachineHostTrust`, `TestAddHostCALines` and, end to end, `TestHostCARotation`",
@@ -1293,7 +1293,7 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"4 when the certificate was written or is not due but the host CA lines could not be refreshed",
 				"1 for any refusal or failure of the renewal itself, whatever happened to the host CA lines",
 				"An account whose home holds no `~/.ssh/keyroster_known_hosts`, or a run with `--no-known-hosts`, never gets 4",
-				"one whose home holds it gets 4 on every run while the server serves an older trust bundle than the account verified before, while its managed file is damaged or its state is missing, damaged or of another installation, or while `$HOME` is set and is not the account's home",
+				"one whose home holds it gets 4 on every run while the server serves an older trust bundle than the account verified before, while its managed file is damaged or its state is missing, damaged or of another installation, or while `$HOME` is unset, empty or not the account's home (such a run changes no host CA line)",
 				"The end-to-end run renews from an account that also holds an administrator's configuration; the command-level tests also renew from a configuration without a user",
 				"checks the answer against the root-verified trust bundle before it writes the certificate: it is a user certificate",
 				"An account whose file holds no line of a host CA the trust bundle trusts, as after a drain it missed, gets no line, and 0 unless the refresh fails for another reason: only an admin's `keyroster known-hosts sync` as that account gives it one again",
@@ -1303,7 +1303,6 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"for the OS account it runs as: run it as the account whose ssh reads the file",
 				"0 when the certificate was written or is not due and the host CA lines were refreshed or needed no change",
 				"the reason is the `Warning: host trust not refreshed in` line on stderr; the certificate is kept",
-				"and neither does a run without `$HOME` (unset or empty), which changes no host CA line even when the account's home holds the file",
 				"item 7 for an older trust bundle, item 8 for a damaged file or a state that is missing, damaged or of another installation (start over, then an admin's `keyroster known-hosts sync` as that account), and item 9 for `$HOME`",
 				// The pointer sentence's lead-in (03-12g, pre-merge review).
 				"What to do is in [enroll-user.md](enroll-user.md), \"Trusting hosts without TOFU\": item 7",
@@ -1318,6 +1317,11 @@ func TestCARotationSwitchRunbook(t *testing.T) {
 				"is refreshed only by an admin who runs",
 				"0 when the certificate was written or is not due, 1",
 				"before it writes anything",
+				// The wordings before a run without $HOME got 4 and before the
+				// sentence said what --no-known-hosts turns off (the owner's
+				// decision of 2026-11-24).
+				"turns it off",
+				"neither does a run without `$HOME`",
 			}},
 			{"signer-install.md \"Install a CA switch\"", switchTrust, []string{
 				"for the host role by the clients, and by the agents, which accept host certificates signed by it until then",
