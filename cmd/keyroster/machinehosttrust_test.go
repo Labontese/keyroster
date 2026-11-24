@@ -519,10 +519,11 @@ func mhtHook(t *testing.T, hook func()) {
 // the file, on a renewed, not-due or refused run, unless --no-known-hosts
 // is given; it never creates a file and never writes the KRL or the ssh
 // config; and it exits 4 when the certificate is in place but host trust
-// was not refreshed, 1 for a refused renewal whatever it did. Every test
-// that makes userSSHDir return an error other than errNoHomeDir also
-// replaces accountHome with a temporary directory, so no test looks at the
-// real home's .ssh.
+// was not refreshed, 1 for a refused renewal whatever it did. Every error
+// of userSSHDir but a *homeLookupWarning sends the step to accountHome:
+// TestMain makes that lookup fail, and a test that needs an account home
+// installs one with mhtUseAccountHome, so no test looks at the real home's
+// .ssh.
 func TestMachineHostTrust(t *testing.T) {
 	warnPrefix := "Warning: host trust not refreshed in "
 	exitLine := "keyroster machine: the machine certificate is in place, but host trust was not refreshed, as reported above"
