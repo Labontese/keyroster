@@ -118,10 +118,10 @@ func addHostCALines(data []byte, trusted, issuing []trust.CAEntry) (out []byte, 
 // (03-12g), run once right after the trust bundle b verified, on the
 // client's clock now. It returns nil, or an exitError of
 // machineHostTrustExit after one warning line on stderr. In this order:
-//   - ~/.ssh: no home directory is nil; a failed account lookup uses the
-//     directory it carries; a $HOME that is not the account's home fails
-//     only when the account home's .ssh holds the file, and is nil
-//     otherwise;
+//   - ~/.ssh: a failed account lookup uses the directory it carries; no
+//     $HOME, or a $HOME that is not the account's home, fails only when
+//     the home the account database names, an absolute path, holds the
+//     file in its .ssh, and is nil otherwise;
 //   - the file: absent is nil; anything but a regular file, a file that
 //     cannot be read or changed while it was read, or one over
 //     maxNarrowFile fails;
@@ -151,12 +151,12 @@ func machineHostTrust(b *trust.Bundle, now time.Time, stderr io.Writer) error {
 	if errors.As(err, &lw) {
 		dir, err = lw.dir, nil
 	}
-	switch {
-	case errors.Is(err, errNoHomeDir):
-		return nil
-	case err != nil:
+	if err != nil {
+		// No $HOME, or a $HOME that is not the account's home: ssh reads
+		// the account database's home, so the step looks there. A home
+		// that is no absolute path is no home.
 		home, herr := accountHome()
-		if herr != nil {
+		if herr != nil || !filepath.IsAbs(home) {
 			return nil
 		}
 		p := filepath.Join(home, ".ssh", hostTrustKnownHosts)
