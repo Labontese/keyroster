@@ -261,26 +261,47 @@ func TestFetch(t *testing.T) {
 		}
 	})
 	t.Run("more_repolls_immediately", func(t *testing.T) {
-		var n atomic.Int32
+		var (
+			n        atomic.Int32
+			mu       sync.Mutex
+			arrivals []time.Time
+		)
 		ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			arrivals = append(arrivals, time.Now())
+			mu.Unlock()
 			if n.Add(1) == 1 {
 				_, _ = w.Write([]byte(`{"bundles":[{"version":1,"bundle":"YQ==","bundle_sigs":"YQ==","policy_version":1,"policy":"YQ==","policy_sigs":"YQ=="}],"directories":[],"krl":null,"more":true}`))
 				return
 			}
 			_, _ = w.Write([]byte(`{"bundles":[],"directories":[{"version":1,"directory":"YQ==","sigs":"YQ=="}],"krl":null,"more":false}`))
 		})
-		// The fetcher polls every hour: a sleep of one poll interval
-		// inside Once would take at least 50 minutes (NextPoll's jitter
-		// is a sixth of the interval), so a bound of a minute keeps such
-		// a sleep caught while seconds of load under -race pass.
+		// Two bounds. The gap between the two requests' arrivals holds
+		// only the spooling of the first answer and the second request,
+		// so its bound of 900 ms catches a wait of about a second or more
+		// between the rounds. The fetcher polls every hour, and the
+		// minute bound on the whole Once stays as the limit for the call:
+		// a sleep of one poll interval inside Once would take at least 50
+		// minutes (NextPoll's jitter is a sixth of the interval).
 		ts.f.cfg.Poll = time.Hour
 		start := time.Now()
 		if err := ts.f.Once(t.Context()); err != nil {
 			t.Fatal(err)
 		}
+		elapsed := time.Since(start)
+		mu.Lock()
+		got := slices.Clone(arrivals)
+		mu.Unlock()
+		if len(got) == 2 {
+			gap := got[1].Sub(got[0])
+			t.Logf("gap between the two requests' arrivals: %s", gap)
+			if gap >= 900*time.Millisecond {
+				t.Fatalf("the second request arrived %s after the first, want below 900 ms: a re-poll after more: true must be immediate", gap)
+			}
+		}
 		reqs := ts.requests()
-		if len(reqs) != 2 || reqs[0] != "GET "+serverclient.AgentStatePath || reqs[1] != "GET "+serverclient.AgentStatePath+"?bundle=1" || time.Since(start) > time.Minute {
-			t.Fatalf("requests %q in %s, want two at once, the second with the new bundle version", reqs, time.Since(start))
+		if len(reqs) != 2 || len(got) != 2 || reqs[0] != "GET "+serverclient.AgentStatePath || reqs[1] != "GET "+serverclient.AgentStatePath+"?bundle=1" || elapsed > time.Minute {
+			t.Fatalf("requests %q (%d arrivals) in %s, want two at once, the second with the new bundle version", reqs, len(got), elapsed)
 		}
 		// F02 (03-08f): the bundle item's policy signatures are spooled per
 		// bundle too.
