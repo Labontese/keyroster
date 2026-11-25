@@ -296,6 +296,11 @@ func htCALines(t *testing.T, kh string) map[string][]string {
 		if len(f) < 4 {
 			t.Fatalf("CA line %q", l)
 		}
+		// A second line of one key would replace the first in the map
+		// and hide it from every caller.
+		if _, dup := out[f[2]+" "+f[3]]; dup {
+			t.Fatalf("a second CA line for key %s %s: %q", f[2], f[3], l)
+		}
 		out[f[2]+" "+f[3]] = strings.Split(f[1], ",")
 	}
 	return out
@@ -590,8 +595,19 @@ func TestKnownHosts(t *testing.T) {
 		if got := htHostLine(f.file(t, hostTrustSSHConfig)); !slices.Equal(got, []string{"web1"}) {
 			t.Fatalf("Host line %q, want the principal web1 only", got)
 		}
-		if strings.Contains(f.file(t, hostTrustKnownHosts), "srv1") {
-			t.Fatal("the entry name reached known_hosts")
+		// The names field of the CA line is where an entry name would
+		// stand. The file's lines that are neither empty nor comments are
+		// compared whole with the one line the writer must write, so no
+		// short string is looked for inside the random host CA key, and
+		// a second line or another kind of line fails as well.
+		var got []string
+		for _, l := range strings.Split(f.file(t, hostTrustKnownHosts), "\n") {
+			if l != "" && !strings.HasPrefix(l, "#") {
+				got = append(got, l)
+			}
+		}
+		if want := strings.TrimSuffix(hostCALine("web1", f.bundle.CAs[1]), "\n"); !slices.Equal(got, []string{want}) {
+			t.Fatalf("known_hosts lines %q, want only %q", got, want)
 		}
 	})
 	t.Run("names_sorted_unique_across_entries", func(t *testing.T) {

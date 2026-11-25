@@ -79,7 +79,9 @@ func TestSession(t *testing.T) {
 		text := e.requireAccount(t, "alice", cookie, "alice", "active", "role:dev", "7200 s (2h0m0s)", "Directory version",
 			fingerprint(e.alice), fingerprint(e.alice2), "synced", "device-bound", "EdDSA", "ES256",
 			"Read only. Ask an admin to change roles or credentials.", `action="/logout"`)
-		if strings.Contains(text, "bob") || strings.Contains(text, fingerprint(e.bob)) {
+		// alice's two fingerprints are random base64 and can hold "bob"
+		// themselves: the name is looked for in the rest of the page.
+		if rest := strings.NewReplacer(fingerprint(e.alice), "", fingerprint(e.alice2), "").Replace(text); strings.Contains(rest, "bob") || strings.Contains(text, fingerprint(e.bob)) {
 			t.Fatalf("alice's account page shows bob's data:\n%s", text)
 		}
 		rec := e.account(cookie)

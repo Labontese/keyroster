@@ -932,11 +932,13 @@ particular:
 - **The management key file is shredded, not proven erased.** `shred`
   does not reliably erase a file on an SSD or a copy-on-write
   filesystem.
-- **The location column is not logged.** A database edit of a PIV
-  generation's location is stopped by the fingerprint checks before any
-  card write, but an edit that points at any slot that does not hold the
-  draining key makes the signer's check answer "not held", and audit
-  cannot show which slot a generation used.
+- **The location column is not logged.** After a database edit of a PIV
+  generation's location, retire-key still overwrites a slot only when its
+  key has the draining fingerprint and prepare still generates only into
+  an empty slot, so no other key is written over, but for generation 2 or
+  later an edit that points at another generation slot, one that does not
+  hold the draining key, makes the signer's check answer "not held", and
+  audit cannot show which slot a generation used.
 
 ## What changes for nobody
 

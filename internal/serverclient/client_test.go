@@ -1160,9 +1160,12 @@ func TestConnectErrorTransport(t *testing.T) {
 	})
 
 	t.Run("json_errors_in_own_words", func(t *testing.T) {
+		// Each body's offset is the bytes encoding/json has read at the
+		// error: 6 of `{"a":1`, the 4000 zeros and the 4 of `e999` make
+		// 4010; 5 of `{"a":`, the 4000 spaces and the `x` make 4006.
 		for body, want := range map[string]string{
-			`{"a":1` + strings.Repeat("0", 4000) + `e999}`: "decode: the response has a JSON value of the wrong type (at byte ",
-			`{"a":` + strings.Repeat(" ", 4000) + `x}`:     "decode: the response is not valid JSON (at byte ",
+			`{"a":1` + strings.Repeat("0", 4000) + `e999}`: "decode: the response has a JSON value of the wrong type (at byte 4010)",
+			`{"a":` + strings.Repeat(" ", 4000) + `x}`:     "decode: the response is not valid JSON (at byte 4006)",
 		} {
 			url := startTLS(t, r.validLeaf(t), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set(CustodyHeader, agentCustody)
@@ -1173,12 +1176,15 @@ func TestConnectErrorTransport(t *testing.T) {
 				t.Errorf("body %.20q... accepted", body)
 				continue
 			}
-			// The message begins with the request's URL, whose port is
-			// the test listener's and can hold "000" itself (40005,
-			// 51000): the peer's zeros are looked for in the rest.
-			msg := err.Error()
-			if !strings.Contains(msg, want) || strings.Contains(msg, "peer text") || strings.Contains(strings.ReplaceAll(msg, url, ""), "000") {
-				t.Errorf("body %.20q...: err = %.300q, want %q in the CLI's own words", body, msg, want)
+			// The message is compared whole: the request's URL and
+			// path, the CLI's own words, the offset and ")". That
+			// refuses any of the peer's text anywhere in it: its zeros
+			// (also as digits after the offset), a run of its spaces,
+			// encoding/json's text ("invalid character 'x' ...") and a
+			// "peer text" excerpt. The URL is the test's own, so a port
+			// that holds "000" (40005, 51000) is no peer text.
+			if msg := err.Error(); msg != url+"/healthz: "+want {
+				t.Errorf("body %.20q...: err = %.300q, want %q", body, msg, url+"/healthz: "+want)
 			}
 		}
 	})

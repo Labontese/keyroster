@@ -73,8 +73,14 @@ func TestRolesHostPrincipalsEndToEnd(t *testing.T) {
 		t.Helper()
 		code, out, errOut := env.keyroster(t, admin, "", args...)
 		for try := 0; try < 5 && code != 0 && strings.Contains(errOut, "the server is rate-limiting requests from this address"); try++ {
-			t.Logf("keyroster %s was rate-limited; running it again in 2 s", strings.Join(args, " "))
-			time.Sleep(2 * time.Second)
+			// The admin routes share one bucket per client address that
+			// refills one request a second, and a refused request spends
+			// none (internal/server/ratelimit.go): a wait of N s lets a
+			// command of N admin requests through at its first retry.
+			// The largest command run through this helper is user approve,
+			// three (GET pending credentials, GET and POST directory): 3 s.
+			t.Logf("keyroster %s was rate-limited; running it again in 3 s", strings.Join(args, " "))
+			time.Sleep(3 * time.Second)
 			code, out, errOut = env.keyroster(t, admin, "", args...)
 		}
 		if code != 0 {

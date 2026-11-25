@@ -40,6 +40,12 @@ func TestDirectoryHostsEndToEnd(t *testing.T) {
 		t.Helper()
 		code, out, errOut := env.keyroster(t, admin, "", args...)
 		for try := 0; try < 5 && code != 0 && strings.Contains(errOut, "the server is rate-limiting requests from this address"); try++ {
+			// The admin routes share one bucket per client address that
+			// refills one request a second, and a refused request spends
+			// none (internal/server/ratelimit.go): a wait of N s lets a
+			// command of N admin requests through at its first retry.
+			// The largest command run through this helper is a directory
+			// change, two (GET and POST directory): 2 s.
 			time.Sleep(2 * time.Second)
 			code, out, errOut = env.keyroster(t, admin, "", args...)
 		}

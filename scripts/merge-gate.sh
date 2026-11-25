@@ -11,8 +11,9 @@
 #      a rebase in progress, or this file is not origin/main's copy
 #   2  owner approval pending (the PR URL is printed)
 #   3  main moved: the branch was rebased onto origin/main with signed
-#      commits, force-pushed with lease and is green again; GitHub dismissed
-#      the approval, so the owner must approve the new head
+#      commits, force-pushed with lease and is green again; run the script
+#      again: it exits 2 when the owner must approve the new head, and
+#      GitHub has kept an approval when a rebase left the diff unchanged
 #   4  rebase conflict; the rebase is left in progress on BRANCH for manual
 #      resolution, so the checkout cannot return to main (the message says
 #      how to resume; the script refuses to run until the rebase is done)
@@ -247,7 +248,7 @@ rebase_onto_main() {
 	push_rebased "$branch" "$remote_sha" || rc=$?
 	if [ "$rc" -eq 0 ]; then
 		# Before the switch, so a failed switch still reports the push.
-		echo "rebased onto main: owner re-approval needed"
+		echo "rebased onto main and green: run the gate again (it exits 2 if the owner must approve the new head)"
 		echo "$url"
 	fi
 	back_to_main || return 1

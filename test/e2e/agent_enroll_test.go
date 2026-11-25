@@ -237,7 +237,14 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 		t.Helper()
 		code, out, errOut := env.keyroster(t, admin, "", args...)
 		for try := 0; try < 5 && code != 0 && strings.Contains(errOut, "the server is rate-limiting requests from this address"); try++ {
-			time.Sleep(2 * time.Second)
+			// The admin routes share one bucket per client address that
+			// refills one request a second, and a refused request spends
+			// none (internal/server/ratelimit.go): a wait of N s lets a
+			// command of N admin requests through at its first retry.
+			// The largest command run through this helper is host remove,
+			// four (GET directory, a sweep of the host's certificates, POST
+			// directory, a second sweep): 4 s.
+			time.Sleep(4 * time.Second)
 			code, out, errOut = env.keyroster(t, admin, "", args...)
 		}
 		if code != 0 {
@@ -426,11 +433,13 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	// item 7), and fails with the last answer.
 	var forgot string
 	// Each attempt spends three admin requests (host pending, host status,
-	// the forget), so it waits 2 s; a refusal of the admin limiter is
-	// retried like host_removal_not_applied. So is host_swap_pending
-	// (03-08c): the revocation above makes the removed host swap in the new
-	// KRL, and a forget waits until a heartbeat shows that swap committed.
-	for deadline := time.Now().Add(2*time.Second + 30*time.Second); ; time.Sleep(2 * time.Second) {
+	// the forget); a refused request spends none and the bucket refills one
+	// a second (internal/server/ratelimit.go), so it waits 3 s and a refusal
+	// of the admin limiter is retried like host_removal_not_applied. So is
+	// host_swap_pending (03-08c): the revocation above makes the removed
+	// host swap in the new KRL, and a forget waits until a heartbeat shows
+	// that swap committed.
+	for deadline := time.Now().Add(2*time.Second + 30*time.Second); ; time.Sleep(3 * time.Second) {
 		code, out, errOut := env.keyroster(t, admin, "", "host", "forget", "web1")
 		if code == 0 {
 			forgot = out

@@ -36,13 +36,20 @@ func TestAgentReenrollEndToEnd(t *testing.T) {
 	login := currentUser(t)
 	admin := adminCLI(t, env, env.Signer.AdminFingerprint)
 	// The admin limiter allows a burst of 20 and 60 a minute per address;
-	// every keyroster command spends one to three. A command it refused
+	// every keyroster command spends one to four. A command it refused
 	// is retried once the bucket refilled.
 	run := func(args ...string) (int, string, string) {
 		t.Helper()
 		code, out, errOut := env.keyroster(t, admin, "", args...)
 		for try := 0; try < 10 && code != 0 && strings.Contains(errOut, "the server is rate-limiting requests from this address"); try++ {
-			time.Sleep(3 * time.Second)
+			// The admin routes share one bucket per client address that
+			// refills one request a second, and a refused request spends
+			// none (internal/server/ratelimit.go): a wait of N s lets a
+			// command of N admin requests through at its first retry.
+			// The largest command run through this helper is host remove,
+			// four (GET directory, a sweep of the host's certificates, POST
+			// directory, a second sweep): 4 s.
+			time.Sleep(4 * time.Second)
 			code, out, errOut = env.keyroster(t, admin, "", args...)
 		}
 		return code, out, errOut

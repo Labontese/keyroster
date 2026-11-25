@@ -477,15 +477,16 @@ With the tpm backend, `prepare` creates the key inside the TPM with noDA
 and writes `tpm/<role>-g<N>.tpmkey` and `tpm/<role>-g<N>.auth` in the
 state directory (mode 0600; generation 1 stays `tpm/<role>.tpmkey` and
 `tpm/<role>.auth`). After a restore, a pair of that name that no
-generation row names is a key from a prepare that the restore lost, and
-doctor warns about it as `unrecorded_generation_file`. Destroy it unless
-you placed it for a `--key` prepare, but only after the restore section
-has run to its end, because where that section stops on a lost
-generation the pair may hold that generation's key. doctor's
-`unrecorded_generation_file` warning and prepare's refusal over an
-existing file, with the software and the tpm backend alike, say this in
-short: destroy such a file only once the restore section has run to its
-end, and keep it where that section stops on a lost generation.
+generation row names (doctor warns `unrecorded_generation_file`) is, when
+no prepare is running and no `--key` prepare of yours is waiting for it, a
+key from a prepare that the restore lost: destroy it unless you placed it
+for a `--key` prepare, but only after the restore section has run to its
+end, because where that section stops on a lost generation the pair may
+hold that generation's key, and never record a lost key with `--key`.
+doctor's `unrecorded_generation_file` warning and prepare's refusal over
+an existing file, with the software and the tpm backend alike, say this
+in short: destroy such a file only once the restore section has run to
+its end, and keep it where that section stops on a lost generation.
 
 With the piv backend, `prepare` generates the key on the card in the
 first slot in 0x87 to 0x95 that no generation row records, and prints
