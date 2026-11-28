@@ -192,3 +192,19 @@ All runs went through `scripts/linux.sh` (WSL, Linux amd64).
 ## Self-Check: PASSED
 
 The five changed files and this task's PLAN exist on the branch, the five commits above are ancestors of HEAD, and the two REDs, six mutants and gates above were read from their own runs' output.
+
+## Proofs of the three later commits
+
+Added after the merge of the task's pull request, in a pull request of its own: the "Commits" list above names 8d21201, 18ed468 and 12953aa without their proofs. All runs were local, through `scripts/linux.sh`, on the branch before its rebase, and the file and line numbers are that branch's.
+
+- **Checked before the runbook's third sentence was written:**
+  - `accountHome` is `user.LookupId(strconv.Itoa(os.Getuid()))` (cmd/keyroster/knownhosts.go:99-105).
+  - With no `$HOME`, a failed lookup returns nil in step 1 of `machineHostTrust`, and the narrowing returns silently on `errNoHomeDir` (cmd/keyroster/narrow.go:115-116). Such a run changes nothing and exits 0.
+  - `defaultSSHDir` returns on windows (knownhosts.go:134-136) before the account lookup (:137).
+  - docs/runbooks/enroll-user.md, item 9 (:762-764), says that the CGO_ENABLED=0 Linux release's `os/user` reads only `/etc/passwd`.
+  - `loadConfig` (cmd/keyroster/machinerenew.go:106) runs before the step (:121-124).
+- **RED of the pins** (18ed468), from a detached worktree of that commit, on the runbook without the sentence: `TestCARotationSwitchRunbook` and its `host_ca_gate` fail with exactly two messages, `runbook_test.go:1338: ... lacks`, one for each of the two new phrases. `TestHostTrustRunbooks` passes.
+- **Two document mutants** of docs/runbooks/machine-identities.md, each one exact replacement, run with the two runbook tests and restored with `git checkout --`. The file's sha256 before and after each: `977f3577097cbb8e578a636478fbdf072c51bfb41a4420ae73ff4e79309f3848`.
+  - Q7: `gets 0` becomes `gets 4` on the line of the first phrase. `--- FAIL: TestCARotationSwitchRunbook/host_ca_gate`, with `runbook_test.go:1338: ... lacks` that phrase.
+  - Q8: `no account database` becomes `the account database` on the line of the second phrase. The same leaf fails, with `lacks` that phrase.
+- **Narrow runs on the tree of 12953aa:** both runbook tests ok; `gofmt -l .` clean; `go vet ./cmd/keyroster/` exit 0; `golangci-lint run ./...` for linux, windows and darwin, `0 issues.` three times. The full gate was not run again for these three commits; the pull request's checks ran on the final head.
