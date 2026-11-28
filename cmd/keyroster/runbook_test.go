@@ -1847,6 +1847,62 @@ func TestCARotationBackendSteps(t *testing.T) {
 		}
 		holds(t, "piv.md step 5", win, []string{
 			"on every exit status", "only after the shred", "copy-on-write", "after a refused prepare", "did not run to its end",
+			"Step 3 writes both files the same way",
+		})
+		// Step 3's root form is no longer an exception that step 5 excuses.
+		if strings.Contains(normalizeSpace(win), "for the first setup only") {
+			t.Error(`piv.md step 5 still says that step 3's root form is "for the first setup only"`)
+		}
+	})
+	t.Run("piv_step_3_files", func(t *testing.T) {
+		data := string(readTestFile(t, filepath.Join("..", "..", "docs", "backends", "piv.md")))
+		// Step 1 ends with the removal of the key file from the
+		// administrator's machine; step 3 pastes the key and reads no file.
+		step1 := window(t, data, &signingSection{id: "step_1", file: "piv.md", section: "Setup",
+			start: "### 1. Prepare the YubiKey: no default credentials", end: "### 2."})
+		holds(t, "piv.md step 1", step1, []string{"remove its file from this machine"})
+		hasShred := false
+		for _, l := range strings.Split(step1, "\n") {
+			if strings.TrimSpace(l) == "shred -u mgmt-key" {
+				hasShred = true
+			}
+		}
+		if !hasShred {
+			t.Error("piv.md step 1 lacks the line `shred -u mgmt-key`")
+		}
+		// Step 3 creates the directory as root and writes both files as the
+		// signer's user, in the form of step 5's block.
+		step3 := window(t, data, &signingSection{id: "step_3", file: "piv.md", section: "Setup",
+			start: "### 3. Store the PIN and management key for the signer", end: "### 4. Initialise the CA"})
+		have := map[string]bool{}
+		dirs := 0
+		for _, l := range strings.Split(step3, "\n") {
+			l = strings.TrimSpace(l)
+			have[l] = true
+			if strings.HasPrefix(l, "sudo install -d ") {
+				dirs++
+			} else if strings.HasPrefix(l, "sudo install") {
+				t.Errorf("piv.md step 3 installs a file as root below the signer's directory: %s", l)
+			}
+			if strings.Contains(l, "sudoedit") {
+				t.Errorf("piv.md step 3 edits a file as root below the signer's directory: %s", l)
+			}
+		}
+		if dirs != 1 {
+			t.Errorf("piv.md step 3 has %d lines that begin `sudo install -d `, want 1", dirs)
+		}
+		for _, want := range []string{
+			`sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh /etc/keyroster-signer/piv/pin`,
+			`sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh /etc/keyroster-signer/piv/mgmt-key`,
+		} {
+			if !have[want] {
+				t.Errorf("piv.md step 3 lacks the line %q", want)
+			}
+		}
+		holds(t, "piv.md step 3", step3, []string{
+			"It does not check the owner", "Root creates only the directory", "`set -C` refuses a file that already exists",
+			"Nothing is written as root below the signer's directory",
+			"no file with the key lies in a working directory of the signer host",
 		})
 	})
 	t.Run("piv_generation_slots_rule", func(t *testing.T) {
