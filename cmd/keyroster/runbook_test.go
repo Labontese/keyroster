@@ -1641,17 +1641,40 @@ func TestMoveAsideSentence(t *testing.T) {
 	}
 }
 
+// pivSecretEntryScript is the script that steps 3 and 5 of
+// docs/backends/piv.md carry word for word, in a `sudo runuser -u
+// keyroster-signer -- sh -c '<script>' sh <path>` line, to write a secret
+// (the PIN, the management key) into a new file as the signer's user. It
+// refuses a path that already exists, whatever it is, before it asks; turns
+// the terminal's echo off and back on again, also on a signal; reads the
+// secret twice; and writes the file, with mode 0600 from umask 077, only
+// when both entries are equal and not empty. Anything else prints `nothing
+// written` and exits 1. It holds no apostrophe, so that it stays inside the
+// single quotes of those lines. TestPIVSecretEntryScript runs it without a
+// terminal; the entry under a terminal is measured by hand (UNVERIFIED in CI).
+const pivSecretEntryScript = `umask 077 && set -C && [ ! -e "$1" ] && [ ! -L "$1" ] && trap "stty echo" EXIT && trap "exit 1" HUP INT TERM && stty -echo && printf "enter: " >&2 && IFS= read -r a && printf "\nagain: " >&2 && IFS= read -r b && printf "\n" >&2 && [ -n "$a" ] && [ "$a" = "$b" ] && printf "%s\n" "$a" >"$1" && printf "written: %s\n" "$1" >&2 || { printf "nothing written\n" >&2; exit 1; }` //nolint:gosec // G101: a shell script, not a credential
+
+// pivEntryLine is one of the entry lines of piv.md steps 3 and 5: the script
+// run as the signer's user on path.
+func pivEntryLine(path string) string {
+	return "sudo runuser -u keyroster-signer -- sh -c '" + pivSecretEntryScript + "' sh " + path
+}
+
+// pivInstallDirLine is the one line of piv.md step 3 that root runs: it
+// creates the signer's directory.
+const pivInstallDirLine = "sudo install -d -o keyroster-signer -g keyroster-signer -m 0700 /etc/keyroster-signer/piv"
+
 // pivMgmtKeyBlock is the management key's round trip of docs/backends/piv.md
 // step 5, word for word, as five consecutive lines of one fenced block: it
 // stops the signer, places the key at the stored path as the signer's
 // user, runs one ca-rotate command, shreds the key on every exit status and
 // starts the signer only after the shred and only when the command exited 0
-// (03-12f).
+// (03-12f). The fourth line enters the key twice without echo.
 var pivMgmtKeyBlock = []string{
 	"sudo systemctl stop keyroster-signer.service",
 	"K=/etc/keyroster-signer/piv/mgmt-key",
 	`sudo runuser -u keyroster-signer -- rm -f "$K"`,
-	`sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$K"`,
+	pivEntryLine(`"$K"`),
 	`sudo runuser -u keyroster-signer -- keyroster-signer ca-rotate <arguments> --state-dir /var/lib/keyroster-signer; rc=$?; sudo runuser -u keyroster-signer -- shred -u "$K"; test "$rc" -eq 0 && sudo systemctl start keyroster-signer.service`,
 }
 
@@ -1847,6 +1870,79 @@ func TestCARotationBackendSteps(t *testing.T) {
 		}
 		holds(t, "piv.md step 5", win, []string{
 			"on every exit status", "only after the shred", "copy-on-write", "after a refused prepare", "did not run to its end",
+			"Step 3 writes both files the same way",
+			"The fourth line asks for the key twice", "only after the fourth has printed `written:`",
+		})
+		// Step 3's root form is no longer an exception that step 5 excuses,
+		// and the key is no longer typed into a bare cat.
+		flat := normalizeSpace(win)
+		for _, old := range []struct{ phrase, msg string }{
+			{"for the first setup only", `still says that step 3's root form is "for the first setup only"`},
+			{"the `cat` of the fourth line", "still tells the operator to paste the key into the `cat` of the fourth line"},
+			{"end it with Ctrl-D", "still tells the operator to end the entry with Ctrl-D"},
+		} {
+			if strings.Contains(flat, old.phrase) {
+				t.Errorf("piv.md step 5 %s", old.msg)
+			}
+		}
+	})
+	t.Run("piv_step_3_files", func(t *testing.T) {
+		data := string(readTestFile(t, filepath.Join("..", "..", "docs", "backends", "piv.md")))
+		// Step 1 ends with the removal of the key file from the
+		// administrator's machine; step 3 pastes the key and reads no file.
+		step1 := window(t, data, &signingSection{id: "step_1", file: "piv.md", section: "Setup",
+			start: "### 1. Prepare the YubiKey: no default credentials", end: "### 2."})
+		holds(t, "piv.md step 1", step1, []string{"remove its file from this machine"})
+		hasShred := false
+		for _, l := range strings.Split(step1, "\n") {
+			if strings.TrimSpace(l) == "shred -u mgmt-key" {
+				hasShred = true
+			}
+		}
+		if !hasShred {
+			t.Error("piv.md step 1 lacks the line `shred -u mgmt-key`")
+		}
+		// Step 3 creates the directory as root and enters both files as the
+		// signer's user with the echo-off script of step 5's block. Its one
+		// fenced block is compared whole, so that no other line (a root tee
+		// onto the key's path) and no other owner in the directory line passes.
+		step3 := window(t, data, &signingSection{id: "step_3", file: "piv.md", section: "Setup",
+			start: "### 3. Store the PIN and management key for the signer", end: "### 4. Initialise the CA"})
+		wantBlock := []string{
+			pivInstallDirLine,
+			pivEntryLine("/etc/keyroster-signer/piv/pin"),
+			pivEntryLine("/etc/keyroster-signer/piv/mgmt-key"),
+		}
+		blocks := fencedBlocks(step3)
+		if len(blocks) != 1 {
+			t.Errorf("piv.md step 3 holds %d fenced blocks, want 1", len(blocks))
+		} else {
+			var got []string
+			for _, l := range blocks[0] {
+				got = append(got, strings.TrimSpace(l))
+			}
+			if !slices.Equal(got, wantBlock) {
+				t.Errorf("piv.md step 3's block is\n%s\nwant exactly these lines, in order\n%s",
+					strings.Join(got, "\n"), strings.Join(wantBlock, "\n"))
+			}
+		}
+		for _, l := range strings.Split(step3, "\n") {
+			l = strings.TrimSpace(l)
+			if strings.HasPrefix(l, "sudo install") && l != pivInstallDirLine {
+				t.Errorf("piv.md step 3 installs a file as root below the signer's directory: %s", l)
+			}
+			if strings.Contains(l, "sudoedit") {
+				t.Errorf("piv.md step 3 edits a file as root below the signer's directory: %s", l)
+			}
+		}
+		holds(t, "piv.md step 3", step3, []string{
+			"It does not check the owner", "Root creates only the directory",
+			"The terminal's echo is off while it asks",
+			"The file is written only when both entries are equal and not empty",
+			"It refuses a path that already exists, whatever it is, before it asks",
+			"Nothing is written as root below the signer's directory",
+			"no file with the key lies in a working directory of the signer host",
+			"A recorder of the terminal's input still sees them",
 		})
 	})
 	t.Run("piv_generation_slots_rule", func(t *testing.T) {
