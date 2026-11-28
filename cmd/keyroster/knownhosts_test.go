@@ -34,10 +34,17 @@ import (
 // TestMain points ~/.ssh at an error for every test of this package
 // (03-09b), so no test, a TestLoginFlowFakeServer case included, can
 // touch a real home: a test that writes the host trust files installs a
-// temporary directory with useSSHDir.
+// temporary directory with useSSHDir. It also makes the account lookup
+// fail: without $HOME, keyroster machine renew looks for the managed
+// file in the home the account database names (03-12g, the owner's
+// decision of 2026-11-24), so a test that does not install an account
+// home with useHome or mhtUseAccountHome must not reach the real one.
 func TestMain(m *testing.M) {
 	userSSHDir = func() (string, error) {
 		return "", fmt.Errorf("%w: no ~/.ssh in this test (useSSHDir installs one)", errNoHomeDir)
+	}
+	accountHome = func() (string, error) {
+		return "", errors.New("no account home in this test (useHome or mhtUseAccountHome installs one)")
 	}
 	os.Exit(m.Run())
 }
