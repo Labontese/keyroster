@@ -205,7 +205,16 @@ ykman piv access change-management-key --algorithm AES256
 
 Do not use `--protect`: it stores a random management key on the card
 behind the PIN, and the signer needs the key in a file to generate keys.
-Keep the PIN, PUK and management key in your password manager.
+Keep the PIN, PUK and management key in your password manager. Once the
+management key is there, remove its file from this machine; step 3 pastes
+the key from the password manager and reads no file:
+
+```
+shred -u mgmt-key
+```
+
+What `shred` cannot promise on an SSD or a copy-on-write filesystem is in
+step 5.
 
 ### 2. Give the signer user, and only it, access to the card
 
@@ -231,17 +240,25 @@ are granted them.
 ### 3. Store the PIN and management key for the signer
 
 The signer reads the PIN and the management key only from files, never from
-the command line. Both files must be regular files (not symlinks) with mode
-0600 or stricter, owned by the signer user; the backend refuses anything
-wider:
+the command line. Both must be regular files (not symlinks) with mode 0600
+or stricter: the backend refuses a file with any group or other permission
+bit. It does not check the owner, so write the files as the signer's user,
+on the signer host. Root creates only the directory:
 
 ```
 sudo install -d -o keyroster-signer -g keyroster-signer -m 0700 /etc/keyroster-signer/piv
-sudo install -o keyroster-signer -g keyroster-signer -m 0600 /dev/null /etc/keyroster-signer/piv/pin
-sudo install -o keyroster-signer -g keyroster-signer -m 0600 mgmt-key /etc/keyroster-signer/piv/mgmt-key
-sudoedit /etc/keyroster-signer/piv/pin       # write the PIN, one line
-shred -u mgmt-key
+sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh /etc/keyroster-signer/piv/pin
+sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh /etc/keyroster-signer/piv/mgmt-key
 ```
+
+Type the PIN into the `cat` of the second line and paste the management
+key from the password manager into the `cat` of the third; end each with
+Enter and Ctrl-D. The terminal shows what you type. `set -C` refuses a file
+that already exists, so a second run changes nothing; to replace a file,
+remove it first as the signer's user
+(`sudo runuser -u keyroster-signer -- rm -f` and the file's path). Nothing
+is written as root below the signer's directory, and no file with the key
+lies in a working directory of the signer host.
 
 The PIN file holds the PIN on one line. The management key file holds the
 key in hex (16, 24 or 32 bytes).
@@ -281,8 +298,8 @@ root below that directory:
 sudo runuser -u keyroster-signer -- shred -u /etc/keyroster-signer/piv/mgmt-key
 ```
 
-Step 3's root `sudo install` form is for the first setup only, while root
-has just created the directory, and is never used again.
+Step 3 writes both files the same way: root creates the directory and
+nothing below it.
 
 `ca-init` stored the backend options, including the `mgmt-key-file` path.
 The signer reads the management key only when it writes to the card
