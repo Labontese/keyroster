@@ -247,18 +247,28 @@ on the signer host. Root creates only the directory:
 
 ```
 sudo install -d -o keyroster-signer -g keyroster-signer -m 0700 /etc/keyroster-signer/piv
-sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh /etc/keyroster-signer/piv/pin
-sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh /etc/keyroster-signer/piv/mgmt-key
+sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && [ ! -e "$1" ] && [ ! -L "$1" ] && trap "stty echo" EXIT && trap "exit 1" HUP INT TERM && stty -echo && printf "enter: " >&2 && IFS= read -r a && printf "\nagain: " >&2 && IFS= read -r b && printf "\n" >&2 && [ -n "$a" ] && [ "$a" = "$b" ] && printf "%s\n" "$a" >"$1" && printf "written: %s\n" "$1" >&2 || { printf "nothing written\n" >&2; exit 1; }' sh /etc/keyroster-signer/piv/pin
+sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && [ ! -e "$1" ] && [ ! -L "$1" ] && trap "stty echo" EXIT && trap "exit 1" HUP INT TERM && stty -echo && printf "enter: " >&2 && IFS= read -r a && printf "\nagain: " >&2 && IFS= read -r b && printf "\n" >&2 && [ -n "$a" ] && [ "$a" = "$b" ] && printf "%s\n" "$a" >"$1" && printf "written: %s\n" "$1" >&2 || { printf "nothing written\n" >&2; exit 1; }' sh /etc/keyroster-signer/piv/mgmt-key
 ```
 
-Type the PIN into the `cat` of the second line and paste the management
-key from the password manager into the `cat` of the third; end each with
-Enter and Ctrl-D. The terminal shows what you type. `set -C` refuses a file
-that already exists, so a second run changes nothing; to replace a file,
-remove it first as the signer's user
+Run the lines one at a time. The second asks for the PIN and the third for
+the management key, which you paste from the password manager: enter it at
+`enter:`, press Enter, enter it again at `again:` and press Enter. The
+terminal's echo is off while it asks, so nothing you type or paste is
+shown. The file is written only when both entries are equal and not empty;
+the command then prints `written:` and the file's path. After
+`nothing written`, or with neither line, run the line again. It refuses a
+path that already exists, whatever it is, before it asks: to replace a
+file, remove it first as the signer's user
 (`sudo runuser -u keyroster-signer -- rm -f` and the file's path). Nothing
 is written as root below the signer's directory, and no file with the key
 lies in a working directory of the signer host.
+
+With the echo off, the PIN and the key do not reach the terminal's
+scrollback or a recording of the terminal's output. A recorder of the
+terminal's input still sees them (sudo's I/O log does with `log_input`):
+run this step, and step 5's block, in a session that no such recorder
+follows.
 
 The PIN file holds the PIN on one line. The management key file holds the
 key in hex (16, 24 or 32 bytes).
@@ -319,15 +329,19 @@ again, in one block run on the signer host:
 sudo systemctl stop keyroster-signer.service
 K=/etc/keyroster-signer/piv/mgmt-key
 sudo runuser -u keyroster-signer -- rm -f "$K"
-sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$K"
+sudo runuser -u keyroster-signer -- sh -c 'umask 077 && set -C && [ ! -e "$1" ] && [ ! -L "$1" ] && trap "stty echo" EXIT && trap "exit 1" HUP INT TERM && stty -echo && printf "enter: " >&2 && IFS= read -r a && printf "\nagain: " >&2 && IFS= read -r b && printf "\n" >&2 && [ -n "$a" ] && [ "$a" = "$b" ] && printf "%s\n" "$a" >"$1" && printf "written: %s\n" "$1" >&2 || { printf "nothing written\n" >&2; exit 1; }' sh "$K"
 sudo runuser -u keyroster-signer -- keyroster-signer ca-rotate <arguments> --state-dir /var/lib/keyroster-signer; rc=$?; sudo runuser -u keyroster-signer -- shred -u "$K"; test "$rc" -eq 0 && sudo systemctl start keyroster-signer.service
 ```
 
 `<arguments>` is `prepare --role <role> --out <file>` or
-`retire-key --role <role>`, as the runbook step names them. Paste the key
-from the password manager into the `cat` of the fourth line and end it
-with Ctrl-D. The path is the one ca-init stored, so no `--backend-opt` is
-needed. The shred runs on every exit status of the command, so the key
+`retire-key --role <role>`, as the runbook step names them. Run the lines
+one at a time. The fourth line asks for the key twice with the terminal's
+echo off, as step 3 does: paste it from the password manager at `enter:`
+and again at `again:`, each followed by Enter. Go on to the last line
+only after the fourth has printed `written:` and the path; after
+`nothing written`, run the fourth line again. The path is the one ca-init
+stored, so no `--backend-opt` is needed. The shred runs on every exit
+status of the command, so the key
 leaves the host whatever prepare or retire-key returned. The signer is
 started only after the shred, and only when the command exited 0:
 

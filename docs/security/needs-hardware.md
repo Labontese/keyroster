@@ -59,6 +59,10 @@ firmware **5.3 to 5.6** (P-256). For each:
 - [ ] Follow docs/backends/piv.md steps 1-3 exactly: change PIN, PUK and
       management key with `ykman`, add the polkit rule, write the 0600 PIN
       and management key files. Note every command that needed a change.
+- [ ] The entry lines of piv.md steps 3 and 5, run through `sudo runuser`
+      on the signer host's terminal: nothing typed or pasted is shown,
+      `written:` appears only after two equal entries, and the terminal's
+      echo is on again afterwards, also after Ctrl-C.
 - [ ] Check that a user other than the signer user cannot use the card
       through `pcscd` (for example `ykman piv info` as another user fails).
 - [ ] Before `ca-init`: `ykman piv keys info 82` reports an empty slot, and
